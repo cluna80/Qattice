@@ -14,3 +14,7 @@ pub mod limits;
 pub mod leader;
 #[cfg(feature = "pq-hotstuff")]
 pub mod rules;
+#[cfg(feature = "pq-hotstuff")]
+pub mod certs;
+#[cfg(feature = "pq-hotstuff")]
+pub mod engine;
