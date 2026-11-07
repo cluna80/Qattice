@@ -1,0 +1,42 @@
+E01 engine: no leader check: CAUGHT (1 failing)
+E02 engine: no proposer signature check: CAUGHT (1 failing)
+E03 engine: parent certificate not verified: CAUGHT (1 failing)
+E04 engine: TC presence rule dropped: CAUGHT (1 failing)
+E05 engine: timeout certificate not verified: SURVIVED (0 failing)
+E06 engine: safe_to_vote skipped: CAUGHT (2 failing)
+E07 engine: commit without the consecutive-round check: CAUGHT (1 failing)
+E08 engine: own vote not counted as next leader: CAUGHT (2 failing)
+E09 engine: vote signature not verified: CAUGHT (1 failing)
+E10 engine: payload limit unchecked on receipt: CAUGHT (1 failing)
+E11 engine: TC not broadcast when formed: SURVIVED (0 failing)
+E12 engine: high QC never raised: CAUGHT (7 failing)
+E13 engine: restart re-signs instead of re-sending: CAUGHT (1 failing)
+E14 engine: second vote per voter-round counted: SURVIVED (0 failing)
+C01 certs: quorum check dropped: CAUGHT (2 failing)
+C02 certs: valset hash not compared: CAUGHT (3 failing)
+C03 certs: vote signatures not verified: CAUGHT (3 failing)
+C04 certs: timeout signatures not verified: CAUGHT (1 failing)
+C05 certs: nested max not compared: CAUGHT (1 failing)
+C06 certs: trailing bytes accepted (QC): CAUGHT (1 failing)
+C07 certs: bitmap padding unchecked: CAUGHT (1 failing)
+C08 certs: qc hash omitted from block id: CAUGHT (1 failing)
+C09 certs: genesis block certifiable: SURVIVED (0 failing)
+caught 19 of 23
+
+--- follow-up (after the first run above) ---
+First run: 19 of 23 caught. Survivors and what was done:
+E05 timeout certificate in a proposal not verified: SURVIVED -> test a_proposal_with_a_forged_timeout_certificate_is_rejected added; re-run: CAUGHT
+E11 TC not broadcast when formed: SURVIVED -> test a_timeout_certificate_is_broadcast_when_formed_and_a_received_one_advances_the_round added; re-run: CAUGHT
+C09 genesis block certifiable: SURVIVED (the existing case failed on signatures first) -> a validly signed QC for the genesis block added to qc_validity_rejections; re-run: CAUGHT
+E14 a voter's second vote in a round counted: SURVIVED, justified, not a safety check: the engine counts at most one vote per voter and round, but a Byzantine
+    voter's second vote could only add that voter to a second block, which the quorum-intersection argument already allows (f Byzantine voters may
+    equivocate). The honest-voter guarantee (never two votes in a round) is enforced by the safety store and tested in
+    a_node_votes_once_per_round_even_for_two_conflicting_proposals and the simulation. Equivocation EVIDENCE is later work (spec section 9).
+Final: 22 of 23 caught, 1 justified.
+
+NOTE ON ORDER OF WORK: for this module the engine was written BEFORE its tests (there is no failing-before run); the mutation check above and the
+defects the simulation found while the tests were being written are the substitute. Defects found by the tests while developing, all fixed:
+ 1. the encoder omitted the signature-list count of the draft layout (found by the spec size table: 10,086 / 20,128 bytes);
+ 2. commit_through treated an already-committed ancestor as a fork;
+ 3. a node did not count its own vote when it was the next leader;
+ 4. a node that formed a timeout certificate did not broadcast it, so one lost timeout message stalled the other nodes.
