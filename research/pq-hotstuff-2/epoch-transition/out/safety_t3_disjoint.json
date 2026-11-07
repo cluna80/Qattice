@@ -1,0 +1,7 @@
+{
+ "config": "safety_t3_disjoint",
+ "command": "java -XX:+UseParallelGC -Xmx6g -cp /tmp/claude-0/-home-user/035c2905-d7b6-5dfd-921f-7259c4e0a6ef/scratchpad/tla/tla2tools.jar tlc2.TLC -workers 4 -metadir /tmp/tlc-meta-safety_t3_disjoint -config /home/user/chain-forge-engine/research/pq-hotstuff-2/epoch-transition/cfg/safety_t3_disjoint.cfg /home/user/chain-forge-engine/research/pq-hotstuff-2/epoch-transition/EpochTransition.tla",
+ "seconds": 120.0,
+ "timed_out": true,
+ "result": "incomplete (time limit)"
+}
