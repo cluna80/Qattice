@@ -1,5 +1,6 @@
 //! PQ-HotStuff-2 safety-state persistence (spec section 7, Phase 1 step 1): fail-closed opening, exact message and envelope
-//! persistence, crash and fault injection at every step, rollback detection through a trusted counter.
+//! persistence, crash and fault injection at every step, rollback detection through a separate counter (a test double here; the
+//! counter a deployment relies on must be a trusted mechanism, spec 7.1).
 //!
 //! The doubles in tests/common/pq_safety_doubles.rs are NOT trusted mechanisms. The golden record digests come from an
 //! independent oracle (tests/vectors/gen_pq_hotstuff_safety_vectors.py).
@@ -85,7 +86,7 @@ impl World {
 
 fn open_err(w: &World, st: &MemStorage, ctr: &TestCounter) -> OpenError { w.open(st, ctr).err().expect("must not open") }
 
-/// The counter state a trusted counter would hold if the state file in `st` were the latest committed record.
+/// The counter state a counter would hold if the state file in `st` were the latest committed record.
 fn committed_state(st: &MemStorage) -> CounterState {
     let b = st.raw(STATE_FILE).expect("state file");
     let r = decode_record(&b).expect("decode");
@@ -150,8 +151,8 @@ fn initialization_is_refused_when_state_or_a_marker_already_exists() {
 }
 
 #[test]
-fn initialization_is_refused_when_the_trusted_counter_shows_the_identity_was_used() {
-    // both files deleted after use: the file side shows nothing, the trusted counter still remembers
+fn initialization_is_refused_when_the_separate_counter_shows_the_identity_was_used() {
+    // both files deleted after use: the file side shows nothing, the separate counter still remembers
     let mut w = World::new();
     let (_, ctr) = w.prior().into_parts();
     assert!(ctr.value > 0);
@@ -607,7 +608,7 @@ fn an_internally_inconsistent_record_is_refused() {
 
 #[test]
 fn each_rule_for_a_fresh_record_is_enforced_on_its_own() {
-    // The trusted counter is set to 1 and the record's counter to 1 so that the counter rules pass and only the rule under
+    // The test counter is set to 1 and the record's counter to 1 so that the counter rules pass and only the rule under
     // test can reject the record.
     let mut w = World::new();
     let (st, _ctr) = w.prior().into_parts();
@@ -643,7 +644,7 @@ fn a_leftover_temporary_file_is_ignored_and_cleared() {
 // ================================================================ rollback, staleness, the counter
 
 #[test]
-fn a_restored_old_backup_is_detected_through_the_trusted_counter() {
+fn a_restored_old_backup_is_detected_through_a_separate_counter() {
     let mut w = World::new();
     let (st, ctr) = w.prior().into_parts();
     let backup = st.files(); // the operator's backup, taken at counter 4
@@ -651,7 +652,7 @@ fn a_restored_old_backup_is_detected_through_the_trusted_counter() {
     do_sign(&mut s, &mut w.signer, K::Vote, 1, 6, 1).unwrap();
     let (mut st, ctr) = s.into_parts();
     assert_eq!(ctr.value, 5);
-    st.restore(backup); // yesterday's files come back; the trusted counter cannot be restored
+    st.restore(backup); // yesterday's files come back; the separate counter cannot be restored
     assert_eq!(open_err(&w, &st, &ctr), OpenError::Rollback { file_counter: 4, trusted_counter: 5 });
 }
 
@@ -668,7 +669,7 @@ fn rollback_is_not_detectable_if_the_counter_is_rolled_back_too_so_an_ordinary_f
     let (mut st, _) = s.into_parts();
     st.restore(backup);
     let untrusted = TestCounter::with_state(old_state, w.f.clone()); // restored together with the file
-    let s2 = w.open(&st, &untrusted).expect("opens: the rollback is invisible without a trusted counter");
+    let s2 = w.open(&st, &untrusted).expect("opens: the rollback is invisible without a counter outside the attacker's reach");
     assert_eq!(s2.record().hvr, Some(5), "stale: the vote at round 6 is forgotten");
 }
 
@@ -1204,6 +1205,95 @@ fn the_recovery_advance_commits_the_file_digest_from_the_committed_state() {
     s_open(&w, &st, &sc).expect("the successor of the committed record is adopted");
     assert_eq!(sc.digests(), vec![(r.prev_digest, file_digest)]);
     assert_eq!(sc.state(), CounterState { value: r.counter, digest: file_digest });
+}
+
+// ================================================================ counter overflow: u64::MAX fails closed (spec 7.1)
+
+#[test]
+fn open_with_the_counter_at_u64_max_fails_closed_with_an_explicit_error_and_touches_nothing() {
+    let mut w = World::new();
+    let (st, _) = w.prior().into_parts();
+    let at_max = rewrite(&st, |r| r.counter = u64::MAX);
+    let sc = SharedCounter::with_state(committed_state(&at_max), w.f.clone());
+    assert_eq!(sc.value(), u64::MAX);
+    w.reset_plan();
+    let before = sc.state();
+    let e = s_open(&w, &at_max, &sc).err().expect("must not open");
+    assert_eq!(e, OpenError::CounterExhausted { value: u64::MAX });
+    // nothing was touched: no counter operation, no session acquired, no storage operation, the state file unchanged
+    assert!(sc.calls().is_empty(), "no advance may be attempted");
+    assert_eq!(sc.session_token(), 0, "no session may be acquired");
+    assert_eq!(sc.state(), before);
+    assert!(w.f.borrow().log.is_empty(), "no write, fsync, rename or counter operation");
+    assert_eq!(at_max.raw(STATE_FILE).unwrap(), rewrite(&st, |r| r.counter = u64::MAX).raw(STATE_FILE).unwrap());
+}
+
+#[test]
+fn a_counter_at_u64_max_against_a_smaller_file_fails_closed_with_an_explicit_error_not_an_overflow() {
+    // the rule table computes "the committed value plus one"; with the committed value at u64::MAX that sum does not exist
+    let mut w = World::new();
+    let (st, _) = w.prior().into_parts();
+    let f = decode_record(&st.raw(STATE_FILE).unwrap()).unwrap().counter;
+    assert!(f < u64::MAX - 1);
+    let sc = SharedCounter::with_state(CounterState { value: u64::MAX, digest: [0x42; 32] }, w.f.clone());
+    w.reset_plan();
+    let e = s_open(&w, &st, &sc).err().expect("must not open");
+    assert_eq!(e, OpenError::CounterExhausted { value: u64::MAX });
+    assert!(sc.calls().is_empty(), "no advance may be attempted");
+    assert_eq!(sc.session_token(), 0, "no session may be acquired");
+    assert_eq!(sc.state(), CounterState { value: u64::MAX, digest: [0x42; 32] });
+    assert!(w.f.borrow().log.is_empty());
+}
+
+#[test]
+fn signing_at_a_record_counter_of_u64_max_returns_counter_exhausted_without_signing_or_advancing() {
+    let mut w = World::new();
+    let (st, _) = w.prior().into_parts();
+    // one below the maximum: opens, and the next commit may use the last value
+    let near = rewrite(&st, |r| r.counter = u64::MAX - 1);
+    let sc = SharedCounter::with_state(committed_state(&near), w.f.clone());
+    let mut s = s_open(&w, &near, &sc).expect("u64::MAX - 1 is a valid counter");
+    let first = do_sign_s(&mut s, &mut w.signer, K::Vote, 6).expect("the commit that reaches u64::MAX is allowed");
+    assert_eq!(s.record().counter, u64::MAX);
+    assert_eq!(sc.value(), u64::MAX);
+    // the record counter is now at the maximum: any further new commit would overflow
+    let signer_calls = w.signer.calls;
+    let advances = sc.calls().len();
+    let counter_state = sc.state();
+    w.reset_plan();
+    let before = s.record().clone();
+    let e = do_sign_s(&mut s, &mut w.signer, K::Timeout, 6).unwrap_err();
+    assert_eq!(e, SignError::CounterExhausted);
+    assert_eq!(w.signer.calls, signer_calls, "the signer must not be asked to sign");
+    assert_eq!(sc.calls().len(), advances, "no counter advance may be attempted");
+    assert_eq!(sc.state(), counter_state, "the trusted counter must not change");
+    assert!(w.f.borrow().log.is_empty(), "nothing may be written");
+    assert_eq!(s.record(), &before, "and nothing may be recorded");
+    // no signature was returned: a refusal carries none, and the re-send of the already committed vote is not a new commit
+    let again = do_sign_s(&mut s, &mut w.signer, K::Vote, 6).expect("an identical, already committed message is still re-sent verbatim");
+    assert!(again.resent);
+    assert_eq!(again.envelope.encode().unwrap(), first.envelope.encode().unwrap());
+    assert_eq!(w.signer.calls, signer_calls, "a re-send does not sign either");
+}
+
+#[test]
+fn the_boundary_just_below_u64_max_is_not_refused_by_mistake() {
+    // a file at u64::MAX one ahead of a counter at u64::MAX - 1 is the ordinary crash window and must still be adopted
+    let mut w = World::new();
+    let (st, _) = w.prior().into_parts();
+    let at_max = rewrite(&st, |r| r.counter = u64::MAX);
+    let r = decode_record(&at_max.raw(STATE_FILE).unwrap()).unwrap();
+    let sc = SharedCounter::with_state(CounterState { value: u64::MAX - 1, digest: r.prev_digest }, w.f.clone());
+    s_open(&w, &at_max, &sc).expect("the last value is reachable");
+    assert_eq!(sc.value(), u64::MAX);
+}
+
+#[test]
+fn a_forged_file_counter_of_u64_max_against_a_small_counter_is_inconsistent_not_a_panic() {
+    let mut w = World::new();
+    let (st, ctr) = w.prior().into_parts();
+    let forged = rewrite(&st, |r| r.counter = u64::MAX);
+    assert_eq!(open_err(&w, &forged, &ctr), OpenError::CounterInconsistent { file_counter: u64::MAX, trusted_counter: ctr.value });
 }
 
 // ================================================================ golden record format (independent oracle)
