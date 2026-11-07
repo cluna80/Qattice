@@ -1,5 +1,35 @@
 # Qattice — Public Testnet Alpha: ML-DSA-65 + PQ-HotStuff Launch Plan
 
+## Owner architecture decision — 2026-11-07: PQ-HotStuff-2-native Qattice (LOCKED)
+
+> **Superseding direction; documentation only.** This decision supersedes older Qattice development plans wherever they require migrating a Tendermint chain to PQ-HotStuff-2 or retaining Tendermint in the **new Qattice network's active consensus path**. Historical milestones and test evidence below remain intact. This roadmap change does not implement an engine, close an acceptance gate, merge PR #130, activate a network, or authorize production key handling.
+
+### Product and repository boundaries
+
+- **Qattice:** its next clean-slate network starts at **genesis block 1 with PQ-HotStuff-2**, using a fresh genesis, fresh chain/network identifiers, fresh validator keys and independent data directories. PQ-HotStuff-2 is its intended exclusive production consensus. **No Tendermint-to-PQ-HotStuff migration, state-history conversion, or preservation of disposable Tendermint devnet history is required.** Existing Tendermint devnets may be retained strictly as historical/regression fixtures until no longer useful; they are not the launch path.
+- **Chain Forge blockchain builder (separate repository):** expose **PQ-HotStuff-2 as a selectable reusable consensus engine** and **retain Tendermint as a separate selectable option**. Do not remove Tendermint from the builder. Work in the separate Chain Forge repository requires its own scoped implementation change and review; this roadmap edit changes that repository in no way.
+- **Reuse, do not rewrite:** preserve working execution, state, P2P, DIS/personhood, tokenomics, governance, PoCD and cryptographic modules where compatible. Keep generic consensus mechanics behind stable interfaces and Qattice-specific personhood eligibility, bounded voting power, staking and rewards in policy/integration layers. Do not use the legacy HotStuff implementation as a substitute for the new PQ-HotStuff-2 engine.
+- **Security:** fresh-chain transaction and validator authorization must use the approved FIPS 204 ML-DSA-65 signing profile. Crash-safe signing, deterministic canonical encoding, correct QC/TC verification, bounded network envelopes and authenticated genesis are mandatory; no silent downgrade to legacy signatures. Do not claim post-quantum transport until separately validated.
+
+### Accelerated critical path — minimum decisive evidence, no redundant testing
+
+| Stage | Deliverable | Release/implementation gate |
+|---|---|---|
+| **1. Resolve safety-critical specifications** | Targeted PO-4 epoch-transition model checking, including disjoint validator sets; canonical transaction encoding (U5), successor-set/revocation rules (U19), message and validator limits. Use bounded searches with explicit coverage; report inconclusive timeouts rather than passes. | Do not enable dynamic membership or implement unresolved transition rules until reviewed. A bounded pass is evidence, not an unbounded proof. |
+| **2. Build independent engine core** | Modular PQ-HotStuff-2 proposal/vote/timeout, QC/TC, pacemaker, two-chain commit, FIPS 204 authentication and persistent safety state; reuse existing approved wire and crypto components. | Targeted safety, crash/restart, signature and canonical-format tests; no production activation. Work independent of PO-4 may proceed on isolated draft branches. |
+| **3. Native Qattice devnet** | Fresh PQ-HotStuff-2 genesis and a four-node devnet producing, finalizing and executing blocks. Keep validator membership static until PO-4 is resolved. | Four-node agreement, restart/recovery, bounded fault and partition/rejoin checks; no conflicting commits. |
+| **4. Membership and builder option** | Implement reviewed epoch transitions and validator lifecycle; provide PQ-HotStuff-2 selection in Chain Forge without removing Tendermint. | Epoch safety/liveness evidence and independent review; builder integration verified in its own repository. |
+| **5. Scale and release** | Benchmark the existing **1,000-validator / <3-second finality** target, document resource and certificate-size limits, complete remaining QAT release/security gates. | Performance is a target, not a claim; no public-alpha/mainnet activation without explicit approval. |
+
+### Change control and time discipline
+
+- Do **not** build Tendermint migration tools or rewrite unrelated subsystems. Prefer the smallest test that can detect each concrete safety, correctness, persistence, interoperability or performance failure; avoid repeated broad suites without a relevant change or new coverage.
+- **PR #130 remains an unmerged draft.** PO-4 cross-epoch safety, K1/K2 persistence conflicts, U5 transaction encoding and U19 membership semantics remain open; a new-genesis decision does **not** remove these internal PQ-HotStuff-2 obligations.
+- Implement behind separately reviewed changes and preserve the existing mainline until approved. Documentation decisions do not by themselves authorize merges, key generation, live network activation or edits to the separate Chain Forge repository.
+
+---
+
+
 
 ## PQ-HotStuff-2 implementation status — 2026-11-06 (newest status; documentation-only)
 
