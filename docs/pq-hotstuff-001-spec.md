@@ -144,6 +144,123 @@ For `alg_id = 1` the public key length must be exactly 1952 and the signature le
    Only data that is not consensus-critical is outside the commitment: the proposer's own block signature (it signs `block_id`), local receive time and gossip metadata. A verifier **recomputes** `block_id` from the received fields and never trusts an identifier carried on the wire. Votes, timeouts and QCs bind to `block_id`, so a substituted field in a proposal invalidates every vote that was cast for the original.
 7. **Required tests (field substitution), all negative:** for each field in the list above, taking an otherwise valid proposal and changing only that field (while keeping the original `block_id` and the original proposer signature, and separately recomputing `block_id` and keeping the old signature) is rejected, and a vote or QC for the original block never validates for the altered one. This includes: swapping or reordering transactions, altering the state root, dropping or altering evidence, changing the timestamp, replacing the QC's signatures or bitmap, adding, removing or altering `tc`, changing `proposer`, `height`, `round`, `epoch`, `chain_id` or `protocol_profile`, and replaying the block under a different profile. Mutation tests that remove each field from the `block_id` input must fail at least one of these tests.
 
+
+### 3.3 BlockPayload serialization (PROPOSED, owner review pending)
+
+**Status.** Proposed on 2026-11-07 as a docs-only draft. It fills the gap named in §3.2 rule 6 ("the exact payload byte layout must be added to this section before Phase 0 code is written"). It is not a decision until the owner approves it, and it changes no existing normative layout. The companion document `docs/pq-hotstuff-2/serialization-analysis.md` holds the compatibility analysis, the acceptance matrix and the open decisions (referenced below as **U1…U14**).
+
+**Relation to the code.** The `BlockPayload` in `chain-forge-node` (`node.rs`) is the legacy Tendermint-era JSON envelope (`version`, `txs`, `last_commit`, `prev_state_root`, `evidence`) carried in `BlockProposal::tx_data`. It is not canonical, and PQ-HotStuff-2 does not reuse it. The type below is a new, separate encoding selected by the protocol profile; the legacy type is untouched.
+
+**Layout** (new tag `CFH1|payload|`, prefix-free with the existing tags):
+
+| Field | Type | Rule |
+|---|---|---|
+| tag | `CFH1\|payload\|` | constant |
+| `payload_version` | `u16` | exactly `1`; any other value is refused (no negotiation) |
+| `timestamp_ms` | `u64` | proposer wall-clock milliseconds; bounds in §3.5 (validity, not serialization) |
+| `prev_state_root` | `option<bytes32>` | the state root after committing `height - 1`; absent only when `height == 1` (U6) |
+| `txs` | `list<bytes>` | execution order, **not sorted** (order is semantic); each element is one transaction's canonical bytes (U5) |
+| `evidence` | `list<EvidenceItem>` | committed equivocation evidence (§9), canonical order below |
+
+`H(payload)` in the `block_id` input is `SHA3-256` of the complete canonical encoding above, tag included. There is no separate transaction root: `txs` are inside the hashed encoding, so the set, the order and every byte are committed (§3.2 rule 6).
+
+**Not in the payload.** `epoch`, `round`, `height`, `parent_id`, `chain_id`, `protocol_profile`, `proposer`, `qc` and `tc` are direct inputs to `block_id` (§3.2) and are not repeated here, so they cannot disagree. There is no `last_commit`: the block's `qc` certifies the parent, and its signer bitmap is the participation evidence for the parent height (§3.4, U9). Execution results (receipts, new state root) are not in the block that executes them; the new root is committed by the next block's `prev_state_root`, as today.
+
+**EvidenceItem** (canonical, self-contained; the `kind` values 1 and 2 are the two types of §9):
+
+| Field | Type | Rule |
+|---|---|---|
+| `kind` | `u8` | `1` double vote, `2` double proposal; other values refused |
+| `offender` | `string` | validator address, at most 255 bytes |
+| `epoch`, `round` | `u64`, `u64` | the position both messages claim |
+| `message_a`, `message_b` | `bytes`, `bytes` | the two canonical signed messages of §3.2 (vote messages for kind 1, block signing messages for kind 2) |
+| `envelope_a`, `envelope_b` | signature envelope ×2 | one per message |
+
+Rules: `message_a` is strictly smaller than `message_b` in bytewise order (so equal messages, which are not evidence per §9, and swapped pairs are both non-canonical); both messages decode under §3.2 and re-encode to identical bytes; both name the same `epoch`, `round` and `alg_id`, and for kind 1 the same voter. `evidence_id = SHA3-256` of the canonical `(kind, offender, epoch, round, message_a, message_b)`; items appear in ascending `evidence_id` order and an `evidence_id` appears at most once. Whether the signatures verify, whether the offender was in `V_epoch`, and whether the item is within the age limit are **validity** questions (§3.5), not serialization.
+
+**Limits** (checked before allocation; all from genesis `limits` where one exists):
+- encoded payload length ≤ `limits.max_block_bytes` (devnet value 1,048,576);
+- each `txs` element ≤ `limits.max_tx_bytes`, and `count(txs)` is bounded by `max_block_bytes` divided by the smallest encoded transaction (U5 sets the exact bound; until then a decoder must not preallocate from the count);
+- `count(evidence) ≤ 16` (`MAX_EVIDENCE_PER_BLOCK`, gate 4), each item ≤ 16 KiB (two vote messages plus two ML-DSA-65 envelopes is under 7 KiB);
+- `string` limits as in §3.2.
+
+**Strict decoding.** The decoder reads exactly one payload from the bytes, with these checks in this order: length against the limit; tag; `payload_version`; each field in order with every `list` count checked against the remaining bytes before any allocation; `option` byte 0 or 1; evidence canonical order and uniqueness; then **no trailing bytes**. It then re-encodes and requires identical bytes. Duplicate transactions (same transaction id, U5), a non-canonical evidence order, a repeated `evidence_id`, an unknown version or tag, and any truncation are errors. A decoder never returns a partial result.
+
+### 3.4 Quorum and timeout certificate serialization (PROPOSED, owner review pending)
+
+**Status.** Proposed, as §3.3. The data types of §3 gain fields (`version`, `alg_id`, `validator_set_hash`) and a defined signer order; the field-level differences are listed in the analysis document. Signed message layouts (§3.2 vote and timeout messages) are **not** changed by this section (U1 asks whether to change them).
+
+**Validator order and index.** The *canonical validator order* of epoch `e` is the registered validators of `V_e` sorted by ascending bytewise comparison of the UTF-8 address string; addresses are unique. A validator's *index* is its position in that order. Every registered validator occupies an index, including a validator whose power is 0, so the bitmap length is `|V_e|` and stable within the epoch (U3). The set is committed by:
+
+`validator_set_hash(e) = SHA3-256( tag "CFH1|valset|" · version u16 (=1) · alg_id u16 · epoch u64 · list<entry> )`, where `entry = address string · public_key bytes · voting_power u64`, in canonical validator order. Public keys and addresses must each be unique within the list. (The hash is computed by every node from its own copy of `V_e`; it is never taken from a peer.)
+
+**QuorumCert v1** (tag `CFH1|qc|`):
+
+| Field | Type | Rule |
+|---|---|---|
+| tag | `CFH1\|qc\|` | constant |
+| `version` | `u16` | exactly `1` (the QC v1 signature list of §10; QC v2 gets another value and its own review) |
+| `alg_id` | `u16` | the profile's algorithm (1); mismatch refused before any crypto |
+| `epoch`, `round` | `u64`, `u64` | |
+| `block_id`, `parent_id` | `bytes32`, `bytes32` | |
+| `parent_round` | `u64` | |
+| `validator_set_hash` | `bytes32` | must equal the verifier's own `validator_set_hash(epoch)` |
+| `signers` | `bitmap` | bit count exactly `|V_epoch|`; bit `i` set means validator index `i` signed |
+| `signatures` | `list<signature envelope>` | count equals the number of set bits; element `j` belongs to the `j`-th set bit, ascending |
+
+The fields `epoch … parent_round` are exactly those of the §3.2 vote message, so the verifier **reconstructs** each signer's vote message from the QC fields plus its own `chain_id` and the profile `alg_id`, and verifies each envelope over it with context `qattice/vote/v2`. The certificate carries no `chain_id` of its own: a chain id supplied by the sender would be an unauthenticated claim, whereas the local chain id is part of every reconstructed message, so a QC from another chain fails signature verification (§3.5).
+
+`H(qc)` in the `block_id` input is `SHA3-256` of the complete canonical QC encoding, tag included. It therefore commits to the signer bitmap and every signature envelope (§3.2 rule 6). Because signing is hedged, two QCs for the same block assembled from different signers or different signatures have different `H(qc)`, and so blocks that carry them have different `block_id`s. That is intended (the proposer cannot swap signatures after the block is formed) and is covered by §9: a leader that signs two such blocks in one round has double-proposed.
+
+**TimeoutCert v1** (tag `CFH1|tc|`):
+
+| Field | Type | Rule |
+|---|---|---|
+| tag | `CFH1\|tc\|` | constant |
+| `version` | `u16` | exactly `1` |
+| `alg_id` | `u16` | as above |
+| `epoch`, `round` | `u64`, `u64` | |
+| `validator_set_hash` | `bytes32` | as above |
+| `signers` | `bitmap` | as for the QC |
+| `high_qc_rounds` | `list<u64>` | count equals the number of set bits, aligned with the signers in ascending index order: entry `j` is the `high_qc_round` that signer `j` signed |
+| `signatures` | `list<signature envelope>` | aligned the same way |
+| `high_qc` | `QuorumCert v1` | the full canonical QC encoding, nested, own tag included |
+
+The verifier reconstructs signer `j`'s timeout message (§3.2: `alg_id · chain_id · epoch · round · high_qc_round`, with its own `chain_id`) from `high_qc_rounds[j]` and verifies it with context `qattice/timeout/v2`. `H(tc)` in the `block_id` input is `SHA3-256` of the complete canonical TC encoding, so it commits to the nested `high_qc`. The timeout signature signs a round number, not the QC itself (§3), so `high_qc` is bound to the TC only through that round and through `H(tc)`; U8 records this.
+
+**Signature envelope** is the existing `{ alg_id u16 · signature bytes }` of §3.2. For `alg_id = 1` the length is exactly 3309, so each envelope is exactly 3315 bytes; any other length is refused at decode.
+
+**Size and bounds.** Every count is checked against the verifier's `|V_epoch|` and the remaining input before allocation. `signers` bit count must equal `|V_epoch|` exactly, so a certificate cannot declare a larger or smaller set; `count(signatures) ≤ |V_epoch|`; a hard decoder ceiling `MAX_CERT_VALIDATORS` applies before the epoch is known (U4 proposes 1024, to be set from D2/M0). Sizes with the v1 signature list (computed from the layouts above; they match §10 to within the header):
+
+| n | quorum k | QC bytes | TC bytes (k timeouts, nested QC) |
+|---|---|---|---|
+| 4 | 3 | 10,086 | 20,128 |
+| 7 | 5 | 16,716 | 33,404 |
+| 16 | 11 | 36,607 | 73,234 |
+| 31 | 21 | 69,759 | 139,618 |
+| 100 | 67 | 222,258 | 444,984 |
+
+A block carries one QC and at most one TC, so its consensus overhead at n = 100 is below 700 KB; whether that fits `max_block_bytes` is a genesis-limits question (U4), not a serialization one.
+
+**Strict decoding.** One certificate per call, in field order; tag, `version`, `alg_id` first; bitmap pad bits zero; `count(signatures)` (and `count(high_qc_rounds)`) equal to `popcount(signers)` and checked before allocation; each envelope exactly the profile length; no trailing bytes; decode then encode must give identical bytes. A bitmap that is not in ascending-index form cannot occur (it is a bitmap), and an element order that differs from ascending index cannot be expressed, so reordered or duplicated signers are not canonical encodings but **misaligned signatures**, which fail verification (§3.5); the decoder reports them as errors where it can detect them structurally (count mismatch).
+
+### 3.5 Serialization versus validity (normative principle for §3.3 and §3.4)
+
+A **canonical** object is one whose bytes decode under §3.3 or §3.4 and re-encode identically. A **valid** object is a canonical object that also satisfies every check below against the verifier's own state. **Canonical does not imply valid**, and the decoder performs no validity check that needs signatures, the validator set or chain state. Both stages are required, and a node acts on an object only after both.
+
+**QC validity** (extends §3 "QC validity"; checked in this order, stopping at the first failure, nothing counted before it passes):
+1. `alg_id` equals the profile's; `epoch` is known to the verifier; `validator_set_hash` equals the locally computed `validator_set_hash(epoch)`; the bitmap bit count equals `|V_epoch|`.
+2. Every set bit indexes a validator with power > 0 (U3); the signer count equals the signature count.
+3. For each signer, in ascending index order: the envelope's `alg_id` is the profile's and its length is exact; the reconstructed vote message (local `chain_id`) verifies under the validator's registered key with context `qattice/vote/v2`.
+4. Total power of the signers, summed in `u128` (never a wrapping `u64` add), is at least `q = ⌊2T/3⌋ + 1` for the epoch's total power `T`.
+5. `block_id`/`parent_id`/`parent_round` agree with the block the certificate is attached to or certifies, where the rule that uses the QC says so (§5, §6).
+
+**TC validity** (extends §3 "TC validity"): the same steps over timeout messages, with each signer's own `high_qc_rounds[j]`; the nested `high_qc` is itself a valid QC for its own epoch; `high_qc.round == max(high_qc_rounds)`; `high_qc.round < tc.round`; and the power condition of step 4.
+
+**Replay and substitution.** Because every signed message binds `chain_id`, `epoch`, `round` and `alg_id`, and the verifier supplies `chain_id` and the profile itself, a certificate copied from another chain, another epoch, another round or another algorithm fails step 3. Because votes and timeouts use different tags and contexts, a vote signature never validates as a timeout, a proposal or a PoP (§3.1). A certificate for epoch `e` is verified only against `V_e`; a `validator_set_hash` that names another set is refused at step 1 even when the signatures would verify under the keys of both.
+
+**Failure behaviour.** A decode error, or a failed validity step, makes the node discard the enclosing message (proposal, vote bundle, timeout bundle) without voting, without changing safety state and without counting power. A node never repairs, re-orders or re-encodes a received certificate to make it pass, and never forwards an object it rejected. Evidence of misbehaviour is created only through §9 committed evidence, never from a rejected certificate.
+
 ---
 
 ## 4. Leader selection
