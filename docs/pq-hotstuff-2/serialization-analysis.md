@@ -1,8 +1,23 @@
 # PQ-HotStuff-2: BlockPayload and QC/TC serialization — analysis, acceptance matrix, open decisions
 
-**Status:** DRAFT, docs only. Baseline: `main` at `b966ce7ac726cce44be6acef00459fec00f0d5b1`.
-**Normative text proposed in:** `docs/pq-hotstuff-001-spec.md` §3.3 (BlockPayload), §3.4 (QC/TC), §3.5 (serialization versus validity).
+**Status:** DRAFT, docs only. **Revision 2** (after independent review; revision 1 was head `24fa807`). Baseline: `main` at `b966ce7ac726cce44be6acef00459fec00f0d5b1`.
+**Normative text proposed in:** `docs/pq-hotstuff-001-spec.md` §3.3 (BlockPayload), §3.4 (certificates, genesis certificate, limits), §3.5 (serialization versus validity, timestamp, evidence, cross-epoch, timeout rationale).
 **Nothing here is implemented, activated or approved.** No Rust, Tendermint, consensus-engine, key-storage, counter or roadmap change accompanies it.
+
+## 0. Revision 2: what changed and what was found
+
+Requested items 1–10 map to: U1 → spec §3.4.2; U4 → §3.4.3; U5 → §3.3 "Blocked dependency"; U6 → §3.4.7; U7 → §3.5.1; U8 → §3.5.6; U9 → §3.4.6; U10 → §3.3 EvidenceItem and §3.5.3; cross-epoch TC → §3.5.4; address and signer order → §3.4.1.
+
+Defects in revision 1 found while revising (all fixed in text; disclosed here):
+1. **Double-proposal evidence was under-specified.** The block signing message holds only `alg_id` and `block_id`, so it states no round, epoch or proposer. `EvidenceItem` now carries, for kind 2, the `CFH1|blockid|` preimage of each block id.
+2. **The vote message names no voter.** Offender identity comes only from which registered key verifies both envelopes; §3.5.3 requires both signatures under the same offender key.
+3. **The TC could not express "no QC yet"** (round-1 timeouts have `high_qc_round = 0`). The nested field is now a certificate that may be a `GenesisCert` only when all rounds are 0.
+4. **Block budget mixing.** Revision 1 left unclear whether certificates count against `max_block_bytes`; they now have a separate budget.
+5. **Genesis hash is SHA-256 over compact `serde_json`** (`compute_genesis_hash`, 64 hex characters), not SHA3-256 and not a binary canonical form. The genesis certificate uses it as given (decoded to 32 bytes) and the mismatch with the SHA3-256 profile is recorded as U16.
+6. **Round numbering across epochs is unspecified** in §3 and §8. The cross-epoch rules assume chain-global rounds; this is U15.
+7. The block as transmitted has no specified wire layout (only its `block_id` input, payload and certificates do); recorded as U18.
+
+Nothing in the approved signed-message formats, the merged wire code or any Rust file changed.
 
 ## 1. Compatibility analysis (field level, against the merged spec and code)
 
@@ -119,9 +134,50 @@ Method (as for #125): tests first with a recorded red run; golden vectors from a
 | B-04 | Keep the old `block_id` and proposer signature with an altered body; and recompute `block_id` keeping the old signature | Both rejected |
 | B-05 | The verifier ignores any `block_id` carried on the wire | Pass |
 
+### 3.3a Additions in revision 2 (the revision-1 matrix above is preserved unchanged)
+
+| ID | Test | Expected result |
+|---|---|---|
+| U1-01 | Two different validator sets (any change of address, key or power) produce different `validator_set_hash`; the same set in a different input order is refused by the builder | Pass |
+| U1-02 | Reconfiguration (revocation, rotation, power change) always yields a new epoch number; an epoch-change block that reuses an epoch number is invalid | Pass |
+| U1-03 | Certificate for epoch e+1 arriving before the epoch-change block is committed | Unverifiable: not accepted, not counted, no vote, no evidence; accepted after commit |
+| U1-04 | QC whose `validator_set_hash` is another epoch's, with signatures valid under keys present in both sets | Rejected at step 1 |
+| L-01 | `MAX_CERT_VALIDATORS` exceeded by a declared bitmap; `|V_e| > V_profile` at genesis or at an epoch change | Decode rejected before allocation; startup / block refused |
+| L-02 | QC and TC at `QC_max(n)`, `TC_max(n)` accepted; one byte more rejected; formulas match the encoder for n = 1, 4, 31, 1024 | Pass |
+| L-03 | Envelope budget: genesis whose `max_block_bytes + QC_max + TC_max + 3315 + 512` exceeds the network message limit | Startup refused |
+| L-04 | Adding validators does not change the payload limit; a payload valid at n=4 stays valid at n=31 | Pass |
+| L-05 | Version 2 QC bytes under a v1 profile and v1 under a v2 profile; mixed versions in one epoch; version inferred from length | Rejected at the version field before any length-dependent step |
+| A-01 | Address with uppercase variant, trailing space, NUL, non-UTF-8, 256 bytes, empty; two spellings of one identity at registration | Rejected / second spelling refused |
+| A-02 | Validator order uses bytewise UTF-8 (a vector where locale/case-insensitive order differs) | Bytewise order |
+| A-03 | Signature list in descending order, duplicated, or one signature repeated for two bits | Count mismatch at decode or signature failure; never accepted |
+| G-01 | `GenesisCert` golden vector; round trip; truncation and trailing bytes | Pass / rejected |
+| G-02 | `GenesisCert` bytes in the QC decoder and QC bytes in the genesis decoder | Tag mismatch |
+| G-03 | Empty-bitmap, zero-signature QC for the genesis block | Decodes as a QC, rejected: power 0 < q, and `block_id == genesis_block_id` |
+| G-04 | `GenesisCert` as parent of a block with height > 1; as nested cert in a TC with a non-zero `high_qc_rounds` entry; as a counted QC anywhere | Rejected |
+| G-05 | `GenesisCert` with wrong chain_id, profile, `genesis_hash`, epoch-0 set hash, `alg_id` | Rejected (equality with the locally derived value) |
+| G-06 | Vote for a height-1 block with `parent_id` ≠ `genesis_block_id` or `parent_round` ≠ 0 | Rejected |
+| G-07 | QC with `round == 0` | Rejected |
+| G-08 | `genesis_block_id` collides with no `block_id` input (distinct tags) | Pass |
+| TS-01 | Timestamp equal to or below the parent's; height 1 at or below `genesis_time_ms` | Invalid, no vote |
+| TS-02 | Validity result identical with the local clock set to 1970, now, and year 2100 | Identical (no clock input) |
+| TS-03 | Proposal ahead of the local clock by more than the skew parameter | Vote delayed only; block not marked invalid; accepted on replay/sync regardless of clock; no evidence |
+| TC-X1 | Cross-epoch TC: nested QC from epoch e verified against V_e in a TC of epoch e+1 | Accepted when valid |
+| TC-X2 | Nested QC with epoch later than the TC's; with an epoch label that does not equal `epoch_of(round)`; with `nested.round ≥ tc.round`; nested epoch commitment not held | Rejected / unverifiable |
+| TC-X3 | Nested QC valid under V_{e+1} but labelled epoch e (or the reverse) | Rejected (checked against its own epoch's hash) |
+| TC-X4 | TC signer from V_e inside a TC of epoch e+1 | Rejected |
+| TM-01 | Timeout signed with `high_qc_round` lower than the signer's persisted `hqr` | Refused by the safety store (existing #127 tests extended) |
+| TM-02 | TC maximum taken over unverified or misaligned rounds | Cannot occur: any change breaks a signature (mutation target) |
+| PA-01 | Bitmap membership is not used as a reward/penalty input (no code path reads it for that) | Reviewed in the codec PR; absent |
+| E-01 | Evidence with signature A invalid; with signature B invalid; both valid | Rejected; rejected; accepted |
+| E-02 | Both signatures valid but under two different validators' keys; offender claim naming a third validator; offender not in `V_epoch`; offender key of another epoch | Each rejected |
+| E-03 | Kind 2 without preimages; preimage hash ≠ `block_id`; preimages naming different round/epoch/proposer than the item; proposer ≠ offender; offender not the leader of the round | Each rejected |
+| E-04 | Wrong context for the kind (vote context on a proposal pair and the reverse) | Rejected |
+| E-05 | Block containing one invalid evidence item | The whole block is invalid; nothing is slashed |
+| E-06 | Same `evidence_id` already committed; older than `EVIDENCE_MAX_AGE_BLOCKS` | Rejected |
+
 ### 3.4 Mutation targets (each mutant must be caught)
 
-Remove or weaken: the tag check; version check; trailing-byte check; re-encode check; count-before-allocation check; pad-bit check; bitmap length equality; signature-count equality; alignment of rounds with signers; envelope length check; evidence ordering check; evidence uniqueness; `validator_set_hash` comparison; chain-id injection (use a constant); `alg_id` injection; context per message type (vote/timeout swapped); power threshold (`>=` to `>`; `q` off by one; `u64` wrap); duplicate-signer handling; each `block_id` input field (spec rule 7); `max(high_qc_rounds)` check; `high_qc.round < tc.round` check.
+Remove or weaken: the tag check; version check; trailing-byte check; re-encode check; count-before-allocation check; pad-bit check; bitmap length equality; signature-count equality; alignment of rounds with signers; envelope length check; evidence ordering check; evidence uniqueness; `validator_set_hash` comparison; chain-id injection (use a constant); `alg_id` injection; context per message type (vote/timeout swapped); power threshold (`>=` to `>`; `q` off by one; `u64` wrap); duplicate-signer handling; each `block_id` input field (spec rule 7); `max(high_qc_rounds)` check; `high_qc.round < tc.round` check. Revision 2 adds: remove each evidence check of §3.5.3 (signature A only, signature B only, same-key check, offender membership, leader check, preimage hash); genesis equality check; `round == 0` and `block_id == genesis_block_id` rejection; nested-epoch label check; nested-epoch ≤ tc.epoch check; use TC epoch's set for the nested QC; timestamp comparison direction; any use of the local clock in deterministic validity; envelope-budget and `V_profile` checks; version-before-length ordering.
 
 ### 3.5 Security acceptance criteria
 
@@ -132,30 +188,35 @@ Remove or weaken: the tag check; version check; trailing-byte check; re-encode c
 5. Independent cryptographic review of §3.2–§3.5 before Phase 0 engine code consumes them (as for §3.1).
 6. No change to Tendermint, defaults, or activation; the objects live behind the existing `pq-hotstuff` feature.
 
-## 4. Unresolved design decisions requiring owner approval
+## 4. Decisions
 
-Each item has a recommendation; none is decided.
+Status legend: **Proposed-resolved** = revision 2 contains a concrete rule that I recommend the owner approve; **Open** = needs an owner decision or an upstream specification; **Blocked** = cannot proceed until a named dependency exists. Nothing is decided by this document.
 
-| # | Decision | Recommendation |
+| # | Decision | Status and recommendation |
 |---|---|---|
-| U1 | Bind `validator_set_hash` into the signed vote and timeout messages? Doing so changes merged layouts (#125) and requires a new profile identifier or version. Without it, the set is bound through `chain_id` + `epoch` + the on-chain epoch record | Do not change the signed messages in profile v2; keep the hash in the certificate as a checked field. Revisit only if reconfiguration can produce two different sets with one epoch number |
-| U2 | Canonical validator order key | Ascending bytewise UTF-8 of the address; addresses and keys unique |
-| U3 | Validators with power 0: occupy an index? may they sign? | All registered validators occupy an index; a zero-power signer makes the certificate invalid |
-| U4 | `MAX_CERT_VALIDATORS` and the block budget for QC + TC | 1024 as a decoder ceiling only; real ceiling from D2/M0; confirm devnet `max_block_bytes` (1 MiB) fits one QC + TC at the devnet n (about 30 KB at n = 4) |
-| U5 | Canonical bytes and id of a transaction (no canonical binary encoding exists today); bound on `count(txs)` | A separate spec item: define `tx_bytes` and `tx_id = SHA3-256(tx_bytes)` before payload code; until then the payload treats transactions as opaque |
-| U6 | Genesis: `prev_state_root` absent at height 1? Representation of the QC certifying the genesis block (a block at height 1 needs a `qc`) | Absent only at height 1; define a genesis QC as a distinguished object accepted only by equality with the genesis-derived value, never by signature |
-| U7 | Timestamp validity rules (monotonic? bound against the median of the parent QC? maximum skew) | Validity rule, not serialization: strictly greater than the parent's, and within a genesis-set skew of local time; needs a proposal |
-| U8 | The timeout signature signs `high_qc_round`, not the QC; should it sign the QC's `block_id` too? (changes the signed timeout message) | Keep as merged; safe because two valid QCs for one round must certify one block unless more than f validators equivocate; reviewer to confirm in the §5 review |
-| U9 | Participation evidence as the parent QC's bitmap only (no duplicate field in the payload), and which participation records derive from it | Bitmap only; edit rule 6's wording accordingly |
-| U10 | Evidence item carries full canonical messages (about 7 KiB) vs hashes plus lookup | Full messages (self-verifying, as §9 requires); limit 16 per block |
-| U11 | A QC may carry any signer set with power ≥ q (leader's choice), or must be a canonical minimal subset | Allow any set ≥ q; document that different subsets yield different `block_id`s and that double-proposal evidence applies |
-| U12 | Approve the new tags `CFH1|payload|`, `CFH1|qc|`, `CFH1|tc|`, `CFH1|valset|` | Approve |
-| U13 | Per-object `version` field vs relying on the protocol profile alone | Keep the per-object `u16`; QC v2 (D2) gets its own value |
-| U14 | Authorize a separate editorial PR for the stale "PROPOSED" headings of spec §7.1 and §7.1.1 and for rule 6 / §3 wording noted in §1.1 | Yes, as a small docs-only PR after this one |
+| U1 | Validator-set commitment and reconfiguration | **Proposed-resolved** (§3.4.2): one immutable commitment per epoch, fixed by genesis or by the committed epoch-change block; every set change is a new epoch number; signed messages unchanged. Depends on U17 |
+| U2 | Canonical validator order key | **Proposed-resolved** (§3.4.1): bytewise UTF-8 of the address; unique addresses and keys |
+| U3 | Zero-power validators | **Proposed-resolved**: occupy an index; may not sign |
+| U4 | Limits and budgets | **Proposed-resolved** (§3.4.3): four separate limits; QC v1 formulas; v2 versioned and unspecified. **Open:** the numeric `V_profile` for mainnet (D2/M0), `MAX_CERT_VALIDATORS` (1024 proposed), the network message limit the budget is checked against |
+| U5 | Canonical transaction bytes, id, `count(txs)` bound | **Blocked, prerequisite.** Payload codec must not be implemented until a separate approved spec exists (§3.3). QC/TC are independent of it |
+| U6 | Genesis certificate | **Proposed-resolved** (§3.4.7): distinct `GenesisCert`, valid by equality only, never a QC, negative tests G-01…G-08. **Open:** U16 |
+| U7 | Timestamp | **Proposed-resolved** (§3.5.1): deterministic rule (strictly increasing; height 1 after `genesis_time`) separate from node-local skew admission. **Open:** whether to add a consensus `MAX_TS_STEP_MS` (recommended no) |
+| U8 | Timeout signs `high_qc_round` | **Proposed-resolved with proof obligations** (§3.5.6): keep the approved format; PO-1…PO-5 remain for the §5–§6 review |
+| U9 | Participation versus rewards | **Proposed-resolved** (§3.4.6): the bitmap is a certificate fact only. **Open:** the reward/liveness rule needs its own specification (related to N10) |
+| U10 | Evidence verification | **Proposed-resolved** (§3.3, §3.5.3): both signatures, same offender key, identity in `V_epoch`, leader check for kind 2; kind-2 items carry block-id preimages |
+| U11 | Any signer set ≥ q is allowed in a QC | Open. Recommended yes; consequences stated in §3.4.4 and U9 |
+| U12 | New tags `CFH1\|payload\|`, `\|qc\|`, `\|tc\|`, `\|valset\|`, and (revision 2) `\|gcert\|`, `\|gblock\|` | Open, recommend approve |
+| U13 | Per-object `u16` version | Open, recommend keep |
+| U14 | Editorial PR: stale "PROPOSED" headings of spec §7.1/§7.1.1, rule 6 wording on participation, §3 payload comment | Open, needs authorization; recommend a separate small docs PR |
+| U15 | Round numbering across epochs (chain-global recommended) | **Open, new.** §3.5.4 depends on it |
+| U16 | Genesis hash is SHA-256 over compact JSON; the profile hash is SHA3-256 | **Open, new.** Use as given inside the genesis certificate (proposed) or define a canonical binary genesis commitment |
+| U17 | The epoch-change rule of §8 must make the one-commitment invariant true, including which set certifies the commit of the epoch-change block under the two-chain rule | **Open, new proof obligation** for the §5–§8 review |
+| U18 | Wire layout of the proposal message as transmitted (header, parent certificate, optional TC, payload, proposer envelope) | **Open, new.** Needed before block codec work; budgets in §3.4.3 assume the listed components |
 
 ## 5. Recommended next steps (after owner review; none authorized)
 
-1. Owner reviews this draft and answers U1–U14 (or amends them).
-2. A docs-only follow-up fixes the editorial items (U14) and records the decisions in spec §15.
-3. Tests-first Phase 0 PR for the codec: independent Python oracle and golden vectors first, then Rust types in `pq_hotstuff/wire` (additions only), then mutation run, Linux evidence, Windows confirmation.
-4. Independent review of §3.2–§3.5 together with the §5–§6 safety rules before the engine consumes the encodings.
+1. The owner reviews revision 2 and answers the Open items (U11–U18 and the numeric parts of U4, U7).
+2. A separate docs-only PR specifies the canonical transaction encoding (U5); the payload codec waits for it.
+3. A docs-only follow-up fixes the editorial items (U14) and records the approved decisions in spec §15.
+4. Tests-first QC/TC/genesis codec PR (independent Python oracle and golden vectors first, then additive Rust types, mutation run, Linux evidence, Windows confirmation). The payload codec is a later PR after U5.
+5. Independent review of §3.2–§3.5 together with §5–§8 before any engine consumes the encodings.
