@@ -1203,6 +1203,9 @@ impl Node {
             chain_forge_core::BftVariant::HotStuff   => ConsensusVariant::HotStuffStyle,
             chain_forge_core::BftVariant::Fba        => ConsensusVariant::XrplInspired,
             chain_forge_core::BftVariant::Tendermint => ConsensusVariant::TendermintStyle,
+            // The PQ-HotStuff-2 engine is not wired into the node yet: refuse to start rather than run another engine.
+            chain_forge_core::BftVariant::PqHotStuff => return Err(NodeError::Genesis(
+                "consensus.bft_variant \"pq-hotstuff\" is selected, but this node build does not include the PQ-HotStuff-2 engine".into())),
         };
         if desired_variant != ConsensusVariant::TendermintStyle {
             tracing::warn!(variant = ?desired_variant,

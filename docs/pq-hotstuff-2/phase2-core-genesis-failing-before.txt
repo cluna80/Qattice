@@ -1,0 +1,25 @@
+     |
+1547 |         assert_eq!(g.protocol_profile(), Ok(Some(ProtocolProfile::QatticePqHotStuff2V2)));
+     |                                                  ^^^^^^^^^^^^^^^ use of undeclared type `ProtocolProfile`
+
+error[E0599]: no method named `protocol_profile` found for struct `GenesisConfig` in the current scope
+    --> chain-forge-core/src/lib.rs:1553:22
+     |
+ 272 | pub struct GenesisConfig {
+     | ------------------------ method `protocol_profile` not found for this struct
+...
+1553 |         assert_eq!(g.protocol_profile(), Ok(None));
+     |                      ^^^^^^^^^^^^^^^^ method not found in `GenesisConfig`
+
+error[E0599]: no method named `protocol_profile` found for struct `GenesisConfig` in the current scope
+    --> chain-forge-core/src/lib.rs:1576:23
+     |
+ 272 | pub struct GenesisConfig {
+     | ------------------------ method `protocol_profile` not found for this struct
+...
+1576 |             assert!(g.protocol_profile().is_err(), "{bad:?}");
+     |                       ^^^^^^^^^^^^^^^^ method not found in `GenesisConfig`
+
+Some errors have detailed explanations: E0433, E0599.
+For more information about an error, try `rustc --explain E0433`.
+error: could not compile `chain-forge-core` (lib test) due to 5 previous errors

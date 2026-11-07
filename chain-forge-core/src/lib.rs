@@ -611,7 +611,20 @@ pub enum BftVariant {
     HotStuff,
     /// XRPL-inspired federated agreement.
     Fba,
+    /// PQ-HotStuff-2 (docs/pq-hotstuff-001-spec.md): requires `cryptography.protocol_profile`. Selection is configuration
+    /// only; a node build without the engine refuses to start on it.
+    PqHotStuff,
 }
+
+/// The versioned protocol profile named by `cryptography.protocol_profile`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtocolProfile {
+    /// ML-DSA-65 (FIPS 204) consensus keys, `alg_id` 1, the Qattice devnet profile.
+    QatticePqHotStuff2V2,
+}
+
+/// The only `cryptography.protocol_profile` value this build knows.
+pub const PROTOCOL_PROFILE_QATTICE_PQ_HOTSTUFF_2_V2: &str = "qattice-pq-hotstuff-2-v2";
 
 /// Resolved, validated reward-eligibility policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -728,6 +741,12 @@ pub struct GenesisCryptography {
     pub migration_trigger: String,
     pub hash_width:       u32,           // 256 | 384
     pub validator_scheme: String,
+    /// Versioned protocol profile (docs/pq-hotstuff-001-spec.md 3.1). Absent on every existing chain; the only value is
+    /// `"qattice-pq-hotstuff-2-v2"`, which `consensus.bft_variant = "pq-hotstuff"` requires. Omitted from the serialised
+    /// genesis when absent so existing genesis hashes do not change; `null` or a non-string is refused, not read as absent.
+    /// Resolve with [`GenesisConfig::protocol_profile`].
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "de_commitment_profile")]
+    pub protocol_profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1193,6 +1212,40 @@ impl GenesisConfig {
         }
     }
 
+    /// Resolve `cryptography.protocol_profile`. Hard validation: an unknown value is refused, never guessed.
+    pub fn protocol_profile(&self) -> Result<Option<ProtocolProfile>, String> {
+        match self.cryptography.protocol_profile.as_deref() {
+            None => Ok(None),
+            Some(PROTOCOL_PROFILE_QATTICE_PQ_HOTSTUFF_2_V2) => Ok(Some(ProtocolProfile::QatticePqHotStuff2V2)),
+            Some(other) => Err(format!(
+                "unknown cryptography.protocol_profile {other:?}; the only supported value is \"{PROTOCOL_PROFILE_QATTICE_PQ_HOTSTUFF_2_V2}\""
+            )),
+        }
+    }
+
+    /// The profile must agree with the other cryptography fields (spec 3.1) or the node refuses to start: Qattice's
+    /// profile is ML-DSA-65 only, hash width 256, with signing v2 commitments and personhood-weighted power.
+    fn validate_pq_profile(&self) -> Result<(), String> {
+        match self.commitment_profile()? {
+            CommitmentProfile::QatticeV2 => {}
+            CommitmentProfile::Legacy => return Err(
+                "protocol_profile \"qattice-pq-hotstuff-2-v2\" requires commitment_profile \"qattice-v2\"".into()),
+        }
+        if self.cryptography.hash_width != 256 {
+            return Err(format!("protocol_profile \"qattice-pq-hotstuff-2-v2\" requires cryptography.hash_width 256 (got {})",
+                self.cryptography.hash_width));
+        }
+        if !self.mldsa_consensus_only() {
+            return Err(format!(
+                "protocol_profile \"qattice-pq-hotstuff-2-v2\" requires cryptography.validator_scheme \"ml-dsa-65\" (got {:?})",
+                self.cryptography.validator_scheme));
+        }
+        if !self.consensus.personhood_weighted {
+            return Err("protocol_profile \"qattice-pq-hotstuff-2-v2\" requires consensus.personhood_weighted = true".into());
+        }
+        Ok(())
+    }
+
     /// Resolve and validate the BFT engine selected by `consensus.bft_variant`.
     /// Hard validation: the node refuses to start on `Err`.
     ///
@@ -1206,10 +1259,25 @@ impl GenesisConfig {
             None | Some("tendermint") | Some("TendermintStyle") => BftVariant::Tendermint,
             Some("hotstuff") | Some("HotStuffStyle") => BftVariant::HotStuff,
             Some("xrpl")     | Some("XrplInspired")  => BftVariant::Fba,
+            Some("pq-hotstuff") => BftVariant::PqHotStuff,
             Some(other) => return Err(format!(
-                "consensus.bft_variant {other:?} is not one of \"tendermint\", \"hotstuff\", \"xrpl\""
+                "consensus.bft_variant {other:?} is not one of \"tendermint\", \"hotstuff\", \"xrpl\", \"pq-hotstuff\""
             )),
         };
+        // The profile is mandatory for PQ-HotStuff-2 and is never silently ignored by another engine.
+        let profile = self.protocol_profile()?;
+        if variant == BftVariant::PqHotStuff {
+            if profile != Some(ProtocolProfile::QatticePqHotStuff2V2) {
+                return Err(format!(
+                    "consensus.bft_variant \"pq-hotstuff\" requires cryptography.protocol_profile \"{PROTOCOL_PROFILE_QATTICE_PQ_HOTSTUFF_2_V2}\""
+                ));
+            }
+            self.validate_pq_profile()?;
+        } else if profile.is_some() {
+            return Err(format!(
+                "cryptography.protocol_profile is only valid with consensus.bft_variant \"pq-hotstuff\" (this chain selects {variant:?})"
+            ));
+        }
         if variant != BftVariant::Tendermint && self.environment.mode != "devnet" {
             return Err(format!(
                 "consensus.bft_variant {variant:?} has not passed a consensus safety review and \
@@ -1513,6 +1581,120 @@ mod tests {
             let err = genesis_with_variant("devnet", Some(v)).bft_variant()
                 .expect_err(&format!("{v:?} must be rejected"));
             assert!(err.contains("bft_variant"), "{err}");
+        }
+    }
+
+    // -- PQ-HotStuff-2 selection and protocol profile (spec 3.1, 11) -----------
+
+    const PQ_PROFILE: &str = "qattice-pq-hotstuff-2-v2";
+
+    /// A genesis that satisfies every PQ-HotStuff-2 profile requirement; each test then breaks exactly one.
+    fn pq_json() -> serde_json::Value {
+        let mut v: serde_json::Value = serde_json::from_str(minimal_genesis_json()).unwrap();
+        v["environment"]["mode"] = "devnet".into();
+        v["consensus"]["bft_variant"] = "pq-hotstuff".into();
+        v["consensus"]["personhood_weighted"] = true.into();
+        v["cryptography"]["signature_scheme"] = "pqc-native".into();
+        v["cryptography"]["pqc_algorithm"] = "ml-dsa".into();
+        v["cryptography"]["validator_scheme"] = "ml-dsa-65".into();
+        v["cryptography"]["hash_width"] = 256.into();
+        v["cryptography"]["protocol_profile"] = PQ_PROFILE.into();
+        v["commitment_profile"] = "qattice-v2".into();
+        v
+    }
+    fn pq_genesis(f: impl FnOnce(&mut serde_json::Value)) -> Result<GenesisConfig, serde_json::Error> {
+        let mut v = pq_json();
+        f(&mut v);
+        serde_json::from_value(v)
+    }
+
+    #[test]
+    fn pq_hotstuff_is_selected_with_the_full_profile() {
+        let g = pq_genesis(|_| {}).unwrap();
+        assert_eq!(g.bft_variant(), Ok(BftVariant::PqHotStuff));
+        assert_eq!(g.protocol_profile(), Ok(Some(ProtocolProfile::QatticePqHotStuff2V2)));
+    }
+
+    #[test]
+    fn absent_profile_is_none_and_does_not_change_the_serialised_genesis() {
+        let g = genesis_with("devnet", None);
+        assert_eq!(g.protocol_profile(), Ok(None));
+        // the field is omitted when absent, so every existing genesis file keeps its hash
+        let json = serde_json::to_string(&g).unwrap();
+        assert!(!json.contains("protocol_profile"), "{json}");
+    }
+
+    #[test]
+    fn profile_serialises_when_present() {
+        let g = pq_genesis(|_| {}).unwrap();
+        assert!(serde_json::to_string(&g).unwrap().contains(&format!("\"protocol_profile\":\"{PQ_PROFILE}\"")));
+    }
+
+    #[test]
+    fn null_or_non_string_profile_is_refused_not_read_as_absent() {
+        for bad in [serde_json::Value::Null, 1.into(), true.into()] {
+            assert!(pq_genesis(|v| v["cryptography"]["protocol_profile"] = bad.clone()).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn unknown_profile_value_is_refused() {
+        for bad in ["qattice-pq-hotstuff-2-v1", "qattice-pq-hotstuff-2-v2 ", "", "pq-hotstuff"] {
+            let g = pq_genesis(|v| v["cryptography"]["protocol_profile"] = bad.into()).unwrap();
+            assert!(g.protocol_profile().is_err(), "{bad:?}");
+            assert!(g.bft_variant().is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn pq_hotstuff_without_the_profile_is_refused() {
+        let g = pq_genesis(|v| { v["cryptography"].as_object_mut().unwrap().remove("protocol_profile"); }).unwrap();
+        let e = g.bft_variant().expect_err("missing profile");
+        assert!(e.contains("protocol_profile"), "{e}");
+    }
+
+    /// The profile is never silently ignored by another engine.
+    #[test]
+    fn profile_with_another_engine_is_refused() {
+        for variant in [None, Some("tendermint"), Some("hotstuff"), Some("xrpl")] {
+            let g = pq_genesis(|v| match variant {
+                Some(x) => v["consensus"]["bft_variant"] = x.into(),
+                None => { v["consensus"].as_object_mut().unwrap().remove("bft_variant"); }
+            }).unwrap();
+            let e = g.bft_variant().expect_err(&format!("{variant:?}"));
+            assert!(e.contains("protocol_profile"), "{e}");
+        }
+    }
+
+    #[test]
+    fn pq_hotstuff_is_devnet_only_until_its_gate() {
+        for mode in ["testnet", "mainnet"] {
+            let g = pq_genesis(|v| v["environment"]["mode"] = mode.into()).unwrap();
+            assert!(g.bft_variant().is_err(), "{mode}");
+        }
+    }
+
+    #[test]
+    fn each_profile_requirement_is_enforced() {
+        let breaks: [(&str, fn(&mut serde_json::Value)); 6] = [
+            ("commitment_profile", |v| { v.as_object_mut().unwrap().remove("commitment_profile"); }),
+            ("signature_scheme", |v| v["cryptography"]["signature_scheme"] = "hybrid".into()),
+            ("pqc_algorithm", |v| v["cryptography"]["pqc_algorithm"] = "falcon".into()),
+            ("hash_width", |v| v["cryptography"]["hash_width"] = 384.into()),
+            ("validator_scheme", |v| v["cryptography"]["validator_scheme"] = "pqc-native".into()),
+            ("personhood_weighted", |v| v["consensus"]["personhood_weighted"] = false.into()),
+        ];
+        for (what, f) in breaks {
+            let g = pq_genesis(f).unwrap();
+            let e = g.bft_variant().expect_err(what);
+            assert!(e.contains(what), "{what}: {e}");
+        }
+    }
+
+    #[test]
+    fn tendermint_default_is_unchanged_by_the_new_variant() {
+        for mode in ["devnet", "testnet", "mainnet"] {
+            assert_eq!(genesis_with_variant(mode, None).bft_variant(), Ok(BftVariant::Tendermint));
         }
     }
 
