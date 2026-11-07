@@ -39,3 +39,22 @@ A13 proposal context changed: CAUGHT (2 failing)
 A14 timeouts signed in the vote context: CAUGHT (1 failing)
 A15 proposals signed in the timeout context: CAUGHT (1 failing)
 caught 15 of 15
+
+## Rerun on the branch merged with main (commit bddad29: the adapter on top of main 18f3bc6, which contains the merged #127 with the overflow hardening)
+# The adapter source is unchanged; the store underneath now has the checked counter arithmetic. Same 15 mutants, same command, clean worktree, restored after each run.
+A01 verifier accepts everything: CAUGHT (3 failing)
+A02 verifier ignores the context: CAUGHT (4 failing)
+A03 verifier ignores the message: CAUGHT (4 failing)
+A04 signer ignores the context: CAUGHT (6 failing)
+A05 signer is deterministic, not hedged: CAUGHT (1 failing)
+A06 from_seed ignores the seed: CAUGHT (4 failing)
+A07 generate returns a fixed key: CAUGHT (1 failing)
+A08 Debug prints the secret key: CAUGHT (1 failing)
+A09 signer returns a truncated signature: CAUGHT (8 failing)
+A10 public_key() returns the secret key: CAUGHT (9 failing)
+A11 vote context changed: CAUGHT (4 failing)
+A12 timeout context changed: CAUGHT (2 failing)
+A13 proposal context changed: CAUGHT (2 failing)
+A14 timeouts signed in the vote context: CAUGHT (1 failing)
+A15 proposals signed in the timeout context: CAUGHT (1 failing)
+caught 15 of 15
