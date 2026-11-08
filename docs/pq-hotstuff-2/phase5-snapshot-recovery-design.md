@@ -1,5 +1,8 @@
 # Snapshot authentication and recovery: concrete design (PROPOSAL; nothing here is implemented or approved)
 
+> **Superseded in part by `phase5-snapshot-spec.md` and `phase5-decisions-s1-s5.md`.** Kept for history; see those files for the current design.
+
+
 **Pruning stays disabled and unimplemented.** This document decides what must exist before it can be enabled, and which choices are the owner's. It introduces
 no consensus state root and no checkpoint-certification protocol; where an option needs one, it is marked as requiring a separate owner-approved spec.
 

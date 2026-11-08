@@ -1,5 +1,8 @@
 # Snapshot recovery decisions S1–S5 (PROPOSALS for owner approval; nothing here is implemented, activated or approved)
 
+> **Superseded in part by `phase5-snapshot-spec.md`:** S1 (the fixed-delay design `exec_delay D` is replaced by an explicit checkpoint reference), S4 (encodings and bounds are revised there) and S5 (recovery rounds). Corrections 1 and 2 below and the S2 measurements stand.
+
+
 Revises `phase5-snapshot-recovery-design.md` (which this file supersedes where they differ). Pruning stays disabled. No snapshot is installed. Block identity is unchanged by
 Step 1; anything below that changes identity is marked **IDENTITY CHANGE** and needs its own owner approval, a new profile id and regenerated test vectors.
 
