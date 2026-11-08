@@ -18,3 +18,11 @@ pub mod rules;
 pub mod certs;
 #[cfg(feature = "pq-hotstuff")]
 pub mod engine;
+#[cfg(feature = "pq-hotstuff")]
+pub mod sync;
+#[cfg(feature = "pq-hotstuff")]
+pub mod pacemaker;
+#[cfg(feature = "pq-hotstuff")]
+pub mod netmsg;
+#[cfg(feature = "pq-hotstuff")]
+pub mod blockstore;

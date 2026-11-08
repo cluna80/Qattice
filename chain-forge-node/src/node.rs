@@ -3887,6 +3887,9 @@ impl Node {
                     }
 
                     // ── Change Set T: ingest peer capacity ads ────────────────────
+                    // PQ-HotStuff-2 topics: this node does not subscribe to them and the engine is not wired in; ignore.
+                    GossipTopic::PqProposal | GossipTopic::PqVote | GossipTopic::PqTimeout | GossipTopic::PqSync => {}
+
                     GossipTopic::CapacityAd => {
                         use crate::gossip_capacity::CapacityAdGossip;
 

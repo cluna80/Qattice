@@ -12,6 +12,7 @@ use super::certs::*;
 use super::leader::leader_index;
 use super::limits::PqLimits;
 use super::rules::{commits_parent, next_round, safe_to_timeout, safe_to_vote, BlockHeader, TcInfo, TimeoutRequest, VoterState};
+use super::sync::{SyncRequest, SyncResponse};
 use super::safety::{ConsensusSigner, ConsensusVerifier, Kind, MonotonicCounter, SafetyStore, SignError, Storage, CTX_TIMEOUT, CTX_VOTE};
 use super::types::{EpochSet, Round};
 use super::wire::{BlockSigningMessage, SignatureEnvelope, TimeoutMessage, VoteMessage, MLDSA65_SIGNATURE_LEN};
@@ -37,6 +38,12 @@ pub enum Output {
     Commit(Committed),
     /// The engine entered `round`; `leader` leads it (the caller schedules the round timer).
     EnteredRound { round: Round, leader: usize },
+    /// Durable-state requests. The driver applies them IN ORDER, before it sends anything that follows them in the same
+    /// output list: a block is persisted before it is voted for, a commit marker is persisted before the block is executed.
+    PersistBlock(Block),
+    PersistCommit { height: u64, id: BlockId },
+    PersistHighQc(Cert),
+    PersistHighTc(Tc),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -57,6 +64,8 @@ pub enum EngineError {
     Sign(#[from] SignError),
     #[error("SAFETY VIOLATION: a conflicting block would be committed")]
     ConflictingCommit,
+    #[error("recovery refused: {0}")]
+    Restore(String),
 }
 
 #[derive(Debug, Clone)]
@@ -150,13 +159,26 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
 
     // ------------------------------------------------------------------------------------------------------ proposals
     pub fn on_proposal(&mut self, b: Block) -> Result<Vec<Output>, EngineError> {
+        let Some((id, mut out)) = self.accept(b.clone())? else { return Ok(vec![]) };
+        self.vote_for(&b, id, &mut out)?;
+        Ok(out)
+    }
+
+    /// A block received through block sync (not as a live proposal): validated exactly like a proposal and added to the tree,
+    /// its certificates adopted and any commits they prove emitted, but NEVER voted for.
+    pub fn on_sync_block(&mut self, b: Block) -> Result<Vec<Output>, EngineError> {
+        Ok(self.accept(b)?.map(|(_, out)| out).unwrap_or_default())
+    }
+
+    /// Validation and storage shared by proposals and synced blocks. `None` for a block already known.
+    fn accept(&mut self, b: Block) -> Result<Option<(BlockId, Vec<Output>)>, EngineError> {
         // rule 1: well formed
         if b.epoch != self.cfg.set.epoch() { return Err(EngineError::Invalid("epoch")); }
         if b.round == 0 { return Err(EngineError::Invalid("round 0")); }
         if b.payload.len() as u64 > self.cfg.limits.max_block_payload_bytes { return Err(EngineError::Invalid("payload above the limit")); }
         if b.proposer != self.leader_of(b.round) { return Err(EngineError::Invalid("proposer is not the leader of the round")); }
         let id = block_id_of(&b, &self.idctx())?;
-        if self.blocks.contains_key(&id) { return Ok(vec![]); }
+        if self.blocks.contains_key(&id) { return Ok(None); }
         let msg = BlockSigningMessage { alg_id: ALG, block_id: id }.encode().map_err(|_| EngineError::Invalid("block signing message"))?;
         if !self.verifier.verify(&self.cfg.set.entries()[b.proposer].public_key, Kind::Proposal.context(), &msg, &b.signature) {
             return Err(EngineError::Invalid("proposer signature"));
@@ -182,12 +204,11 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
         }
 
         self.blocks.insert(id, Stored { block: b.clone(), round: b.round, height: b.height, parent: b.parent_id });
-        let mut out = vec![];
+        let mut out = vec![Output::PersistBlock(b.clone())];
         self.observe_cert(&b.qc.clone(), &mut out)?;
         if let Some(t) = &b.tc { self.observe_tc(t.clone(), &mut out); }
         self.try_form_qc_for(&id, &mut out)?;
-        self.vote_for(&b, id, &mut out)?;
-        Ok(out)
+        Ok(Some((id, out)))
     }
 
     fn vote_for(&mut self, b: &Block, id: BlockId, out: &mut Vec<Output>) -> Result<(), EngineError> {
@@ -252,7 +273,7 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
     fn observe_cert(&mut self, c: &Cert, out: &mut Vec<Output>) -> Result<(), EngineError> {
         let Cert::Qc(q) = c else { return Ok(()) };
         let Some(cr) = self.round_of(&q.block_id) else { return Ok(()) }; // block not known: cannot extend or commit through it
-        if q.round > self.high_qc.round() { self.high_qc = c.clone(); }
+        if q.round > self.high_qc.round() { self.high_qc = c.clone(); out.push(Output::PersistHighQc(c.clone())); }
         if let Some(parent) = self.blocks.get(&q.block_id).map(|s| s.parent) {
             if let Some(pr) = self.round_of(&parent) {
                 if parent != self.genesis_id && commits_parent(pr, cr) { self.commit_through(parent, out)?; }
@@ -266,7 +287,7 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
 
     fn observe_tc(&mut self, t: Tc, out: &mut Vec<Output>) {
         let r = t.round;
-        if self.high_tc.as_ref().map_or(true, |h| r > h.round) { self.high_tc = Some(t); }
+        if self.high_tc.as_ref().map_or(true, |h| r > h.round) { out.push(Output::PersistHighTc(t.clone())); self.high_tc = Some(t); }
         let before = self.round;
         self.round = next_round(self.round, r);
         if self.round != before { self.entered(out); }
@@ -297,6 +318,7 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
         }
         for id in chain.into_iter().rev() {
             let s = &self.blocks[&id];
+            out.push(Output::PersistCommit { height: s.height, id });
             out.push(Output::Commit(Committed { id, round: s.round, height: s.height, payload: s.block.payload.clone() }));
             self.committed_tip = id;
             self.committed_height = s.height;
@@ -361,6 +383,109 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
         let mut out = vec![];
         self.observe_cert(&t.high_qc.clone(), &mut out)?;
         self.observe_tc(t, &mut out);
+        Ok(out)
+    }
+
+    // ------------------------------------------------------------------------------------------------------ sync and recovery
+    /// Serve a block-sync request: the requested block and up to `max_blocks - 1` of its ancestors that this node knows, oldest first.
+    /// `None` if the requested block is unknown.
+    pub fn serve_sync(&self, req: &SyncRequest, max_blocks: usize) -> Option<SyncResponse> {
+        let cap = (req.max_blocks as usize).min(max_blocks).max(1);
+        let mut chain = vec![];
+        let mut cur = req.want;
+        while chain.len() < cap {
+            let Some(s) = self.blocks.get(&cur) else { break };
+            chain.push(s.block.clone());
+            cur = s.parent;
+            if cur == self.genesis_id { break; }
+        }
+        if chain.is_empty() { return None; }
+        chain.reverse();
+        Some(SyncResponse { want: req.want, blocks: chain })
+    }
+
+    /// Committed blocks above `height`, in height order (the driver executes these after a restart so that an executor that
+    /// is behind catches up exactly once: it compares its own durable height with this list).
+    pub fn committed_after(&self, height: u64) -> Vec<Committed> {
+        let mut chain = vec![];
+        let mut cur = self.committed_tip;
+        while cur != self.genesis_id {
+            let Some(s) = self.blocks.get(&cur) else { break };
+            if s.height <= height { break; }
+            chain.push(Committed { id: cur, round: s.round, height: s.height, payload: s.block.payload.clone() });
+            cur = s.parent;
+        }
+        chain.reverse();
+        chain
+    }
+
+    /// Rebuild the volatile state from durable data after a restart. Every block is re-validated (leader, proposer signature,
+    /// certificates) as when it first arrived, so a forged or damaged file cannot inject state. Commits are NOT re-emitted:
+    /// the committed tip is rebuilt silently and `committed_after` tells the driver what its executor is missing. A block
+    /// that fails validation is dropped (it can be fetched again by sync) unless it is part of the persisted committed
+    /// history, in which case recovery is refused. Returns (blocks restored, blocks dropped).
+    pub fn restore(&mut self, mut blocks: Vec<Block>, committed: &[(u64, BlockId)], high_qc: Option<Cert>, high_tc: Option<Tc>) -> Result<(usize, usize), EngineError> {
+        blocks.sort_by_key(|b| b.height);
+        let (mut ok, mut dropped) = (0, 0);
+        // blocks may arrive in any order within a height; retry the ones whose parent was not yet known
+        let mut pending = blocks;
+        loop {
+            let before = pending.len();
+            let mut next = vec![];
+            for b in pending {
+                match self.accept(b.clone()) {
+                    Ok(_) => ok += 1,
+                    Err(EngineError::MissingParent(_)) => next.push(b),
+                    Err(_) => dropped += 1,
+                }
+            }
+            pending = next;
+            if pending.is_empty() || pending.len() == before { break; }
+        }
+        dropped += pending.len();
+        if let Some(c) = high_qc {
+            if verify_cert(&self.ctx(), &c).is_ok() { let mut sink = vec![]; self.observe_cert(&c, &mut sink)?; }
+        }
+        if let Some(t) = high_tc {
+            if verify_tc(&self.ctx(), &t).is_ok() { let mut sink = vec![]; self.observe_cert(&t.high_qc.clone(), &mut sink)?; self.observe_tc(t, &mut sink); }
+        }
+        for (height, id) in committed {
+            let known = self.blocks.get(id).map(|s| s.height);
+            if known != Some(*height) { return Err(EngineError::Restore(format!("committed block at height {height} is missing or damaged"))); }
+            let mut sink = vec![];
+            self.commit_through(*id, &mut sink).map_err(|_| EngineError::Restore(format!("committed history conflicts at height {height}")))?;
+        }
+        if let Some((h, id)) = committed.last() {
+            if self.committed_height < *h || (self.committed_height == *h && self.committed_tip != *id) {
+                return Err(EngineError::Restore("committed tip not reproduced".into()));
+            }
+        }
+        // resume from max(high QC, high TC) + 1, and never below a round this validator already signed in
+        let hvr = self.store.record().hvr.unwrap_or(0);
+        self.round = self.round.max(hvr);
+        Ok((ok, dropped))
+    }
+
+    /// After a restart: the stored vote, byte for byte, addressed to the next leader again (a restored node's block tree already holds
+    /// the block, so a re-delivered proposal would not be voted for a second time). Counted locally if this node is that leader.
+    pub fn resend_last_vote(&mut self) -> Result<Vec<Output>, EngineError> {
+        let Some(l) = self.store.record().last_vote.clone() else { return Ok(vec![]) };
+        let Ok(msg) = VoteMessage::decode(&l.message, ALG) else { return Ok(vec![]) };
+        let to = self.leader_of(msg.round.saturating_add(1));
+        let mut out = vec![];
+        self.deliver_vote(to, VoteMsg { voter: self.cfg.my_index, msg, signature: l.envelope.signature }, &mut out)?;
+        Ok(out)
+    }
+
+    /// After a restart: the stored timeout, byte for byte, broadcast again - only if the high QC this node holds is still the one it
+    /// reported when it signed (otherwise peers would reject the carried certificate; a later round's timeout is built fresh).
+    pub fn resend_last_timeout(&mut self) -> Result<Vec<Output>, EngineError> {
+        let Some(l) = self.store.record().last_timeout.clone() else { return Ok(vec![]) };
+        let Ok(msg) = TimeoutMessage::decode(&l.message, ALG) else { return Ok(vec![]) };
+        if self.high_qc.round() != msg.high_qc_round { return Ok(vec![]); }
+        let tm = TimeoutMsg { voter: self.cfg.my_index, msg, signature: l.envelope.signature, high_qc: self.high_qc.clone() };
+        let mut out = vec![Output::Broadcast(Msg::Timeout(tm.clone()))];
+        out.extend(self.on_timeout(tm)?);
         Ok(out)
     }
 
