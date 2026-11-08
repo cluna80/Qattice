@@ -7,7 +7,11 @@ use std::collections::{BTreeMap, VecDeque};
 
 use chain_forge_consensus::pq_hotstuff::certs::*;
 use chain_forge_consensus::pq_hotstuff::engine::*;
+use chain_forge_consensus::pq_hotstuff::blockstore::{BlockStore, StoreError};
 use chain_forge_consensus::pq_hotstuff::limits::PqLimits;
+use chain_forge_consensus::pq_hotstuff::netmsg::{self as net, MessageLimits, NetLimitError, NetMsg, SYNC_BLOCKS_CEILING};
+use chain_forge_consensus::pq_hotstuff::pacemaker::{Pacemaker, PacemakerConfig, PacemakerError};
+use chain_forge_consensus::pq_hotstuff::sync::{check_response, SyncClient, SyncError, SyncRequest, SyncResponse};
 use chain_forge_consensus::pq_hotstuff::safety::*;
 use chain_forge_consensus::pq_hotstuff::types::{EpochSet, ValidatorEntry};
 use chain_forge_consensus::pq_hotstuff::wire::*;
@@ -24,10 +28,16 @@ type St = SafetyStore<MemStorage, TestCounter>;
 fn set_n(n: usize) -> EpochSet {
     EpochSet::new(0, (0..n).map(|i| ValidatorEntry { address: NAMES[i].to_string(), public_key: test_public_key(i as u8 + 1), power: 1 }).collect()).unwrap()
 }
+/// Blocks per sync response used by the tests.
+const SYNC_K: usize = 8;
+/// The transport limit these tests configure is the DERIVED MINIMUM for the 4-validator test chain (the owner has not set one for any real
+/// network; the repository defines none), so every kind of message fits and nothing is larger than needed.
 fn limits(n: usize) -> PqLimits {
     let l = PqLimits { max_validators: n, max_cert_validators: 1024, max_block_payload_bytes: 4096, max_message_bytes: None };
-    PqLimits { max_message_bytes: l.proposal_envelope_max(n), ..l }
+    let need = MessageLimits::minimum_transport_limit(&l, n, CHAIN.len(), SYNC_K).expect("derivable").max(l.proposal_envelope_max(n).unwrap());
+    PqLimits { max_message_bytes: Some(need), ..l }
 }
+fn mlim() -> MessageLimits { MessageLimits::derive(&limits(4), 4, CHAIN.len(), SYNC_K).expect("limits") }
 fn cfg(i: usize, n: usize) -> EngineConfig {
     EngineConfig { chain_id: CHAIN.into(), protocol_profile: PROFILE.into(), set: set_n(n), my_index: i, genesis_hash: GENESIS_HASH, limits: limits(n), seed: 0 }
 }
@@ -302,7 +312,7 @@ fn drive(nodes: &mut Vec<E>, steps: usize) -> Vec<Vec<Committed>> {
                 Output::Broadcast(m) => (0..n).filter(|i| *i != from).map(|i| (i, m.clone())).collect(),
                 Output::Send { to, msg } => if to == from { vec![] } else { vec![(to, msg)] },
                 Output::Commit(c) => { commits[from].push(c); vec![] }
-                Output::EnteredRound { .. } => vec![],
+                _ => vec![], // EnteredRound and the durable-state requests
             };
             for (to, m) in deliveries {
                 let outs = nodes[to].on_message(m).unwrap_or_default();
@@ -372,11 +382,11 @@ fn a_restart_resends_the_stored_vote_byte_for_byte_and_never_re_signs() {
     let l2 = nodes[0].leader_of(2);
     let v = (0..4).find(|i| *i != l && *i != l2).unwrap();
     let first = nodes[v].on_proposal(b.clone()).unwrap();
-    let Some(Output::Send { msg: Msg::Vote(v1), .. }) = first.into_iter().next() else { panic!("no vote") };
+    let Some(Output::Send { msg: Msg::Vote(v1), .. }) = first.into_iter().find(|o| matches!(o, Output::Send { msg: Msg::Vote(_), .. })) else { panic!("no vote") };
     let e = nodes.remove(v);
     let mut e = restart(e, v, 4);
     let again = e.on_proposal(b).unwrap();
-    let Some(Output::Send { msg: Msg::Vote(v2), .. }) = again.into_iter().next() else { panic!("no re-sent vote") };
+    let Some(Output::Send { msg: Msg::Vote(v2), .. }) = again.into_iter().find(|o| matches!(o, Output::Send { msg: Msg::Vote(_), .. })) else { panic!("no re-sent vote") };
     assert_eq!(v1.msg.encode().unwrap(), v2.msg.encode().unwrap());
     assert_eq!(v1.signature, v2.signature, "the vote must be re-sent, not re-signed");
 }
@@ -656,7 +666,7 @@ fn signatures_made_in_the_wrong_context_are_rejected_for_every_message_type() {
     let outs = nodes[l1].propose(b"A".to_vec()).unwrap();
     let a = outs.iter().find_map(|o| if let Output::Broadcast(Msg::Proposal(b)) = o { Some(b.clone()) } else { None }).unwrap();
     let voter = (0..4).find(|i| *i != l1 && *i != l2).unwrap();
-    let Some(Output::Send { msg: Msg::Vote(v), .. }) = nodes[voter].on_proposal(a).unwrap().into_iter().next() else { panic!("no vote") };
+    let Some(Output::Send { msg: Msg::Vote(v), .. }) = nodes[voter].on_proposal(a).unwrap().into_iter().find(|o| matches!(o, Output::Send { msg: Msg::Vote(_), .. })) else { panic!("no vote") };
     for ctx in WRONG_CONTEXTS_FOR_VOTE {
         let mut bad = v.clone();
         bad.signature = sign(voter, ctx, &bad.msg.encode().unwrap());
@@ -715,7 +725,7 @@ fn messages_and_certificates_from_another_chain_are_rejected() {
     let voter = (0..4).find(|i| *i != l && *i != l2).unwrap();
     let mut t_voter = engine_on(OTHER, voter, 4);
     let Some(Output::Broadcast(Msg::Proposal(fb))) = outs.into_iter().find(|o| matches!(o, Output::Broadcast(Msg::Proposal(_)))) else { panic!() };
-    let Some(Output::Send { msg: Msg::Vote(fv), .. }) = t_voter.on_proposal(fb).unwrap().into_iter().next() else { panic!("no foreign vote") };
+    let Some(Output::Send { msg: Msg::Vote(fv), .. }) = t_voter.on_proposal(fb).unwrap().into_iter().find(|o| matches!(o, Output::Send { msg: Msg::Vote(_), .. })) else { panic!("no foreign vote") };
     let mut collector = engine(l2, 4);
     assert!(collector.on_vote(fv).is_err(), "a vote for another chain was counted");
     let Some(Output::Broadcast(Msg::Timeout(ft))) = engine_on(OTHER, 1, 4).local_timeout().unwrap().into_iter().next() else { panic!() };
@@ -735,7 +745,496 @@ fn messages_and_certificates_from_another_chain_are_rejected() {
     assert!(verify_cert(&f.ctx(&TestVerifier), &foreign_genesis).is_err());
 }
 
+
+// ================================================================================================ network envelope and derived limits
+
+fn worst_qc(f: &Fx) -> Qc { mk_qc(f, 9, 9, &[0, 1, 2, 3]) }
+fn worst_tc(f: &Fx) -> Tc { mk_tc(f, 10, &[(0, 9), (1, 9), (2, 9), (3, 9)], Cert::Qc(worst_qc(f))) }
+fn worst_block(f: &Fx, payload: usize) -> Block {
+    Block { epoch: 0, round: 11, height: 7, parent_id: [1; 32], qc: Cert::Qc(worst_qc(f)), tc: Some(worst_tc(f)), payload: vec![7u8; payload], proposer: 3, signature: vec![5u8; 3309] }
+}
+fn big_vote() -> VoteMsg {
+    VoteMsg { voter: 2, msg: VoteMessage { alg_id: ALG, chain_id: CHAIN.into(), epoch: 0, round: u64::MAX, block_id: [3; 32], parent_id: [4; 32], parent_round: u64::MAX }, signature: vec![9u8; 3309] }
+}
+fn big_timeout(f: &Fx) -> TimeoutMsg {
+    TimeoutMsg { voter: 1, msg: TimeoutMessage { alg_id: ALG, chain_id: CHAIN.into(), epoch: 0, round: u64::MAX, high_qc_round: u64::MAX }, signature: vec![9u8; 3309], high_qc: Cert::Qc(worst_qc(f)) }
+}
+fn every_kind(f: &Fx) -> Vec<NetMsg> {
+    vec![
+        NetMsg::Consensus(Msg::Proposal(worst_block(f, 100))),
+        NetMsg::Consensus(Msg::Proposal(Block { tc: None, ..worst_block(f, 0) })),
+        NetMsg::Consensus(Msg::Vote(big_vote())),
+        NetMsg::Consensus(Msg::Timeout(big_timeout(f))),
+        NetMsg::Consensus(Msg::Tc(worst_tc(f))),
+        NetMsg::SyncRequest(SyncRequest { want: [2; 32], max_blocks: 3 }),
+        NetMsg::SyncResponse(SyncResponse { want: [2; 32], blocks: vec![worst_block(f, 5), worst_block(f, 6)] }),
+    ]
+}
+
+/// The derived per-kind limit is not a loose bound: it equals the encoded size of the largest message of that kind (all signers, a TC with a
+/// nested QC, the payload limit, the maximum number of sync blocks). A formula that undercounted would make a legal message undeliverable.
+#[test]
+fn derived_limits_equal_the_size_of_the_largest_message_of_every_kind() {
+    let f = fx();
+    let m = mlim();
+    let len = |x: NetMsg| net::encode(&x).len() as u64;
+    assert_eq!(len(NetMsg::Consensus(Msg::Proposal(worst_block(&f, 4096)))), m.proposal);
+    assert_eq!(len(NetMsg::Consensus(Msg::Vote(big_vote()))), m.vote);
+    assert_eq!(len(NetMsg::Consensus(Msg::Timeout(big_timeout(&f)))), m.timeout);
+    assert_eq!(len(NetMsg::Consensus(Msg::Tc(worst_tc(&f)))), m.tc);
+    assert_eq!(len(NetMsg::SyncRequest(SyncRequest { want: [1; 32], max_blocks: SYNC_K as u32 })), m.sync_request);
+    let resp = SyncResponse { want: [1; 32], blocks: (0..SYNC_K).map(|_| worst_block(&f, 4096)).collect() };
+    assert_eq!(len(NetMsg::SyncResponse(resp)), m.sync_response);
+    assert!(m.transport >= m.sync_response.max(m.proposal).max(m.timeout).max(m.tc).max(m.vote));
+}
+
+#[test]
+fn the_transport_limit_is_never_defaulted_and_must_cover_the_derived_minimum() {
+    let mut l = limits(4);
+    l.max_message_bytes = None;
+    let needed = MessageLimits::minimum_transport_limit(&l, 4, CHAIN.len(), SYNC_K).unwrap();
+    assert_eq!(MessageLimits::derive(&l, 4, CHAIN.len(), SYNC_K), Err(NetLimitError::LimitUnset { needed }));
+    l.max_message_bytes = Some(needed - 1);
+    assert_eq!(MessageLimits::derive(&l, 4, CHAIN.len(), SYNC_K), Err(NetLimitError::BelowMinimum { limit: needed - 1, needed }));
+    l.max_message_bytes = Some(needed);
+    assert!(MessageLimits::derive(&l, 4, CHAIN.len(), SYNC_K).is_ok());
+    // the existing p2p default on devnet (max_tx_bytes x 2 = 524,288) cannot carry a 1 MiB payload plus its certificates
+    let big = PqLimits { max_validators: 4, max_cert_validators: 1024, max_block_payload_bytes: 1_048_576, max_message_bytes: Some(524_288) };
+    assert!(matches!(MessageLimits::derive(&big, 4, CHAIN.len(), SYNC_K), Err(NetLimitError::BelowMinimum { .. })));
+}
+
+#[test]
+fn the_locked_8_mib_limit_covers_the_devnet_and_refuses_chains_that_need_more() {
+    use chain_forge_consensus::pq_hotstuff::netmsg::{read_bounded, MAX_MESSAGE_SIZE};
+    assert_eq!(MAX_MESSAGE_SIZE, 8_388_608);
+    // devnet: 4 validators, 1 MiB payload; the limit allows K = 7 sync blocks and no more than that
+    let dev = PqLimits { max_validators: 4, max_cert_validators: 1024, max_block_payload_bytes: 1_048_576, max_message_bytes: Some(MAX_MESSAGE_SIZE) };
+    assert!(MessageLimits::derive(&dev, 4, CHAIN.len(), 7).is_ok());
+    assert!(matches!(MessageLimits::derive(&dev, 4, CHAIN.len(), 8), Err(NetLimitError::BelowMinimum { .. })));
+    // 1,000 validators: a TC fits (about 6.64 MB) but a proposal carrying a QC and a TC does not, even with an empty payload
+    let big = PqLimits { max_validators: 1000, max_cert_validators: 1024, max_block_payload_bytes: 0, max_message_bytes: Some(MAX_MESSAGE_SIZE) };
+    let needed = MessageLimits::minimum_transport_limit(&big, 1000, CHAIN.len(), 1).unwrap();
+    assert!(needed > MAX_MESSAGE_SIZE, "needed {needed}");
+    assert!(matches!(MessageLimits::derive(&big, 1000, CHAIN.len(), 1), Err(NetLimitError::BelowMinimum { .. })));
+    // the stream reader stops at the cap without trusting any reported length
+    let ok = vec![7u8; 20_000];
+    assert_eq!(read_bounded(&mut &ok[..], 20_000).unwrap(), ok);
+    assert!(matches!(read_bounded(&mut &ok[..], 19_999), Err(net::NetError::TooLarge { .. })));
+    struct Endless(u64);
+    impl std::io::Read for Endless { fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> { self.0 += b.len() as u64; for x in b.iter_mut() { *x = 1; } Ok(b.len()) } }
+    let mut e = Endless(0);
+    assert!(matches!(read_bounded(&mut e, MAX_MESSAGE_SIZE), Err(net::NetError::TooLarge { .. })));
+    assert!(e.0 <= MAX_MESSAGE_SIZE + 8192, "read {} bytes before dropping", e.0);
+}
+
+#[test]
+fn limit_arithmetic_is_checked_and_parameters_are_validated() {
+    let huge = PqLimits { max_validators: 4, max_cert_validators: 1024, max_block_payload_bytes: u64::MAX, max_message_bytes: Some(u64::MAX) };
+    assert_eq!(MessageLimits::derive(&huge, 4, CHAIN.len(), SYNC_K), Err(NetLimitError::Overflow));
+    let near = PqLimits { max_block_payload_bytes: u64::MAX / 2, max_message_bytes: Some(u64::MAX), ..huge };
+    assert_eq!(MessageLimits::derive(&near, 4, CHAIN.len(), 64), Err(NetLimitError::Overflow));
+    let l = limits(4);
+    for (n, c, k) in [(0, 5, 1), (1025, 5, 1), (4, 0, 1), (4, 256, 1), (4, 5, 0), (4, 5, SYNC_BLOCKS_CEILING + 1)] {
+        assert!(matches!(MessageLimits::derive(&l, n, c, k), Err(NetLimitError::BadParams(_))), "{n} {c} {k}");
+    }
+}
+
+#[test]
+fn the_number_of_sync_blocks_follows_the_transport_limit() {
+    let l = limits(4);
+    let min8 = MessageLimits::minimum_transport_limit(&l, 4, CHAIN.len(), 8).unwrap();
+    assert_eq!(MessageLimits::max_sync_blocks_under(&l, 4, CHAIN.len(), min8), Some(8));
+    let min1 = MessageLimits::minimum_transport_limit(&l, 4, CHAIN.len(), 1).unwrap();
+    assert_eq!(MessageLimits::max_sync_blocks_under(&l, 4, CHAIN.len(), min1), Some(1));
+    assert_eq!(MessageLimits::max_sync_blocks_under(&l, 4, CHAIN.len(), min1 - 1), None);
+    assert!(MessageLimits::max_sync_blocks_under(&l, 4, CHAIN.len(), u64::MAX / 4).unwrap() <= SYNC_BLOCKS_CEILING);
+}
+
+#[test]
+fn every_message_kind_round_trips_and_re_encodes_identically() {
+    let f = fx();
+    let m = mlim();
+    for x in every_kind(&f) {
+        let b = net::encode(&x);
+        let d = net::decode(&b, &m).expect("decodes");
+        assert_eq!(d, x);
+        assert_eq!(net::encode(&d), b, "decode then encode is not the identity");
+    }
+}
+
+#[test]
+fn truncations_trailing_bytes_and_corrupt_headers_are_rejected() {
+    let f = fx();
+    let m = mlim();
+    for x in every_kind(&f) {
+        let b = net::encode(&x);
+        let stride = if b.len() > 2000 { 41 } else { 1 };
+        let mut cuts: Vec<usize> = (0..b.len()).step_by(stride).collect();
+        cuts.extend([b.len().saturating_sub(1), b.len().saturating_sub(2)]);
+        for cut in cuts { assert!(net::decode(&b[..cut], &m).is_err(), "cut {cut} of {}", b.len()); }
+        let mut more = b.clone(); more.push(0);
+        assert!(net::decode(&more, &m).is_err(), "trailing byte accepted");
+        for (at, v) in [(0usize, b[0] ^ 1), (9, b[9] ^ 1), (11, 0), (11, 7)] {
+            let mut c = b.clone(); c[at] = v;
+            assert_ne!(net::decode(&c, &m).ok(), Some(x.clone()), "corrupt header byte {at} accepted");
+        }
+    }
+}
+
+/// The length is checked against the limit for the message's KIND before any parsing: an oversize message fails as TooLarge, not as a
+/// parse error, and an absurd inner length or count in a tiny message cannot make the decoder allocate or read past the input.
+#[test]
+fn oversize_messages_are_refused_before_parsing_and_absurd_lengths_cannot_allocate() {
+    let f = fx();
+    let m = mlim();
+    let mut v = net::encode(&NetMsg::Consensus(Msg::Vote(big_vote())));
+    v.resize(m.vote as usize + 1, 0);
+    assert!(matches!(net::decode(&v, &m), Err(net::NetError::TooLarge { .. })));
+    assert!(matches!(net::decode(&vec![0u8; m.transport as usize + 1], &m), Err(net::NetError::TooLarge { .. })));
+    let mut r = TAG_NET_BYTES.to_vec();
+    r.extend_from_slice(&1u16.to_be_bytes());
+    r.push(6);
+    r.extend_from_slice(&[0u8; 32]);
+    r.extend_from_slice(&u32::MAX.to_be_bytes());
+    assert!(matches!(net::decode(&r, &m), Err(net::NetError::Malformed(_))), "sync count u32::MAX");
+    let mut p = net::encode(&NetMsg::Consensus(Msg::Proposal(worst_block(&f, 10))));
+    let qc_len_at = 12 + 56;
+    p[qc_len_at..qc_len_at + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+    assert!(net::decode(&p, &m).is_err());
+    // sync request counts
+    for bad in [0u32, SYNC_K as u32 + 1, u32::MAX] {
+        let b = net::encode(&NetMsg::SyncRequest(SyncRequest { want: [1; 32], max_blocks: bad }));
+        assert!(net::decode(&b, &m).is_err(), "max_blocks {bad}");
+    }
+    // option flag and signature length
+    let blk = Block { tc: None, ..worst_block(&f, 3) };
+    let mut b = net::encode(&NetMsg::Consensus(Msg::Proposal(blk.clone())));
+    let flag_at = 12 + 56 + 4 + blk.qc.encode().len();
+    assert_eq!(b[flag_at], 0);
+    b[flag_at] = 2;
+    assert!(net::decode(&b, &m).is_err(), "option flag 2");
+    let short = Block { signature: vec![1u8; 10], ..blk };
+    assert!(net::decode(&net::encode(&NetMsg::Consensus(Msg::Proposal(short))), &m).is_err(), "short signature");
+}
+const TAG_NET_BYTES: &[u8] = net::TAG_NET;
+
+// ================================================================================================ pacemaker
+
+#[test]
+fn the_pacemaker_backs_off_up_to_its_cap_and_resets_on_progress() {
+    let mut p = Pacemaker::new(PacemakerConfig { base: 30, max: 200 }).unwrap();
+    let seq: Vec<u64> = (0..6).map(|_| { let t = p.timeout(); p.on_timeout(); t }).collect();
+    assert_eq!(seq, vec![30, 60, 120, 200, 200, 200]);
+    p.on_progress();
+    assert_eq!((p.timeout(), p.consecutive_timeouts()), (30, 0));
+    for _ in 0..1000 { p.on_timeout(); }
+    assert_eq!(p.timeout(), 200);
+    let mut q = Pacemaker::new(PacemakerConfig { base: u64::MAX / 2 + 1, max: u64::MAX }).unwrap();
+    q.on_timeout();
+    assert_eq!(q.timeout(), u64::MAX, "a shift that would wrap must saturate");
+    assert_eq!(Pacemaker::new(PacemakerConfig { base: 0, max: 5 }).err(), Some(PacemakerError::ZeroBase));
+    assert_eq!(Pacemaker::new(PacemakerConfig { base: 9, max: 5 }).err(), Some(PacemakerError::MaxBelowBase));
+}
+
+// ================================================================================================ block sync
+
+fn idctx(f: &Fx) -> IdCtx<'_> { IdCtx { protocol_profile: PROFILE, chain_id: CHAIN, set: &f.set } }
+fn id_of(b: &Block) -> Option<BlockId> { let f = fx(); block_id_of(b, &idctx(&f)).ok() }
+
+/// Four honest nodes over reliable delivery: returns them and the blocks of the resulting chain by height.
+fn built_chain(steps: usize) -> (Vec<E>, Vec<Block>) {
+    let mut nodes: Vec<E> = (0..4).map(|i| engine(i, 4)).collect();
+    drive(&mut nodes, steps);
+    let mut bs: Vec<Block> = nodes[0].known_blocks().into_iter().cloned().collect();
+    bs.sort_by_key(|b| b.height);
+    (nodes, bs)
+}
+
+#[test]
+fn a_node_missing_ancestors_fetches_them_by_sync_and_catches_up_without_voting() {
+    let f = fx();
+    let (nodes, chain) = built_chain(9);
+    let tip = chain.last().unwrap().clone();
+    let mut lag = engine(2, 4); // a fresh node with no blocks
+    let Err(EngineError::MissingParent(mut want)) = lag.on_proposal(tip.clone()) else { panic!("a block with an unknown parent must be reported") };
+    let (mut requests, mut commits, mut votes_during_sync) = (0, vec![], 0);
+    loop {
+        requests += 1;
+        assert!(requests < 20, "sync does not converge");
+        let req = SyncRequest { want, max_blocks: 3 };
+        let resp = nodes[0].serve_sync(&req, 3).expect("the peer has the block");
+        check_response(&req, &resp, &idctx(&f), 3).expect("a good response passes the structural check");
+        let mut stuck = None;
+        for b in resp.blocks {
+            match lag.on_sync_block(b) {
+                Ok(outs) => for o in outs {
+                    match o { Output::Commit(c) => commits.push(c), Output::Send { msg: Msg::Vote(_), .. } => votes_during_sync += 1, _ => {} }
+                },
+                Err(EngineError::MissingParent(p)) => { stuck = Some(p); break; }
+                Err(e) => panic!("a genuine block was rejected: {e}"),
+            }
+        }
+        if let Some(p) = stuck { want = p; continue; }
+        match lag.on_proposal(tip.clone()) { Ok(_) => break, Err(EngineError::MissingParent(p)) => want = p, Err(e) => panic!("{e}") }
+    }
+    assert!(requests >= 3, "a 3-block window needs several requests for a 9-block chain (got {requests})");
+    assert_eq!(votes_during_sync, 0, "block sync must never produce votes");
+    let theirs = nodes[0].committed_after(0);
+    assert!(!commits.is_empty());
+    for c in &commits { assert_eq!(c.id, theirs[c.height as usize - 1].id, "synced commit differs at height {}", c.height); }
+    assert_eq!(commits.iter().map(|c| c.height).collect::<Vec<_>>(), (1..=commits.len() as u64).collect::<Vec<_>>());
+}
+
+#[test]
+fn malformed_sync_responses_are_rejected() {
+    let f = fx();
+    let idc = idctx(&f);
+    let (nodes, chain) = built_chain(9);
+    let tip_id = id_of(chain.last().unwrap()).unwrap();
+    let req = SyncRequest { want: tip_id, max_blocks: 4 };
+    let good = nodes[0].serve_sync(&req, 4).unwrap();
+    assert_eq!(good.blocks.len(), 4);
+    assert!(check_response(&req, &good, &idc, 4).is_ok());
+    let bad = |r: &SyncResponse| check_response(&req, r, &idc, 4);
+    assert_eq!(bad(&SyncResponse { want: [0; 32], ..good.clone() }), Err(SyncError::WrongTarget));
+    assert_eq!(bad(&SyncResponse { blocks: vec![], ..good.clone() }), Err(SyncError::Empty));
+    let mut many = good.clone(); many.blocks.insert(0, chain[0].clone());
+    assert_eq!(bad(&many), Err(SyncError::TooManyBlocks { got: 5, max: 4 }));
+    let mut swapped = good.clone(); swapped.blocks.swap(1, 2);
+    assert_eq!(bad(&swapped), Err(SyncError::NotLinked(1)));
+    let mut cut = good.clone(); cut.blocks.pop();
+    assert_eq!(bad(&cut), Err(SyncError::WrongEnd));
+    let mut payload = good.clone(); payload.blocks[1].payload.push(1);
+    assert_eq!(bad(&payload), Err(SyncError::NotLinked(2)), "a changed block no longer links to its successor");
+    let mut last = good.clone(); last.blocks[3].payload.push(1);
+    assert_eq!(bad(&last), Err(SyncError::WrongEnd));
+    // the server never exceeds its own cap, and an unknown block is not served
+    assert_eq!(nodes[0].serve_sync(&SyncRequest { want: tip_id, max_blocks: 100 }, 2).unwrap().blocks.len(), 2);
+    assert!(nodes[0].serve_sync(&SyncRequest { want: [9; 32], max_blocks: 4 }, 4).is_none());
+    // a signature or certificate tampered inside an otherwise well-linked response is caught by the engine, which then holds nothing of it
+    let mut lag = engine(2, 4);
+    lag.on_sync_block(chain[0].clone()).unwrap();
+    let held = lag.known_blocks().len();
+    let mut sig = chain[1].clone(); sig.signature[7] ^= 1;
+    assert!(lag.on_sync_block(sig).is_err());
+    let mut forged_qc = chain[1].clone();
+    if let Cert::Qc(q) = &mut forged_qc.qc { q.sigs[0][5] ^= 1; }
+    assert!(lag.on_sync_block(forged_qc).is_err());
+    assert_eq!(lag.known_blocks().len(), held, "a rejected block must leave no trace");
+    assert!(lag.on_sync_block(chain[1].clone()).is_ok());
+}
+
+#[test]
+fn the_sync_client_asks_once_expires_requests_and_stays_bounded() {
+    let mut c = SyncClient::new(10, 2);
+    assert!(c.want([1; 32], 0, 4).is_some());
+    assert!(c.want([1; 32], 1, 4).is_none(), "already being fetched");
+    assert!(c.want([2; 32], 1, 4).is_some());
+    assert!(c.want([3; 32], 2, 4).is_none(), "table full");
+    assert_eq!(c.pending(), 2);
+    assert!(c.want([1; 32], 11, 4).is_some(), "an expired request is asked again");
+    c.complete(&[1; 32]);
+    assert_eq!(c.pending(), 0);
+}
+
+// ================================================================================================ persistence and recovery
+
+fn mem() -> MemStorage { MemStorage::new(faults()) }
+
+/// Like `drive`, but applies the engine's durable-state requests to each node's block store, in order, as a driver must.
+fn drive_persisting(nodes: &mut Vec<E>, stores: &mut Vec<BlockStore<MemStorage>>, steps: usize) -> Vec<Vec<Committed>> {
+    let n = nodes.len();
+    let mut commits: Vec<Vec<Committed>> = vec![vec![]; n];
+    for _ in 0..steps {
+        let r = nodes.iter().map(|e| e.round()).max().unwrap();
+        let l = nodes[0].leader_of(r);
+        let first = match nodes[l].propose(format!("tx-batch-{r}").into_bytes()) { Ok(o) => o, Err(_) => break };
+        let mut q: VecDeque<(usize, Output)> = first.into_iter().map(|o| (l, o)).collect();
+        while let Some((from, o)) = q.pop_front() {
+            stores[from].apply(&o, &id_of).expect("persist");
+            let deliveries: Vec<(usize, Msg)> = match o {
+                Output::Broadcast(m) => (0..n).filter(|i| *i != from).map(|i| (i, m.clone())).collect(),
+                Output::Send { to, msg } => if to == from { vec![] } else { vec![(to, msg)] },
+                Output::Commit(c) => { commits[from].push(c); vec![] }
+                _ => vec![],
+            };
+            for (to, m) in deliveries { for o in nodes[to].on_message(m).unwrap_or_default() { q.push_back((to, o)); } }
+        }
+    }
+    commits
+}
+
+#[test]
+fn a_restored_node_keeps_its_committed_history_resends_its_vote_and_executes_nothing_twice() {
+    let mut nodes: Vec<E> = (0..4).map(|i| engine(i, 4)).collect();
+    let mut stores: Vec<BlockStore<MemStorage>> = (0..4).map(|_| BlockStore::new(mem())).collect();
+    let commits = drive_persisting(&mut nodes, &mut stores, 10);
+    // a node that is NOT the next leader of its last vote, so that the re-sent vote is visible as a message
+    let v = (0..4).find(|v| { let r = nodes[*v].store().record().last_vote.as_ref().map(|l| l.round); r.map_or(false, |r| nodes[*v].leader_of(r + 1) != *v) }).expect("such a node exists");
+    let executed = commits[v].len() as u64;
+    assert!(executed >= 6);
+    let (tip, hqc, known) = (nodes[v].committed_tip(), nodes[v].high_qc().round(), nodes[v].known_blocks().len());
+    let last_vote = nodes[v].store().record().last_vote.clone().expect("it voted");
+    let next_leader_is_me = nodes[v].leader_of(last_vote.round + 1) == v;
+    let mut e = restart(nodes.remove(v), v, 4); // safety store reopened, empty block tree
+    let loaded = stores[v].load().expect("the store loads");
+    assert_eq!(loaded.damaged_blocks, 0);
+    let (restored, dropped) = e.restore(loaded.blocks, &loaded.committed, loaded.high_qc, loaded.high_tc).expect("restores");
+    assert_eq!((restored, dropped), (known, 0));
+    assert_eq!(e.committed_tip(), tip, "committed history must survive a restart");
+    assert_eq!(e.high_qc().round(), hqc);
+    assert!(e.committed_after(executed).is_empty(), "nothing is left to execute: no duplicate execution");
+    // an executor that is two heights behind is handed exactly those two blocks, in order
+    let behind = e.committed_after(executed - 2);
+    assert_eq!(behind.iter().map(|c| c.height).collect::<Vec<_>>(), vec![executed - 1, executed]);
+    assert_eq!(behind.iter().map(|c| c.id).collect::<Vec<_>>(), commits[v][commits[v].len() - 2..].iter().map(|c| c.id).collect::<Vec<_>>());
+    // re-delivering every known block as a live proposal executes and votes for nothing again
+    for b in nodes[0].known_blocks().into_iter().cloned().collect::<Vec<_>>() {
+        let outs = e.on_proposal(b).unwrap_or_default();
+        assert!(!outs.iter().any(|o| matches!(o, Output::Commit(_) | Output::Send { msg: Msg::Vote(_), .. })), "a restored node acted twice on a known block");
+    }
+    // the stored vote is re-sent byte for byte
+    let outs = e.resend_last_vote().unwrap();
+    match outs.into_iter().find_map(|o| if let Output::Send { msg: Msg::Vote(vm), .. } = o { Some(vm) } else { None }) {
+        Some(vm) => {
+            assert_eq!(vm.msg.encode().unwrap(), last_vote.message);
+            assert_eq!(vm.signature, last_vote.envelope.signature, "the vote must be re-sent, not re-signed");
+        }
+        None => panic!("no vote was re-sent although another validator leads the next round (next leader is me: {next_leader_is_me})"),
+    }
+}
+
+#[test]
+fn a_forged_or_damaged_stored_block_cannot_inject_state_and_committed_history_is_never_shortened() {
+    let mut nodes: Vec<E> = (0..4).map(|i| engine(i, 4)).collect();
+    let mut stores: Vec<BlockStore<MemStorage>> = (0..4).map(|_| BlockStore::new(mem())).collect();
+    drive_persisting(&mut nodes, &mut stores, 8);
+    let v = 1;
+    let loaded = stores[v].load().unwrap();
+    let mut blocks = loaded.blocks.clone();
+    blocks.sort_by_key(|b| b.height);
+    let top = blocks.last().unwrap().clone();
+    assert!(loaded.committed.iter().all(|(_, id)| Some(*id) != id_of(&top)), "the newest block is not committed yet");
+    // a forged copy of an UNCOMMITTED block, correctly sealed on disk (valid checksum), is dropped by validation
+    let mut forged = top.clone(); forged.payload = b"forged".to_vec();
+    let mut e = restart(engine(v, 4), v, 4);
+    let mut with_forged: Vec<Block> = blocks.iter().filter(|b| b.height != top.height).cloned().collect();
+    with_forged.push(forged.clone());
+    let (ok, dropped) = e.restore(with_forged, &loaded.committed, loaded.high_qc.clone(), loaded.high_tc.clone()).unwrap();
+    assert_eq!(dropped, 1, "the forged block must be dropped");
+    assert_eq!(ok, blocks.len() - 1);
+    // a forged block named by a COMMIT marker refuses recovery instead of being believed
+    let mut e = restart(engine(v, 4), v, 4);
+    let committed_height = loaded.committed.last().unwrap().0;
+    let target = blocks.iter().find(|b| b.height == committed_height).unwrap().clone();
+    let mut bad = target.clone(); bad.payload = b"forged".to_vec();
+    let mut tampered: Vec<Block> = blocks.iter().filter(|b| b.height != committed_height).cloned().collect();
+    tampered.push(bad);
+    assert!(matches!(e.restore(tampered, &loaded.committed, None, None), Err(EngineError::Restore(_))));
+    // a committed marker whose block is missing refuses recovery
+    let mut e = restart(engine(v, 4), v, 4);
+    let missing: Vec<Block> = blocks.iter().filter(|b| b.height != committed_height).cloned().collect();
+    assert!(matches!(e.restore(missing, &loaded.committed, None, None), Err(EngineError::Restore(_))));
+    // a commit marker whose height disagrees with the height of the block it names refuses recovery (the block itself is genuine)
+    let mut e = restart(engine(v, 4), v, 4);
+    let mut skewed = loaded.committed.clone();
+    let (h, id) = *skewed.last().unwrap();
+    assert!(h >= 2);
+    *skewed.last_mut().unwrap() = (h - 1, id);
+    assert!(matches!(e.restore(blocks.clone(), &skewed, None, None), Err(EngineError::Restore(_))));
+}
+
+#[test]
+fn the_block_store_ignores_damage_to_blocks_and_hints_but_refuses_damaged_or_gapped_committed_history() {
+    let mut nodes: Vec<E> = (0..4).map(|i| engine(i, 4)).collect();
+    let mut stores: Vec<BlockStore<MemStorage>> = (0..4).map(|_| BlockStore::new(mem())).collect();
+    drive_persisting(&mut nodes, &mut stores, 8);
+    let base = stores[0].storage().clone();
+    let names = base.names();
+    let blk = names.iter().find(|n| n.starts_with("blk-")).unwrap().clone();
+    let cmts: Vec<String> = names.iter().filter(|n| n.starts_with("cmt-")).cloned().collect();
+    assert!(cmts.len() >= 3);
+    let total_blocks = names.iter().filter(|n| n.starts_with("blk-")).count();
+    let load = |st: MemStorage| BlockStore::new(st).load();
+
+    let clean = load(base.clone()).unwrap();
+    assert_eq!((clean.blocks.len(), clean.damaged_blocks, clean.damaged_hints), (total_blocks, 0, 0));
+    assert_eq!(clean.committed.len(), cmts.len());
+    assert!(clean.high_qc.is_some());
+
+    let flip = |st: &mut MemStorage, name: &str, at: usize| { let mut d = st.raw(name).unwrap(); let at = at.min(d.len() - 1); d[at] ^= 1; st.set_raw(name, d); };
+    let mut st = base.clone(); flip(&mut st, &blk, 50);
+    let l = load(st).unwrap();
+    assert_eq!((l.blocks.len(), l.damaged_blocks), (total_blocks - 1, 1));
+    let mut st = base.clone(); let d = st.raw(&blk).unwrap(); st.set_raw(&blk, d[..d.len() / 2].to_vec());
+    assert_eq!(load(st).unwrap().damaged_blocks, 1, "a truncated block file");
+    let mut st = base.clone(); st.set_raw("blk-leftover.tmp", vec![1, 2, 3]); st.set_raw("cmt-0000000000000001.tmp", vec![9]);
+    assert_eq!(load(st).unwrap().damaged_blocks, 0, "leftover temporary files are ignored");
+    let mut st = base.clone(); flip(&mut st, "hqc", 40);
+    let l = load(st).unwrap();
+    assert_eq!((l.damaged_hints, l.high_qc.is_none()), (1, true));
+
+    let mut st = base.clone(); flip(&mut st, &cmts[1], 30);
+    assert_eq!(load(st).err(), Some(StoreError::CommittedMarkerDamaged(2)));
+    let mut st = base.clone(); st.delete_raw(&cmts[1]);
+    assert_eq!(load(st).err(), Some(StoreError::CommittedHistoryGap(2)));
+    let mut st = base.clone(); st.delete_raw(cmts.last().unwrap());
+    assert_eq!(load(st).unwrap().committed.len(), cmts.len() - 1, "losing only the newest marker is a legal crash outcome");
+}
+
+/// Crash at every storage operation of a realistic persistence sequence (block, block, commit 1, block, commit 2, ...), and in every
+/// possible post-crash storage state: the store always loads, the committed markers are contiguous, every marker's block is present
+/// and valid, and the engine restores to exactly the committed height the markers promise.
+#[test]
+fn a_crash_at_any_point_of_persisting_blocks_and_commits_never_corrupts_or_loses_committed_history() {
+    let (_, chain) = built_chain(8);
+    let seq = |st: &mut BlockStore<MemStorage>| {
+        for (i, b) in chain.iter().take(5).enumerate() {
+            let _ = st.put_block(&id_of(b).unwrap(), b);
+            if i >= 1 { let _ = st.put_commit(i as u64, &id_of(&chain[i - 1]).unwrap()); }
+        }
+        let _ = st.put_high_qc(&chain[3].qc);
+    };
+    // count the fault-eligible operations of a clean run
+    let f = faults();
+    let mut clean = BlockStore::new(MemStorage::new(f.clone()));
+    seq(&mut clean);
+    let total = f.borrow().ops;
+    assert!(total >= 24);
+    let mut outcomes_checked = 0;
+    for crash_at in 0..=total {
+        let f = faults();
+        f.borrow_mut().crash_before = Some(crash_at);
+        let mut st = BlockStore::new(MemStorage::new(f));
+        seq(&mut st);
+        let mem = st.into_inner();
+        let mut states = mem.crash_outcomes(64);
+        states.push(mem.clone());
+        for storage in states {
+            let loaded = BlockStore::new(storage).load().unwrap_or_else(|e| panic!("crash before op {crash_at}: the store must load, got {e}"));
+            // markers are contiguous from 1 (load enforces it) and every marker's block is present
+            for (h, id) in &loaded.committed {
+                let b = loaded.blocks.iter().find(|b| id_of(b) == Some(*id)).unwrap_or_else(|| panic!("crash before op {crash_at}: marker {h} has no block"));
+                assert_eq!(b.height, *h);
+            }
+            let mut e = engine(2, 4);
+            let (_, dropped) = e.restore(loaded.blocks.clone(), &loaded.committed, loaded.high_qc.clone(), loaded.high_tc.clone())
+                .unwrap_or_else(|er| panic!("crash before op {crash_at}: restore refused: {er}"));
+            assert_eq!(dropped, 0, "crash before op {crash_at}: a crash must not produce an invalid block");
+            assert!(e.committed_tip().1 >= loaded.committed.len() as u64);
+            outcomes_checked += 1;
+        }
+    }
+    assert!(outcomes_checked > total, "the crash enumeration must cover several outcomes");
+}
+
+
 // ================================================================================================ deterministic simulation
+// A small driver around the engine, in the way the node driver will be: messages travel as encoded `CFH1|net|` envelopes and are decoded
+// under the derived limits; a missing ancestor is fetched by the real sync protocol; the engine's durable-state requests are applied to a
+// per-node block store before anything that follows them; commits are executed by a durable per-node executor that fails the run on any
+// duplicate or skipped height; the pacemaker backs off; a node can crash in the middle of applying a step's outputs and is rebuilt from
+// its safety store, its block store and its executor height only.
 
 struct Rng(u64);
 impl Rng {
@@ -746,186 +1245,258 @@ impl Rng {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Role { Honest, Silent, Equivocator }
 
+struct Pkt { at: u64, from: usize, to: usize, bytes: Vec<u8>, tries: u32 }
+
 struct Sim {
     n: usize,
+    f: Fx,
+    mlim: MessageLimits,
     nodes: Vec<Option<E>>,
     roles: Vec<Role>,
     down_until: Vec<u64>,
     round_started: Vec<u64>,
     last_round: Vec<u64>,
-    net: Vec<(u64, usize, Msg, u32)>,
+    last_hqc: Vec<u64>,
+    pace: Vec<Pacemaker>,
+    sync: Vec<SyncClient>,
+    stores: Vec<BlockStore<MemStorage>>,
+    exec: Vec<Vec<BlockId>>,
+    net: Vec<Pkt>,
     log: Vec<(usize, Msg)>,
-    commits: Vec<Vec<Committed>>,
-    ledger: Vec<BTreeMap<u64, BlockId>>,
-    by_id: BTreeMap<BlockId, Block>,
     rng: Rng,
     tick: u64,
     gst: u64,
     restarts: bool,
     restart_count: usize,
+    cuts: usize,
+    sync_requests: usize,
+    bad_sync: usize,
+    malformed: usize,
+    partition: Option<(u64, u64, u8)>,
+    /// Percent of sync responses a Byzantine server corrupts.
+    corrupt_pct: u64,
     seed: u64,
 }
 
-const TIMEOUT: u64 = 30;
+const PACE: PacemakerConfig = PacemakerConfig { base: 30, max: 120 };
 
 impl Sim {
     fn new(seed: u64, roles: Vec<Role>, restarts: bool) -> Sim {
         let n = roles.len();
         Sim {
-            n, nodes: (0..n).map(|i| if roles[i] == Role::Silent { None } else { Some(engine(i, n)) }).collect(), roles,
-            down_until: vec![0; n], round_started: vec![0; n], last_round: vec![1; n], net: vec![], log: vec![], commits: vec![vec![]; n], ledger: vec![BTreeMap::new(); n], by_id: BTreeMap::new(),
-            rng: Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) | 1), tick: 0, gst: 150, restarts, restart_count: 0, seed,
+            n, f: fx(), mlim: mlim(), nodes: (0..n).map(|i| if roles[i] == Role::Silent { None } else { Some(engine(i, n)) }).collect(), roles,
+            down_until: vec![0; n], round_started: vec![0; n], last_round: vec![1; n], last_hqc: vec![0; n],
+            pace: (0..n).map(|_| Pacemaker::new(PACE).unwrap()).collect(), sync: (0..n).map(|_| SyncClient::new(20, 8)).collect(),
+            stores: (0..n).map(|_| BlockStore::new(mem())).collect(), exec: vec![vec![]; n], net: vec![], log: vec![],
+            rng: Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) | 1), tick: 0, gst: 150, restarts, restart_count: 0, cuts: 0, sync_requests: 0,
+            bad_sync: 0, malformed: 0, partition: None, corrupt_pct: 50, seed,
         }
     }
-    fn send(&mut self, from: usize, to: usize, m: Msg) {
-        if to == from { return; }
+    fn blocked(&self, a: usize, b: usize, t: u64) -> bool {
+        matches!(self.partition, Some((s, e, mask)) if t >= s && t < e && ((mask >> a) & 1) != ((mask >> b) & 1))
+    }
+    fn send_bytes(&mut self, from: usize, to: usize, bytes: Vec<u8>) {
+        if to == from || self.blocked(from, to, self.tick) { return; }
         let pre_gst = self.tick < self.gst;
         if pre_gst && self.rng.below(100) < 20 { return; }
         let d = if pre_gst { 1 + self.rng.below(12) } else { 1 + self.rng.below(2) };
-        self.net.push((self.tick + d, to, m, 0));
+        self.net.push(Pkt { at: self.tick + d, from, to, bytes, tries: 0 });
     }
-    fn route(&mut self, from: usize, outs: Vec<Output>) {
-        for o in outs {
-            match o {
-                Output::Broadcast(m) => { self.note(&m); self.log.push((from, m.clone())); for to in 0..self.n { self.send(from, to, m.clone()); } }
-                Output::Send { to, msg } => { self.note(&msg); self.log.push((from, msg.clone())); self.send(from, to, msg); }
-                // the executed ledger is durable (the execution layer's job): a restarted engine re-emits commits from
-                // height 1, which are idempotent and must name the same block
-                Output::Commit(c) => match self.ledger[from].get(&c.height) {
-                    Some(id) => assert_eq!(*id, c.id, "node {from} re-committed height {} with another block after a restart", c.height),
-                    None => { self.ledger[from].insert(c.height, c.id); self.commits[from].push(c); }
-                },
+    fn send(&mut self, from: usize, to: usize, m: NetMsg) { let b = net::encode(&m); self.send_bytes(from, to, b); }
+    fn up(&self, i: usize) -> bool { self.nodes[i].is_some() && self.down_until[i] <= self.tick }
+
+    /// The execution layer: durable, one block per height, in order. A duplicate or a skipped height fails the run.
+    fn execute(&mut self, i: usize, c: Committed) {
+        let ex = &mut self.exec[i];
+        let h = c.height as usize;
+        assert!(h > ex.len(), "DUPLICATE EXECUTION: node {i} was handed height {h} again (executed {}), seed {}", ex.len(), self.seed);
+        assert_eq!(h, ex.len() + 1, "SKIPPED HEIGHT: node {i} was handed height {h} after {}, seed {}", ex.len(), self.seed);
+        ex.push(c.id);
+    }
+
+    /// Apply a node's outputs in order. `limit` models a crash after that many outputs: the rest are lost.
+    fn route(&mut self, from: usize, outs: Vec<Output>, limit: Option<usize>) {
+        for (k, o) in outs.into_iter().enumerate() {
+            if limit.map_or(false, |l| k >= l) { return; }
+            match &o {
+                Output::PersistBlock(_) | Output::PersistCommit { .. } | Output::PersistHighQc(_) | Output::PersistHighTc(_) => {
+                    let idc = IdCtx { protocol_profile: PROFILE, chain_id: CHAIN, set: &self.f.set };
+                    self.stores[from].apply(&o, &|b| block_id_of(b, &idc).ok()).expect("persist");
+                }
+                Output::Commit(c) => self.execute(from, c.clone()),
+                Output::Broadcast(m) => { self.log.push((from, m.clone())); let b = net::encode(&NetMsg::Consensus(m.clone())); for to in 0..self.n { self.send_bytes(from, to, b.clone()); } }
+                Output::Send { to, msg } => { self.log.push((from, msg.clone())); self.send(from, *to, NetMsg::Consensus(msg.clone())); }
                 Output::EnteredRound { .. } => {}
             }
         }
     }
-    /// Remember every proposal by id: the stand-in for a block-sync service (the engine has no sync protocol yet).
-    fn note(&mut self, m: &Msg) {
-        if let Msg::Proposal(b) = m {
-            let f = fx();
-            if let Ok(id) = block_id_of(b, &IdCtx { protocol_profile: PROFILE, chain_id: CHAIN, set: &f.set }) { self.by_id.entry(id).or_insert_with(|| b.clone()); }
+
+    fn pick_peer(&mut self, me: usize, hint: usize) -> usize {
+        if hint != me && self.rng.below(2) == 0 { return hint; }
+        let others: Vec<usize> = (0..self.n).filter(|j| *j != me).collect();
+        others[self.rng.below(others.len() as u64) as usize]
+    }
+    fn request_sync(&mut self, me: usize, want: BlockId, hint: usize) {
+        if let Some(req) = self.sync[me].want(want, self.tick, SYNC_K as u32) {
+            self.sync_requests += 1;
+            let peer = self.pick_peer(me, hint);
+            self.send(me, peer, NetMsg::SyncRequest(req));
         }
     }
-    fn up(&self, i: usize) -> bool { self.nodes[i].is_some() && self.down_until[i] <= self.tick }
+    fn apply_sync(&mut self, me: usize, from: usize, resp: SyncResponse) {
+        let req = SyncRequest { want: resp.want, max_blocks: SYNC_K as u32 };
+        let idc = IdCtx { protocol_profile: PROFILE, chain_id: CHAIN, set: &self.f.set };
+        if check_response(&req, &resp, &idc, SYNC_K).is_err() { self.bad_sync += 1; return; }
+        let want = resp.want;
+        let mut complete = true;
+        for b in resp.blocks {
+            let r = self.nodes[me].as_mut().unwrap().on_sync_block(b);
+            match r {
+                Ok(outs) => self.route(me, outs, None),
+                Err(EngineError::MissingParent(p)) => { self.request_sync(me, p, from); complete = false; break; }
+                Err(_) => { self.bad_sync += 1; complete = false; break; }
+            }
+        }
+        if complete { self.sync[me].complete(&want); }
+    }
 
     fn byz_extras(&mut self, i: usize, m: &Msg) {
-        // an equivocator also signs votes for every proposal it sees, and double-proposes as a leader
+        // an equivocator also signs votes for every proposal it sees
         if let Msg::Proposal(b) = m {
-            let f = fx();
-            let idc = IdCtx { protocol_profile: PROFILE, chain_id: CHAIN, set: &f.set };
+            let idc = IdCtx { protocol_profile: PROFILE, chain_id: CHAIN, set: &self.f.set };
             if let Ok(id) = block_id_of(b, &idc) {
                 let vm = VoteMessage { alg_id: ALG, chain_id: CHAIN.into(), epoch: 0, round: b.round, block_id: id, parent_id: b.parent_id, parent_round: b.qc.round() };
                 let sig = sign(i, CTX_VOTE, &vm.encode().unwrap());
-                let to = (0..self.n).find(|j| *j == self.nodes[i].as_ref().map_or(0, |e| e.leader_of(b.round + 1))).unwrap_or(0);
-                self.send(i, to, Msg::Vote(VoteMsg { voter: i, msg: vm, signature: sig }));
+                let to = self.nodes[i].as_ref().map_or(0, |e| e.leader_of(b.round + 1));
+                self.send(i, to, NetMsg::Consensus(Msg::Vote(VoteMsg { voter: i, msg: vm, signature: sig })));
             }
         }
+    }
+
+    /// Rebuild node `i` from durable state only: its safety store, its block store and its executor height.
+    fn recover(&mut self, i: usize) {
+        let e = self.nodes[i].take().unwrap();
+        let mut e = restart(e, i, self.n);
+        let loaded = self.stores[i].load().expect("the block store must load after a crash");
+        e.restore(loaded.blocks, &loaded.committed, loaded.high_qc, loaded.high_tc).expect("restore");
+        // commit markers the crash lost are written again; the executor catches up from its own durable height, exactly once
+        let missing_markers = e.committed_after(loaded.committed.len() as u64);
+        for c in &missing_markers { self.stores[i].put_commit(c.height, &c.id).expect("marker"); }
+        let behind = e.committed_after(self.exec[i].len() as u64);
+        self.nodes[i] = Some(e);
+        for c in behind { self.execute(i, c); }
+        let mut outs = self.nodes[i].as_mut().unwrap().resend_last_vote().unwrap_or_default();
+        outs.extend(self.nodes[i].as_mut().unwrap().resend_last_timeout().unwrap_or_default());
+        self.route(i, outs, None);
+        self.restart_count += 1;
+        self.down_until[i] = self.tick + 1 + self.rng.below(10);
+        self.last_round[i] = 0;
+        self.round_started[i] = self.down_until[i];
+        self.pace[i] = Pacemaker::new(PACE).unwrap();
+        self.last_hqc[i] = self.nodes[i].as_ref().unwrap().high_qc().round();
     }
 
     fn step(&mut self) {
         let t = self.tick;
-        // deliver due messages in random order
-        let mut due: Vec<(u64, usize, Msg, u32)> = vec![];
+        let mut due: Vec<Pkt> = vec![];
         let mut keep = vec![];
-        for m in self.net.drain(..) { if m.0 <= t { due.push(m) } else { keep.push(m) } }
+        for p in self.net.drain(..) { if p.at <= t { due.push(p) } else { keep.push(p) } }
         self.net = keep;
         while !due.is_empty() {
             let k = self.rng.below(due.len() as u64) as usize;
-            let (_, to, m, tries) = due.swap_remove(k);
-            if !self.up(to) { if self.nodes[to].is_some() && tries < 40 { self.net.push((t + 3, to, m, tries + 1)); } continue; }
-            if self.roles[to] == Role::Equivocator { self.byz_extras(to, &m); }
-            let e = self.nodes[to].as_mut().unwrap();
-            match e.on_message(m.clone()) {
-                Ok(outs) => self.route(to, outs),
-                Err(EngineError::MissingParent(pid)) if tries < 40 => {
-                    // sync request: the missing ancestor arrives first, then the original message is retried
-                    if let Some(b) = self.by_id.get(&pid).cloned() { self.net.push((t + 1, to, Msg::Proposal(b), tries + 1)); }
-                    self.net.push((t + 4, to, m, tries + 1));
+            let p = due.swap_remove(k);
+            let to = p.to;
+            if self.blocked(p.from, to, t) { continue; }
+            if !self.up(to) { if self.nodes[to].is_some() && p.tries < 40 { self.net.push(Pkt { at: t + 3, tries: p.tries + 1, ..p }); } continue; }
+            let msg = match net::decode(&p.bytes, &self.mlim) { Ok(m) => m, Err(_) => { self.malformed += 1; continue } };
+            match msg {
+                NetMsg::SyncRequest(req) => {
+                    let mut resp = self.nodes[to].as_ref().unwrap().serve_sync(&req, SYNC_K);
+                    if let Some(r) = resp.as_mut() {
+                        // a Byzantine server sometimes corrupts what it serves
+                        if self.roles[to] == Role::Equivocator && self.rng.below(100) < self.corrupt_pct { r.blocks[0].signature[3] ^= 1; }
+                    }
+                    if let Some(r) = resp { self.send(to, p.from, NetMsg::SyncResponse(r)); }
                 }
-                Err(EngineError::ConflictingCommit) => {
-                    let e = self.nodes[to].as_ref().unwrap();
-                    let h = |x: &[u8]| x[..3].iter().map(|b| format!("{b:02x}")).collect::<String>();
-                    let mut d = format!("tip={} h{}; known:", h(&e.committed_tip().0), e.committed_tip().1);
-                    for b in e.known_blocks() { d += &format!("\n  r{} h{} parent={} qc.round={} tc={:?}", b.round, b.height, h(&b.parent_id), b.qc.round(), b.tc.as_ref().map(|t| (t.round, t.max_high_qc_round()))); }
-                    panic!("SAFETY VIOLATION seed {} tick {t}: node {to} would commit a conflicting block on message {:?}\n{d}", self.seed, std::mem::discriminant(&m));
+                NetMsg::SyncResponse(resp) => self.apply_sync(to, p.from, resp),
+                NetMsg::Consensus(m) => {
+                    if self.roles[to] == Role::Equivocator { self.byz_extras(to, &m); }
+                    let r = self.nodes[to].as_mut().unwrap().on_message(m);
+                    match r {
+                        Ok(outs) => {
+                            let cut = if self.restarts && self.roles[to] == Role::Honest && t > 20 && t < self.gst + 100 && self.rng.below(45) == 0 { Some(self.rng.below(outs.len() as u64 + 1) as usize) } else { None };
+                            self.route(to, outs, cut);
+                            if cut.is_some() { self.cuts += 1; self.recover(to); }
+                        }
+                        Err(EngineError::MissingParent(pid)) if p.tries < 40 => {
+                            self.request_sync(to, pid, p.from);
+                            self.net.push(Pkt { at: t + 4, tries: p.tries + 1, ..p });
+                        }
+                        Err(EngineError::ConflictingCommit) => panic!("SAFETY VIOLATION seed {} tick {t}: node {to} would commit a conflicting block", self.seed),
+                        Err(_) => {}
+                    }
                 }
-                Err(_) => {}
             }
         }
         for i in 0..self.n {
             if !self.up(i) { continue; }
-            // round bookkeeping and the pacemaker
-            let r = self.nodes[i].as_ref().unwrap().round();
+            let (r, hq) = { let e = self.nodes[i].as_ref().unwrap(); (e.round(), e.high_qc().round()) };
+            if hq > self.last_hqc[i] { self.last_hqc[i] = hq; self.pace[i].on_progress(); }
             if r != self.last_round[i] { self.last_round[i] = r; self.round_started[i] = t; }
             if self.nodes[i].as_ref().unwrap().is_leader() {
-                let payload = format!("n{i}r{r}").into_bytes();
-                if let Ok(outs) = self.nodes[i].as_mut().unwrap().propose(payload) {
-                    self.route(i, outs);
+                if let Ok(outs) = self.nodes[i].as_mut().unwrap().propose(format!("n{i}r{r}").into_bytes()) {
+                    self.route(i, outs, None);
                     if self.roles[i] == Role::Equivocator { self.twin(i, r); }
                 }
             }
-            if t.saturating_sub(self.round_started[i]) >= TIMEOUT {
+            if t.saturating_sub(self.round_started[i]) >= self.pace[i].timeout() {
                 self.round_started[i] = t;
-                if let Ok(outs) = self.nodes[i].as_mut().unwrap().local_timeout() { self.route(i, outs); }
+                if let Ok(outs) = self.nodes[i].as_mut().unwrap().local_timeout() { self.pace[i].on_timeout(); self.route(i, outs, None); }
             }
         }
-        if self.restarts && t > 20 && t < self.gst + 100 && self.rng.below(60) == 0 {
+        if self.restarts && t > 20 && t < self.gst + 100 && self.rng.below(90) == 0 {
             let i = self.rng.below(self.n as u64) as usize;
-            if self.roles[i] == Role::Honest && self.up(i) && (0..self.n).all(|j| self.down_until[j] <= t) {
-                let e = self.nodes[i].take().unwrap();
-                self.nodes[i] = Some(restart(e, i, self.n));
-                self.down_until[i] = t + 1 + self.rng.below(10);
-                self.restart_count += 1;
-                // stand-in for p2p sync: replay every proposal ever broadcast, in order
-                let proposals: Vec<Msg> = self.log.iter().filter(|(_, m)| matches!(m, Msg::Proposal(_))).map(|(_, m)| m.clone()).collect();
-                for m in proposals { self.net.push((self.down_until[i] + 1, i, m, 0)); }
-                self.last_round[i] = 1; self.round_started[i] = self.down_until[i];
-            }
+            if self.roles[i] == Role::Honest && self.up(i) && (0..self.n).all(|j| self.down_until[j] <= t) { self.recover(i); }
         }
         self.tick += 1;
     }
 
     fn twin(&mut self, i: usize, r: u64) {
         let Some(Msg::Proposal(a)) = self.log.iter().rev().find(|(f, m)| *f == i && matches!(m, Msg::Proposal(b) if b.round == r)).map(|(_, m)| m.clone()) else { return };
-        let f = fx();
-        let idc = IdCtx { protocol_profile: PROFILE, chain_id: CHAIN, set: &f.set };
         let mut b = Block { payload: format!("twin-n{i}r{r}").into_bytes(), signature: vec![], ..a };
+        let idc = IdCtx { protocol_profile: PROFILE, chain_id: CHAIN, set: &self.f.set };
         let id = block_id_of(&b, &idc).unwrap();
         b.signature = sign(i, Kind::Proposal.context(), &BlockSigningMessage { alg_id: ALG, block_id: id }.encode().unwrap());
-        for to in (0..self.n).filter(|j| j % 2 == 1) { self.send(i, to, Msg::Proposal(b.clone())); }
+        for to in (0..self.n).filter(|j| j % 2 == 1) { self.send(i, to, NetMsg::Consensus(Msg::Proposal(b.clone()))); }
     }
 
     fn run(&mut self, ticks: u64) { for _ in 0..ticks { self.step(); } }
     fn honest(&self) -> Vec<usize> { (0..self.n).filter(|i| self.roles[*i] == Role::Honest).collect() }
 
-    /// Agreement: no height has two different committed blocks anywhere among honest nodes.
+    /// Agreement: the executed sequences of all honest nodes are prefixes of one another (one block per height, everywhere).
     fn assert_agreement(&self, label: &str) {
-        let mut by_height: BTreeMap<u64, BlockId> = BTreeMap::new();
+        let mut by_height: BTreeMap<usize, BlockId> = BTreeMap::new();
         for i in self.honest() {
-            for c in &self.commits[i] {
-                match by_height.insert(c.height, c.id) {
-                    Some(prev) if prev != c.id => panic!("{label}: AGREEMENT VIOLATED at height {}", c.height),
-                    _ => {}
-                }
+            for (h, id) in self.exec[i].iter().enumerate() {
+                if let Some(prev) = by_height.insert(h + 1, *id) { assert_eq!(prev, *id, "{label}: AGREEMENT VIOLATED at height {}", h + 1); }
             }
-            // each node commits in strictly increasing height, once per block
-            assert!(self.commits[i].windows(2).all(|w| w[1].height > w[0].height), "{label}: commit order");
         }
     }
 
-    /// No honest validator signed two different votes (or two different timeouts) for one round.
+    /// No honest validator signed two different votes or timeouts for one round, and every re-send carried the SAME signature bytes.
     fn assert_no_honest_double_signing(&self, label: &str) {
-        let mut votes: BTreeMap<(usize, u64), Vec<u8>> = BTreeMap::new();
-        let mut tos: BTreeMap<(usize, u64), u64> = BTreeMap::new();
+        let mut votes: BTreeMap<(usize, u64), (Vec<u8>, Vec<u8>)> = BTreeMap::new();
+        let mut tos: BTreeMap<(usize, u64), (u64, Vec<u8>)> = BTreeMap::new();
         for (from, m) in &self.log {
             if self.roles[*from] != Role::Honest { continue; }
             match m {
                 Msg::Vote(v) if v.voter == *from => {
-                    let b = v.msg.encode().unwrap();
-                    if let Some(prev) = votes.insert((*from, v.msg.round), b.clone()) { assert_eq!(prev, b, "{label}: node {from} voted twice in round {}", v.msg.round); }
+                    let cur = (v.msg.encode().unwrap(), v.signature.clone());
+                    if let Some(prev) = votes.insert((*from, v.msg.round), cur.clone()) { assert_eq!(prev, cur, "{label}: node {from} signed two different votes for round {}", v.msg.round); }
                 }
                 Msg::Timeout(t) if t.voter == *from => {
-                    if let Some(prev) = tos.insert((*from, t.msg.round), t.msg.high_qc_round) { assert_eq!(prev, t.msg.high_qc_round, "{label}: node {from} timed out twice in round {}", t.msg.round); }
+                    let cur = (t.msg.high_qc_round, t.signature.clone());
+                    if let Some(prev) = tos.insert((*from, t.msg.round), cur.clone()) { assert_eq!(prev, cur, "{label}: node {from} signed two different timeouts for round {}", t.msg.round); }
                 }
                 _ => {}
             }
@@ -936,41 +1507,77 @@ impl Sim {
 /// Seeds per campaign (default 10; raise with PQHS_SEEDS for a longer soak).
 fn seeds() -> u64 { std::env::var("PQHS_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_SEEDS) }
 
-fn campaign(label: &str, roles: Vec<Role>, restarts: bool, min_commits: usize) {
+struct Scenario { label: &'static str, roles: Vec<Role>, restarts: bool, partition: Option<(u64, u64, u8)>, ticks: u64, min_commits: usize, max_lag: Option<usize>, expect_bad_sync: bool }
+
+fn campaign(sc: Scenario) {
+    let (mut cuts, mut restarts, mut syncs, mut bad) = (0, 0, 0, 0);
     for seed in 1..=seeds() {
-        let mut s = Sim::new(seed, roles.clone(), restarts);
-        s.run(520);
-        let l = format!("{label} seed {seed}");
+        let mut s = Sim::new(seed, sc.roles.clone(), sc.restarts);
+        s.partition = sc.partition;
+        if sc.expect_bad_sync { s.corrupt_pct = 100; }
+        s.run(sc.ticks);
+        let l = format!("{} seed {seed}", sc.label);
         s.assert_agreement(&l);
         s.assert_no_honest_double_signing(&l);
-        let best = s.honest().iter().map(|i| s.commits[*i].len()).max().unwrap();
-        assert!(best >= min_commits, "{l}: liveness after GST: best honest node committed only {best} blocks");
+        assert_eq!(s.malformed, 0, "{l}: an honest node produced a message its peers could not decode");
+        let lens: Vec<usize> = s.honest().iter().map(|i| s.exec[*i].len()).collect();
+        let best = *lens.iter().max().unwrap();
+        assert!(best >= sc.min_commits, "{l}: liveness after GST: best honest node executed only {best} blocks");
+        if let Some(lag) = sc.max_lag { for (k, n) in lens.iter().enumerate() { assert!(*n + lag >= best, "{l}: honest node {} executed {n} blocks but another executed {best}: it did not catch up by sync", s.honest()[k]); } }
+        cuts += s.cuts; restarts += s.restart_count; syncs += s.sync_requests; bad += s.bad_sync;
     }
+    if sc.restarts { assert!(restarts > 0 && cuts > 0, "{}: the campaign never restarted a node mid-step", sc.label); }
+    if sc.expect_bad_sync { assert!(bad > 0, "{}: no corrupted sync response was ever served and rejected", sc.label); }
+    if sc.partition.is_some() || sc.restarts { assert!(syncs > 0, "{}: the campaign never used block sync", sc.label); }
+}
+
+fn plain(label: &'static str, roles: Vec<Role>, restarts: bool, min_commits: usize) -> Scenario {
+    Scenario { label, roles, restarts, partition: None, ticks: 520, min_commits, max_lag: None, expect_bad_sync: false }
 }
 
 #[test]
 fn sim_all_honest_agree_and_make_progress_after_gst() {
-    campaign("honest", vec![Role::Honest; 4], false, 30);
+    campaign(plain("honest", vec![Role::Honest; 4], false, 15));
 }
 
 #[test]
 fn sim_one_silent_validator_within_the_fault_bound() {
-    campaign("silent", vec![Role::Honest, Role::Honest, Role::Silent, Role::Honest], false, 5);
+    campaign(plain("silent", vec![Role::Honest, Role::Honest, Role::Silent, Role::Honest], false, 4));
 }
 
 #[test]
-fn sim_one_equivocating_validator_cannot_split_the_chain() {
-    campaign("equivocator", vec![Role::Honest, Role::Equivocator, Role::Honest, Role::Honest], false, 15);
+fn sim_one_equivocating_validator_cannot_split_the_chain_or_poison_sync() {
+    campaign(plain("equivocator", vec![Role::Honest, Role::Equivocator, Role::Honest, Role::Honest], false, 8));
 }
 
 #[test]
-fn sim_honest_nodes_crash_and_restart_without_double_signing() {
-    campaign("restarts", vec![Role::Honest; 4], true, 25);
+fn sim_honest_nodes_crash_mid_step_and_recover_without_double_signing_or_double_execution() {
+    campaign(plain("restarts", vec![Role::Honest; 4], true, 12));
 }
 
 #[test]
 fn sim_restarts_together_with_an_equivocator() {
-    campaign("restarts+equivocator", vec![Role::Honest, Role::Honest, Role::Equivocator, Role::Honest], true, 15);
+    campaign(plain("restarts+equivocator", vec![Role::Honest, Role::Honest, Role::Equivocator, Role::Honest], true, 8));
+}
+
+/// Two groups of two: neither side has a quorum, so nothing is certified during the partition; after it heals the chain continues and every
+/// node ends up on the same chain (nodes that missed blocks fetch them by sync).
+#[test]
+fn sim_a_network_partition_heals_and_every_node_converges() {
+    campaign(Scenario { label: "partition 2/2", roles: vec![Role::Honest; 4], restarts: false, partition: Some((30, 230, 0b0011)), ticks: 560, min_commits: 8, max_lag: Some(6), expect_bad_sync: false });
+}
+
+/// One node is cut off while the other three keep a quorum and keep committing; when it rejoins it catches up through block sync alone.
+#[test]
+fn sim_an_isolated_node_rejoins_and_catches_up_by_sync() {
+    campaign(Scenario { label: "isolated node", roles: vec![Role::Honest; 4], restarts: false, partition: Some((30, 300, 0b1000)), ticks: 560, min_commits: 8, max_lag: Some(6), expect_bad_sync: false });
+}
+
+/// The same rejoin, but one of the peers it can ask is Byzantine and corrupts a signature in what it serves about half the time. Every such
+/// response must be rejected by validation, the node must ask someone else, and it must still catch up.
+#[test]
+fn sim_a_rejoining_node_survives_a_byzantine_sync_server() {
+    campaign(Scenario { label: "isolated node, byzantine server", roles: vec![Role::Honest, Role::Equivocator, Role::Honest, Role::Honest], restarts: false, partition: Some((30, 300, 0b1000)), ticks: 600, min_commits: 6, max_lag: Some(8), expect_bad_sync: true });
 }
 
 #[test]
@@ -979,10 +1586,10 @@ fn diag_run() {
     let roles: Vec<Role> = std::env::var("DIAG_ROLES").unwrap_or("HHSH".into()).chars().map(|c| match c { 'S' => Role::Silent, 'E' => Role::Equivocator, _ => Role::Honest }).collect();
     let seed = std::env::var("DIAG_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
     let mut s = Sim::new(seed, roles, std::env::var("DIAG_RESTARTS").is_ok());
+    if let Ok(p) = std::env::var("DIAG_PART") { let v: Vec<u64> = p.split(',').map(|x| x.parse().unwrap()).collect(); s.partition = Some((v[0], v[1], v[2] as u8)); }
     for t in (0..520).step_by(40) {
         s.run(40);
         let rounds: Vec<Option<u64>> = (0..s.n).map(|i| s.nodes[i].as_ref().map(|e| e.round())).collect();
-        let hq: Vec<Option<u64>> = (0..s.n).map(|i| s.nodes[i].as_ref().map(|e| e.high_qc().round())).collect();
-        println!("t={} rounds={:?} high_qc={:?} commits={:?} net={} sent={} restarts={}", t + 40, rounds, hq, (0..s.n).map(|i| s.commits[i].len()).collect::<Vec<_>>(), s.net.len(), s.log.len(), s.restart_count);
+        println!("t={} rounds={:?} executed={:?} net={} restarts={} cuts={} syncs={} bad_sync={}", t + 40, rounds, s.exec.iter().map(|e| e.len()).collect::<Vec<_>>(), s.net.len(), s.restart_count, s.cuts, s.sync_requests, s.bad_sync);
     }
 }

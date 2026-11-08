@@ -110,7 +110,20 @@ pub enum GossipTopic {
     /// to prefer idle peers with matching workload support. No consensus
     /// impact; ignoring capacity ads is always safe.
     CapacityAd,
+
+    /// PQ-HotStuff-2 (DRAFT; docs/pq-hotstuff-001-spec.md). These four topics are DEFINED here but NOT subscribed by default: a node
+    /// subscribes to them only when the PQ-HotStuff-2 engine is wired in (a later change), so Tendermint nodes are unaffected.
+    /// Payloads are the `CFH1|net|` envelope of `chain-forge-consensus::pq_hotstuff::netmsg`, bounded by an owner-configured limit.
+    PqProposal,
+    PqVote,
+    PqTimeout,
+    PqSync,
 }
+
+pub const PQ_TOPIC_PROPOSAL: &str = "qattice/pq-hotstuff-2/proposal/v1";
+pub const PQ_TOPIC_VOTE: &str = "qattice/pq-hotstuff-2/vote/v1";
+pub const PQ_TOPIC_TIMEOUT: &str = "qattice/pq-hotstuff-2/timeout/v1";
+pub const PQ_TOPIC_SYNC: &str = "qattice/pq-hotstuff-2/sync/v1";
 
 impl GossipTopic {
     pub fn as_str(&self) -> &str {
@@ -124,6 +137,10 @@ impl GossipTopic {
             Self::DiscoveryProof      => "qcb/pocd-proofs/v1",
             Self::VerifierAttestation => "qcb/verifier-attestations/v1",
             Self::CapacityAd          => "qcb/capacity-ads/v1",
+            Self::PqProposal          => PQ_TOPIC_PROPOSAL,
+            Self::PqVote              => PQ_TOPIC_VOTE,
+            Self::PqTimeout           => PQ_TOPIC_TIMEOUT,
+            Self::PqSync              => PQ_TOPIC_SYNC,
         }
     }
 }
@@ -1139,6 +1156,10 @@ pub mod real {
             GossipTopic::DiscoveryProof      => "qcb/pocd-proofs/v1",
             GossipTopic::VerifierAttestation => "qcb/verifier-attestations/v1",
             GossipTopic::CapacityAd          => "qcb/capacity-ads/v1",
+            GossipTopic::PqProposal          => PQ_TOPIC_PROPOSAL,
+            GossipTopic::PqVote              => PQ_TOPIC_VOTE,
+            GossipTopic::PqTimeout           => PQ_TOPIC_TIMEOUT,
+            GossipTopic::PqSync              => PQ_TOPIC_SYNC,
         }
     }
 
@@ -1153,6 +1174,10 @@ pub mod real {
             "qcb/pocd-proofs/v1"               => Some(GossipTopic::DiscoveryProof),
             "qcb/verifier-attestations/v1"     => Some(GossipTopic::VerifierAttestation),
             "qcb/capacity-ads/v1"              => Some(GossipTopic::CapacityAd),
+            PQ_TOPIC_PROPOSAL                  => Some(GossipTopic::PqProposal),
+            PQ_TOPIC_VOTE                      => Some(GossipTopic::PqVote),
+            PQ_TOPIC_TIMEOUT                   => Some(GossipTopic::PqTimeout),
+            PQ_TOPIC_SYNC                      => Some(GossipTopic::PqSync),
             _                                  => None,
         }
     }
@@ -1343,5 +1368,20 @@ mod tests {
         svc.ban_peer(id.clone(), "misbehaving").await.unwrap();
         assert_eq!(svc.peer_manager.peer_count(), 0);
         assert!(svc.peer_manager.is_banned(&id));
+    }
+
+    #[test]
+    fn pq_hotstuff_topics_are_distinct_versioned_and_separate_from_the_existing_ones() {
+        let all = [
+            GossipTopic::BlockProposal, GossipTopic::ConsensusVote, GossipTopic::Transaction, GossipTopic::PeerAnnounce,
+            GossipTopic::SyncRequest, GossipTopic::SyncResponse, GossipTopic::DiscoveryProof, GossipTopic::VerifierAttestation,
+            GossipTopic::CapacityAd, GossipTopic::PqProposal, GossipTopic::PqVote, GossipTopic::PqTimeout, GossipTopic::PqSync,
+        ];
+        let names: std::collections::BTreeSet<&str> = all.iter().map(|t| t.as_str()).collect();
+        assert_eq!(names.len(), all.len(), "every topic has its own name");
+        for t in [GossipTopic::PqProposal, GossipTopic::PqVote, GossipTopic::PqTimeout, GossipTopic::PqSync] {
+            assert!(t.as_str().starts_with("qattice/pq-hotstuff-2/") && t.as_str().ends_with("/v1"), "{}", t.as_str());
+        }
+        assert_eq!(GossipTopic::PqVote.as_str(), PQ_TOPIC_VOTE);
     }
 }

@@ -129,6 +129,15 @@ impl MemStorage {
     }
 }
 
+impl MemStorage {
+    /// Names of the files the running process currently sees.
+    pub fn names(&self) -> Vec<String> { self.vol.keys().cloned().collect() }
+}
+
+impl chain_forge_consensus::pq_hotstuff::blockstore::BlockFiles for MemStorage {
+    fn names(&self) -> Result<Vec<String>, StorageError> { Ok(MemStorage::names(self)) }
+}
+
 fn err(e: String) -> StorageError { StorageError(e) }
 
 impl Storage for MemStorage {

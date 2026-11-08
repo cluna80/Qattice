@@ -16,6 +16,17 @@ impl FsStorage {
         Ok(FsStorage { dir })
     }
 
+    /// Names of the regular files in the directory (used by the block store to find its files after a restart).
+    pub fn list_names(&self) -> Result<Vec<String>, StorageError> {
+        let mut out = vec![];
+        for e in std::fs::read_dir(&self.dir).map_err(io)? {
+            let e = e.map_err(io)?;
+            if e.file_type().map_err(io)?.is_file() { if let Some(n) = e.file_name().to_str() { out.push(n.to_string()); } }
+        }
+        out.sort();
+        Ok(out)
+    }
+
     /// File names are plain names: no separators, no `..`, not empty, so nothing escapes the directory.
     fn path(&self, name: &str) -> Result<PathBuf, StorageError> {
         if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\', '\0']) {
