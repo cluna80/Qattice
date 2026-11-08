@@ -26,3 +26,15 @@ export PQHS_SEEDS=60   # then repeat the line above
 cargo test --release -p chain-forge-consensus --features pq-hotstuff --test pq_hotstuff_engine
 cargo test --release -p chain-forge-consensus --features pq-hotstuff --test pq_hotstuff_foundation
 ```
+
+## Windows confirmation (supplied by the owner; MINGW64, `C:\Dev\qattice-main-wt`) — recorded separately from the Linux results
+Commit `6ab56accf221cb01a88915d069efcc33176d6269` (`git rev-parse HEAD` printed by the owner), release mode:
+| Run | Result | Time |
+|---|---|---|
+| real ML-DSA-65 `pq_hotstuff_engine_fips204`, default seeds | 55 passed, 0 failed, 1 ignored | 175.37 s |
+| same, `PQHS_SEEDS=60` | 55 passed, 0 failed, 1 ignored | 199.26 s |
+| doubles `pq_hotstuff_engine`, `PQHS_SEEDS=60` still exported | 55 passed, 0 failed, 1 ignored | 481.24 s |
+| `pq_hotstuff_foundation` (earlier paste, same branch) | 30 passed | 0.03 s |
+
+This confirms the PR 3 engine, sync, store, pacemaker and envelope tests on Windows at the pinned commit. It does not close any milestone: pruning is
+unimplemented, and the owner decisions listed in the PR remain open. The earlier first paste on this branch lacked result lines and is superseded by this one.
