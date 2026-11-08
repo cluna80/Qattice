@@ -52,3 +52,15 @@ The live test spawns four processes and uses free local ports; allow the Windows
 ## Still open (unchanged by this PR)
 U5 payload codec; owner approval of the draft QC/TC layouts; PO-4; D2 certificate sizing for 1,000 validators (this PR adds no committee); production key
 storage (#109) and a real monotonic counter; authenticated snapshot recovery and defensive pruning (next, against this execution boundary).
+
+## Windows results (supplied by the owner; MINGW64, `C:\Dev\qattice-main-wt`, branch `feat/pq-hotstuff-2-node-driver`) — recorded separately
+The paste did not include `git rev-parse HEAD`, so the commit is **not confirmed by the paste**. The test counts (68, including the tests added last) and the
+presence of `pq_devnet_live` match the pushed head `c7b2ffb2e4c5d03f344dce63ae3668491c6a5af6`; the owner is asked to confirm the hash. Release mode:
+| Run | Result | Time |
+|---|---|---|
+| real ML-DSA-65 `pq_hotstuff_engine_fips204`, default seeds | 68 passed, 0 failed, 1 ignored | 182.34 s |
+| doubles `pq_hotstuff_engine`, default seeds | 68 passed, 0 failed, 1 ignored | 420.88 s |
+| **LIVE** `pq_devnet_live` (four processes, real ML-DSA-65) | 1 passed | 35.08 s |
+The live run on Windows: all four executed height 6 in 1.8 s; a killed node recovered and caught up; the partitioned node rejoined (heights [22, 21, 20, 21]
+right after healing); after a full restart the chain continued from 25 to 26; every phase reported agreement on block id and state digest (18, 26, 55 and 14
+cross-node comparisons) and no fatal error. The 60-seed real-crypto run was not requested for this commit and has not been run on Windows.
