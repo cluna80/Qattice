@@ -1,0 +1,25 @@
+# Windows validation record: PQ-HotStuff-2 PRs #133 and #134
+
+Recorded 2026-11-08 from the output the owner pasted (developer machine "BossKing", Git Bash / MINGW64, worktree `C:\Dev\qattice-main-wt`, detached HEAD at each pinned commit). The claude sandbox did not run these; this file only records what the owner reported. Nothing here is a roadmap change.
+
+## #133 engine foundation, commit `cb68259f289b681ebf12b268664d2abf00ad7b66` (`git rev-parse HEAD` confirmed)
+
+| Command | Result |
+|---|---|
+| `cargo test -p chain-forge-core --lib` | 74 passed, 0 failed |
+| `cargo test -p chain-forge-consensus --lib` | 98 passed, 0 failed (includes the Tendermint engine and simulations) |
+| `cargo test -p chain-forge-consensus --features pq-hotstuff --test pq_hotstuff_foundation --test pq_hotstuff_safety --test pq_hotstuff_wire` | foundation 30, safety 76, wire 24: all passed (safety 52.70 s in debug) |
+| `cargo check -p chain-forge-node` | finished without errors (only pre-existing warnings in code the PR does not touch) |
+
+## #134 engine core, commit `164e44daa1bc18d46511c6869d71ebac738081eb` (`git rev-parse HEAD` confirmed; includes #133)
+
+| Command | Result |
+|---|---|
+| `cargo test --release -p chain-forge-consensus --features pq-hotstuff --test pq_hotstuff_engine --test pq_hotstuff_foundation --test pq_hotstuff_safety --test pq_hotstuff_wire` | engine 32 passed, 1 ignored (diagnostic), 68.89 s; foundation 30; safety 76 (1.00 s); wire 24: all passed |
+
+The five simulation campaigns (all honest, one silent, one equivocator, crash/restart, restart plus equivocator; 10 seeds each) passed on Windows.
+
+## What this does and does not show
+* Shows: the foundation and the fixed-validator-set engine behave on Windows as on Linux at these commits.
+* Does not show: behaviour with real FIPS 204 signatures in the engine (these simulations use the non-cryptographic test doubles); the PO-4 epoch-transition question; anything about networking, sync or persistence beyond the safety store.
+* This validates the two draft PRs; neither is merged.
