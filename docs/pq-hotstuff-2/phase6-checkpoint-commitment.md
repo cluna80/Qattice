@@ -51,3 +51,11 @@ git fetch origin feat/pq-hotstuff-2-checkpoint-commitment && git checkout feat/p
 cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204 --test pq_hotstuff_engine_fips204 2>&1 | grep -E "test result|FAILED"
 cargo test --release -p chain-forge-consensus --features pq-hotstuff --test pq_hotstuff_engine 2>&1 | grep -E "test result|FAILED"
 ```
+
+## Windows results (supplied by the owner; MINGW64, `C:\Dev\qattice-main-wt`, branch `feat/pq-hotstuff-2-checkpoint-commitment`) — recorded separately
+`git rev-parse HEAD` printed **`73e4a69240da92cf46d6ed6ec634d26da8faaab1`** in the paste, so the revision is confirmed by the output. Release mode:
+| Run | Result | Time |
+|---|---|---|
+| real ML-DSA-65 `pq_hotstuff_engine_fips204`, default seeds | 139 passed, 0 failed, 2 ignored | 199.77 s |
+| doubles `pq_hotstuff_engine`, default seeds | 139 passed, 0 failed, 2 ignored | 500.51 s |
+The ignored count is 2 here against the 3 in the Linux table above: the Linux figures were taken before the temporary golden-value diagnostic test was deleted from the final commit; the pass count is identical. Not run on Windows for this revision: the 60-seed soak and the live four-node test (the latter does not use profile v3). This closes no milestone: profile v3 is off and unwired, snapshot-based engine seeding is not implemented, and the change still needs the owner's consensus review.
