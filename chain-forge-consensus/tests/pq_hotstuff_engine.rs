@@ -12,3 +12,6 @@ mod doubles;
 // (tests/pq_hotstuff_engine_fips204.rs).
 const DEFAULT_SEEDS: u64 = 10;
 include!("common/pq_engine_suite.rs");
+#[path = "common/pq_tree_doubles.rs"]
+mod tree_doubles;
+include!("common/pq_recovery_suite.rs");

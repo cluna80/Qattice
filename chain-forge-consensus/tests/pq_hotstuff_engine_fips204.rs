@@ -63,3 +63,6 @@ mod real {
 /// Seeds per simulation campaign with real signatures (raise with PQHS_SEEDS for a longer soak).
 const DEFAULT_SEEDS: u64 = 10;
 include!("common/pq_engine_suite.rs");
+#[path = "common/pq_tree_doubles.rs"]
+mod tree_doubles;
+include!("common/pq_recovery_suite.rs");

@@ -32,3 +32,5 @@ pub mod exec;
 pub mod driver;
 #[cfg(feature = "pq-hotstuff")]
 pub mod header;
+#[cfg(feature = "pq-hotstuff")]
+pub mod recovery;
