@@ -46,3 +46,11 @@ cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204 --t
 cargo test --release -p chain-forge-consensus --features pq-hotstuff --test pq_hotstuff_engine 2>&1 | grep -E "test result|FAILED"
 ```
 The real-directory test (`two_successive_installs_on_a_real_directory...`) also exercises directory rename and `fsync` of files and directories on NTFS; it can show that they succeed, not that they are power-loss durable.
+
+## Windows results (supplied by the owner; MINGW64, `C:\Dev\qattice-main-wt`, branch `feat/pq-hotstuff-2-recovery-components`) — recorded separately
+`git rev-parse HEAD` printed **`60efdf2b0ab595ecc41188ccbf9731731b9a39cf`** in the paste, so the revision is confirmed by the output. The checkout was a clean switch to a new local branch. Release mode:
+| Run | Result | Time |
+|---|---|---|
+| real ML-DSA-65 `pq_hotstuff_engine_fips204`, default seeds | 108 passed, 0 failed, 2 ignored | 193.00 s |
+| doubles `pq_hotstuff_engine`, default seeds | 108 passed, 0 failed, 2 ignored | 472.78 s |
+Both suites include the real-directory two-install test, so directory rename, file and directory `fsync` and the staged install ran to completion on NTFS; as stated above, that shows the calls succeed, not that they are power-loss durable. Not run on Windows for this revision: the 60-seed soak and the live four-node test. This closes no milestone: the components are disabled and unwired, and the checkpoint-reference consensus change is not implemented.
