@@ -81,3 +81,11 @@ cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204 --t
 cargo test --release -p chain-forge-consensus --features pq-hotstuff --test pq_hotstuff_engine 2>&1 | grep -E "test result|FAILED"
 ```
 Add `-- --ignored --nocapture diag_header` to the first command to print the replay-cost diagnostic on Windows.
+
+## 8. Windows results (supplied by the owner; MINGW64, `C:\Dev\qattice-main-wt`, branch `feat/pq-hotstuff-2-block-headers`) — recorded separately
+`git rev-parse HEAD` printed **`6d45a7fb658ebb13185459e8008e33daa9a5c90a`** in the paste, so the revision is confirmed by the output. Release mode:
+| Run | Result | Time |
+|---|---|---|
+| real ML-DSA-65 `pq_hotstuff_engine_fips204`, default seeds | 77 passed, 0 failed, 2 ignored | 183.77 s |
+| doubles `pq_hotstuff_engine`, default seeds | 77 passed, 0 failed, 2 ignored | 423.08 s |
+Not run on Windows for this revision: the 60-seed soak, the live four-node test, and the ignored replay-cost diagnostic. This closes no milestone; Step 1 only authenticates committed history.
