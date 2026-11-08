@@ -8,6 +8,7 @@
 //! the transport path refuses to start until the owner has set `PqLimits::max_message_bytes` at or above the derived minimum.
 use super::certs::{Block, Cert, Tc, ALG, MAX_CERT_VALIDATORS};
 use super::engine::{Msg, TimeoutMsg, VoteMsg};
+use super::header::PayloadFreeBlock;
 use super::limits::{qc_max_bytes, tc_max_bytes, PqLimits};
 use super::sync::{SyncRequest, SyncResponse};
 use super::wire::{TimeoutMessage, VoteMessage, MAX_NAME_LEN, MLDSA65_SIGNATURE_LEN};
@@ -156,6 +157,39 @@ fn put_block(o: &mut Vec<u8>, b: &Block) {
     put_bytes(o, &b.payload);
     o.extend_from_slice(&(b.proposer as u32).to_be_bytes());
     put_bytes(o, &b.signature);
+}
+
+fn put_header(o: &mut Vec<u8>, h: &PayloadFreeBlock) {
+    o.extend_from_slice(&h.epoch.to_be_bytes());
+    o.extend_from_slice(&h.round.to_be_bytes());
+    o.extend_from_slice(&h.height.to_be_bytes());
+    o.extend_from_slice(&h.parent_id);
+    put_bytes(o, &h.qc.encode());
+    match &h.tc { None => o.push(0), Some(t) => { o.push(1); put_bytes(o, &t.encode()); } }
+    o.extend_from_slice(&h.payload_hash);
+    o.extend_from_slice(&(h.proposer as u32).to_be_bytes());
+    put_bytes(o, &h.signature);
+}
+
+/// DRAFT canonical encoding of a payload-free header: the block layout with the length-prefixed payload replaced by its 32-byte hash. Not part of
+/// the network envelope yet (message kinds and bounds for header sync are an open decision, S4).
+pub fn encode_header(h: &PayloadFreeBlock) -> Vec<u8> { let mut o = vec![]; put_header(&mut o, h); o }
+
+pub fn decode_header(b: &[u8]) -> Result<PayloadFreeBlock, NetError> {
+    let mut r = Rd { b, p: 0 };
+    let (epoch, round, height, parent_id) = (r.u64()?, r.u64()?, r.u64()?, r.h32()?);
+    let qc = Cert::decode(r.bytes()?).map_err(|_| NetError::Malformed("parent certificate"))?;
+    let tc = match r.u8()? {
+        0 => None,
+        1 => Some(Tc::decode(r.bytes()?).map_err(|_| NetError::Malformed("timeout certificate"))?),
+        _ => return Err(NetError::Malformed("option flag")),
+    };
+    let payload_hash = r.h32()?;
+    let proposer = r.u32()? as usize;
+    let signature = r.bytes()?.to_vec();
+    if signature.len() != MLDSA65_SIGNATURE_LEN { return Err(NetError::Malformed("signature length")); }
+    if r.left() != 0 { return Err(NetError::Malformed("trailing bytes")); }
+    Ok(PayloadFreeBlock { epoch, round, height, parent_id, qc, tc, payload_hash, proposer, signature })
 }
 
 /// The canonical encoding of a block (used by the network envelope and by the block store).

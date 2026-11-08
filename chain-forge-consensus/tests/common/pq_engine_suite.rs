@@ -10,6 +10,8 @@ use chain_forge_consensus::pq_hotstuff::engine::*;
 use chain_forge_consensus::pq_hotstuff::blockstore::{BlockStore, StoreError};
 use chain_forge_consensus::pq_hotstuff::driver::{classify_engine_error, validate_config, Driver, DriverConfig, DriverError, Outbound};
 use chain_forge_consensus::pq_hotstuff::exec::{ExecCursor, ExecError, Executor, InterimApp};
+use chain_forge_consensus::pq_hotstuff::header::{verify_header_chain, Anchor, ChainParams, ChainPoint, HeaderError, PayloadFreeBlock, Start, VerifiedChain};
+use chain_forge_consensus::pq_hotstuff::netmsg::{decode_header, encode_block, encode_header};
 use chain_forge_consensus::pq_hotstuff::limits::PqLimits;
 use chain_forge_consensus::pq_hotstuff::netmsg::{self as net, MessageLimits, NetLimitError, NetMsg, SYNC_BLOCKS_CEILING};
 use chain_forge_consensus::pq_hotstuff::pacemaker::{Pacemaker, PacemakerConfig, PacemakerError};
@@ -2007,4 +2009,321 @@ fn a_sync_response_that_does_not_answer_the_request_is_rejected_by_the_driver() 
     d3.on_bytes(0, &net::encode(&NetMsg::SyncResponse(bogus)), net.now).unwrap();
     assert_eq!(d3.stats().bad_sync, before.bad_sync + 1, "a response that does not end at the requested block is counted and dropped");
     assert_eq!(d3.status().committed_height, 0);
+}
+
+// ============================================================================================================================
+// Payload-free headers and header-chain verification (snapshot-recovery Step 1). Headers authenticate committed HISTORY (ids, payload hashes,
+// finality); they say nothing about application state, which no block commits to.
+// ============================================================================================================================
+fn cparams(set: &EpochSet) -> ChainParams<'_> { ChainParams { protocol_profile: PROFILE, chain_id: CHAIN, set, genesis_hash: GENESIS_HASH, seed: 0 } }
+
+/// The linear chain from genesis to the block certified by node `i`'s high QC, and that QC (None while only the genesis certificate exists).
+fn chain_to(net: &DNet, i: usize) -> (Vec<Block>, Option<Cert>) {
+    let e = net.nodes[i].as_ref().unwrap().engine();
+    let all: BTreeMap<BlockId, Block> = e.known_blocks().into_iter().filter_map(|b| id_of(b).map(|id| (id, b.clone()))).collect();
+    let hq = e.high_qc().clone();
+    let Cert::Qc(q) = &hq else { return (vec![], None) };
+    let (mut cur, mut out) = (q.block_id, vec![]);
+    while let Some(b) = all.get(&cur) { out.push(b.clone()); cur = b.parent_id; }
+    out.reverse();
+    (out, Some(hq))
+}
+fn headers_of(bs: &[Block]) -> Vec<PayloadFreeBlock> { bs.iter().map(Block::to_header).collect() }
+fn ids_of(v: &VerifiedChain) -> Vec<(u64, BlockId)> { v.finalized.iter().map(|p| (p.height, p.id)).collect() }
+/// A header with new fields, correctly signed by its proposer's key: invalid for exactly the reason under test, not for a bad signature.
+fn resign(mut h: PayloadFreeBlock) -> PayloadFreeBlock {
+    let f = fx();
+    let id = h.id(&idctx(&f)).unwrap();
+    h.signature = sign(h.proposer, Kind::Proposal.context(), &BlockSigningMessage { alg_id: ALG, block_id: id }.encode().unwrap());
+    h
+}
+fn failure_at(r: Result<VerifiedChain, HeaderError>) -> (usize, String) {
+    match r { Err(HeaderError::Invalid { index, reason }) => (index, reason.to_string()), Err(HeaderError::Cert { index, source }) => (index, source.to_string()), Err(e) => panic!("unexpected error {e:?}"), Ok(_) => panic!("an invalid chain verified") }
+}
+
+/// A run with a silent validator (so some headers carry timeout certificates), and node 0's verified chain.
+fn tc_chain() -> (DNet, Vec<Block>, Option<Cert>) {
+    let mut net = DNet::new(4, &[3], "a");
+    assert!(net.run_until(8000, |n| (0..3).all(|i| n.height(i) >= 10)));
+    let (bs, fq) = chain_to(&net, 0);
+    assert!(bs.len() >= 8 && bs.iter().any(|b| b.tc.is_some()), "the run must contain timeout-certificate headers");
+    (net, bs, fq)
+}
+
+#[test]
+fn a_payload_free_header_reconstructs_the_same_block_id_and_binds_exactly_one_payload() {
+    let (_net, bs, _) = tc_chain();
+    let f = fx();
+    for b in &bs {
+        let h = b.to_header();
+        assert_eq!(h.id(&idctx(&f)).unwrap(), block_id_of(b, &idctx(&f)).unwrap(), "block identity must be unchanged");
+        assert!(h.matches_payload(&b.payload));
+        // a different payload is a different block identity; the header keeps binding the original one
+        let mut other = b.clone(); other.payload.push(1);
+        assert_ne!(block_id_of(&other, &idctx(&f)).unwrap(), block_id_of(b, &idctx(&f)).unwrap());
+        assert!(!h.matches_payload(&other.payload));
+        // changing any field the id commits to changes the id
+        let mut x = h.clone(); x.payload_hash[0] ^= 1; assert_ne!(x.id(&idctx(&f)).unwrap(), h.id(&idctx(&f)).unwrap());
+        let mut x = h.clone(); x.round += 1; assert_ne!(x.id(&idctx(&f)).unwrap(), h.id(&idctx(&f)).unwrap());
+    }
+    // the id does not commit to the payload LENGTH, so a header cannot check the size limit: check_payload does
+    let h = bs[0].to_header();
+    assert!(h.check_payload(&bs[0].payload, 4096).is_ok());
+    assert_eq!(h.check_payload(&bs[0].payload, 1), Err(HeaderError::PayloadTooLarge));
+    assert_eq!(h.check_payload(b"other", 4096), Err(HeaderError::PayloadMismatch));
+}
+
+#[test]
+fn the_header_encoding_round_trips_is_canonical_and_rejects_every_truncation() {
+    let (_net, bs, _) = tc_chain();
+    let (plain, with_tc) = (bs.iter().find(|b| b.tc.is_none()).unwrap(), bs.iter().find(|b| b.tc.is_some()).unwrap());
+    for b in [plain, with_tc] {
+        let h = b.to_header();
+        let e = encode_header(&h);
+        assert_eq!(decode_header(&e).unwrap(), h);
+        assert_eq!(encode_header(&decode_header(&e).unwrap()), e, "re-encoding is byte identical");
+        // the header is the block with the length-prefixed payload replaced by its 32-byte hash
+        assert_eq!(e.len() + 4 + b.payload.len(), encode_block(b).len() + 32);
+        for cut in (0..e.len()).step_by(97).chain([e.len() - 1]) { assert!(decode_header(&e[..cut]).is_err(), "truncated at {cut}"); }
+        let mut t = e.clone(); t.push(0); assert!(decode_header(&t).is_err(), "trailing byte");
+    }
+    // an option flag that is neither 0 nor 1, and a wrong signature length
+    let h = plain.to_header();
+    let mut e = encode_header(&h);
+    let flag_at = 8 + 8 + 8 + 32 + 4 + h.qc.encode().len();
+    e[flag_at] = 2;
+    assert!(decode_header(&e).is_err());
+    let mut bad = h.clone(); bad.signature.pop();
+    assert!(decode_header(&encode_header(&bad)).is_err());
+}
+
+fn header_chain_agrees_with_engine(silent: &[usize], need_tc: bool) {
+    let mut net = DNet::new(4, silent, "a");
+    let live: Vec<usize> = (0..4).filter(|i| !silent.contains(i)).collect();
+    assert!(net.run_until(8000, |n| live.iter().all(|i| n.height(*i) >= 10)));
+    let set = set_n(4);
+    let mut gaps = 0;
+    for &i in &live {
+        let (bs, fq) = chain_to(&net, i);
+        let hs = headers_of(&bs);
+        gaps += hs.iter().filter(|h| h.tc.is_some()).count();
+        let v = verify_header_chain(&cparams(&set), &TestVerifier, Start::Genesis, &hs, fq.as_ref(), 10_000).expect("a real chain verifies");
+        let engine: Vec<(u64, BlockId)> = net.nodes[i].as_ref().unwrap().engine().committed_after(0).iter().map(|c| (c.height, c.id)).collect();
+        assert_eq!(ids_of(&v), engine, "node {i}: the header chain's finality differs from the engine's");
+        assert!(!engine.is_empty());
+        // payload hashes of the final blocks are the ones the executor was handed
+        for (p, c) in v.finalized.iter().zip(net.nodes[i].as_ref().unwrap().engine().committed_after(0)) { assert!(Block::to_header(&bs[(p.height - 1) as usize]).matches_payload(&c.payload)); }
+        // without the final certificate the verifier reports at most the engine's finality, and one block less when the tip's QC is what finalizes
+        let w = verify_header_chain(&cparams(&set), &TestVerifier, Start::Genesis, &hs, None, 10_000).unwrap();
+        assert!(ids_of(&w).len() <= engine.len() && engine.starts_with(&ids_of(&w)));
+    }
+    if need_tc { assert!(gaps > 0, "the run must contain round gaps"); }
+}
+
+#[test]
+fn header_chains_of_a_healthy_run_verify_and_finalize_exactly_what_the_engine_finalizes() { header_chain_agrees_with_engine(&[], false); }
+
+#[test]
+fn header_chains_with_timeout_certificates_finalize_exactly_what_the_engine_finalizes_and_never_across_a_round_gap() { header_chain_agrees_with_engine(&[3], true); }
+
+#[test]
+fn every_check_of_the_header_verifier_rejects_a_correctly_signed_but_invalid_chain() {
+    let (_net, bs, fq) = tc_chain();
+    let hs = headers_of(&bs);
+    let set = set_n(4);
+    let ok = |hs: &[PayloadFreeBlock]| verify_header_chain(&cparams(&set), &TestVerifier, Start::Genesis, hs, fq.as_ref(), 10_000);
+    assert!(ok(&hs).is_ok());
+    let k_tc = hs.iter().position(|h| h.tc.is_some()).unwrap();
+    let k_plain = (2..hs.len()).find(|k| hs[*k].tc.is_none()).unwrap();
+    let with = |k: usize, f: &dyn Fn(&mut PayloadFreeBlock)| { let mut v = hs.clone(); f(&mut v[k]); v[k] = resign(v[k].clone()); v };
+
+    // fields the id commits to, re-signed so only the check under test can fail
+    let (i, r) = failure_at(ok(&with(k_plain, &|h| h.epoch = 1))); assert_eq!((i, r.as_str()), (k_plain, "epoch"));
+    let (i, r) = failure_at(ok(&with(k_plain, &|h| h.round = 0))); assert_eq!((i, r.as_str()), (k_plain, "round 0"));
+    let (i, r) = failure_at(ok(&with(k_plain, &|h| h.proposer = (h.proposer + 1) % 3))); assert_eq!((i, r.as_str()), (k_plain, "proposer is not the leader of the round"));
+    let (i, r) = failure_at(ok(&with(k_plain, &|h| h.height += 1))); assert_eq!((i, r.as_str()), (k_plain, "height"));
+    let (i, r) = failure_at(ok(&with(k_plain, &|h| h.parent_id[0] ^= 1))); assert_eq!((i, r.as_str()), (k_plain, "parent link"));
+    // a header whose own certificate certifies another block
+    let (i, r) = failure_at(ok(&with(k_plain, &|h| h.qc = hs[k_plain - 2].qc.clone()))); assert_eq!(i, k_plain, "{r}");
+    // timeout-certificate presence
+    let (i, r) = failure_at(ok(&with(k_tc, &|h| h.tc = None))); assert_eq!((i, r.as_str()), (k_tc, "timeout certificate presence"));
+    let tc = hs[k_tc].tc.clone().unwrap();
+    let (i, r) = failure_at(ok(&with(k_plain, &|h| h.tc = Some(tc.clone())))); assert_eq!((i, r.as_str()), (k_plain, "timeout certificate presence"));
+    // forged and sub-quorum parent certificates
+    let (i, _) = failure_at(ok(&with(k_plain, &|h| if let Cert::Qc(q) = &mut h.qc { q.sigs[0][5] ^= 1; })));
+    assert_eq!(i, k_plain);
+    let (i, r) = failure_at(ok(&with(k_plain, &|h| if let Cert::Qc(q) = &mut h.qc {
+        let mut kept = 0; let mut sigs = vec![];
+        for (j, s) in q.signers.iter_mut().enumerate() { if *s { if kept < 2 { kept += 1; sigs.push(q.sigs[sigs.len().min(q.sigs.len() - 1)].clone()); } else { *s = false; } } let _ = j; }
+        q.sigs = sigs;
+    })));
+    assert_eq!(i, k_plain, "{r}");
+    // a signature by the wrong key, a flipped signature, a tampered payload hash
+    let mut v = hs.clone(); v[k_plain].signature = sign((v[k_plain].proposer + 1) % 4, Kind::Proposal.context(), b"not the id");
+    assert_eq!(failure_at(ok(&v)), (k_plain, "proposer signature".to_string()));
+    let mut v = hs.clone(); v[k_plain].signature[7] ^= 1;
+    assert_eq!(failure_at(ok(&v)), (k_plain, "proposer signature".to_string()));
+    let mut v = hs.clone(); v[k_plain].payload_hash[0] ^= 1;
+    assert_eq!(failure_at(ok(&v)), (k_plain, "proposer signature".to_string()));
+    // structure: a missing, duplicated, swapped or replayed header
+    let mut v = hs.clone(); v.remove(k_plain);
+    assert_eq!(failure_at(ok(&v)).0, k_plain);
+    let mut v = hs.clone(); v.insert(k_plain, hs[k_plain].clone());
+    assert_eq!(failure_at(ok(&v)).0, k_plain + 1);
+    let mut v = hs.clone(); v.swap(k_plain, k_plain + 1);
+    assert_eq!(failure_at(ok(&v)).0, k_plain);
+    assert_eq!(failure_at(ok(&hs[2..])).0, 0, "a chain that does not start at the genesis block");
+    assert_eq!(ok(&[]), Err(HeaderError::Empty));
+    assert_eq!(verify_header_chain(&cparams(&set), &TestVerifier, Start::Genesis, &hs, None, hs.len() - 1), Err(HeaderError::TooMany(hs.len() - 1)));
+
+    // chain, genesis and validator-set binding
+    let other_chain = ChainParams { chain_id: "other-chain", ..cparams(&set) };
+    assert_eq!(failure_at(verify_header_chain(&other_chain, &TestVerifier, Start::Genesis, &hs, None, 10_000)).0, 0);
+    let other_genesis = ChainParams { genesis_hash: [9; 32], ..cparams(&set) };
+    assert_eq!(failure_at(verify_header_chain(&other_genesis, &TestVerifier, Start::Genesis, &hs, None, 10_000)).0, 0);
+    let other_profile = ChainParams { protocol_profile: "other-profile", ..cparams(&set) };
+    assert_eq!(failure_at(verify_header_chain(&other_profile, &TestVerifier, Start::Genesis, &hs, None, 10_000)).0, 0);
+    let small = set_n(3);
+    assert_eq!(failure_at(verify_header_chain(&cparams(&small), &TestVerifier, Start::Genesis, &hs, None, 10_000)).0, 0);
+    let other_seed = ChainParams { seed: 1, ..cparams(&set) };
+    assert_eq!(failure_at(verify_header_chain(&other_seed, &TestVerifier, Start::Genesis, &hs, None, 10_000)).0, 0, "a different leader schedule");
+
+    // the final certificate must be a QC for the LAST header
+    let early = hs[hs.len() - 3].qc.clone();
+    assert_eq!(verify_header_chain(&cparams(&set), &TestVerifier, Start::Genesis, &hs, Some(&early), 10_000), Err(HeaderError::FinalCert));
+    let genesis_cert = hs[0].qc.clone();
+    assert_eq!(verify_header_chain(&cparams(&set), &TestVerifier, Start::Genesis, &hs, Some(&genesis_cert), 10_000), Err(HeaderError::FinalCert));
+}
+
+#[test]
+fn a_chain_verifies_in_segments_from_a_final_anchor_with_the_same_finality() {
+    let (_net, bs, fq) = tc_chain();
+    let hs = headers_of(&bs);
+    let set = set_n(4);
+    let full = verify_header_chain(&cparams(&set), &TestVerifier, Start::Genesis, &hs, fq.as_ref(), 10_000).unwrap();
+    assert!(full.finalized.len() >= 4);
+    let a: ChainPoint = full.finalized[full.finalized.len() / 2];
+    let rest = &hs[a.height as usize..];
+    let seg = verify_header_chain(&cparams(&set), &TestVerifier, Start::Anchor(Anchor { id: a.id, height: a.height, round: a.round }), rest, fq.as_ref(), 10_000).unwrap();
+    let above: Vec<ChainPoint> = full.finalized.iter().filter(|p| p.height > a.height).copied().collect();
+    assert_eq!(seg.finalized, above, "the same blocks become final whether or not the prefix is re-verified");
+    assert_eq!(seg.tip, full.tip);
+    // a wrong anchor id, height or round is refused
+    for bad in [Anchor { id: [1; 32], height: a.height, round: a.round }, Anchor { id: a.id, height: a.height + 1, round: a.round }, Anchor { id: a.id, height: a.height, round: a.round + 1 }] {
+        assert!(verify_header_chain(&cparams(&set), &TestVerifier, Start::Anchor(bad), rest, fq.as_ref(), 10_000).is_err());
+    }
+}
+
+fn qc_for(f: &Fx, round: u64, b: BlockId, p: BlockId, pr: u64, who: &[usize]) -> Qc {
+    let m = vote_bytes(round, b, p, pr);
+    let mut signers = vec![false; 4];
+    for i in who { signers[*i] = true; }
+    let mut who = who.to_vec(); who.sort();
+    Qc { epoch: 0, round, block_id: b, parent_id: p, parent_round: pr, valset_hash: f.vh, signers, sigs: who.iter().map(|i| sign(*i, CTX_VOTE, &m)).collect() }
+}
+
+#[test]
+fn finality_matches_an_independent_oracle_at_every_prefix_with_and_without_a_final_certificate() {
+    let (_net, bs, fq) = tc_chain();
+    let hs = headers_of(&bs);
+    let set = set_n(4);
+    // oracle: header j (j >= 1) is certified; if its parent hs[j-1] is exactly one round earlier, heights 1..=j are final (a genesis parent never is)
+    let oracle = |certified_upto: usize| -> u64 { (1..=certified_upto).filter(|j| hs[j - 1].round + 1 == hs[*j].round).max().map_or(0, |j| j as u64) };
+    let mut gap_prefixes = 0;
+    for l in 1..=hs.len() {
+        let prefix = &hs[..l];
+        // WITHOUT a final certificate: headers 0..l-2 are certified (each is certified by its successor)
+        let r = verify_header_chain(&cparams(&set), &TestVerifier, Start::Genesis, prefix, None, 10_000).unwrap();
+        let want = oracle(l.saturating_sub(2).max(0)).min(l as u64);
+        let got: Vec<u64> = r.finalized.iter().map(|p| p.height).collect();
+        assert_eq!(got, (1..=want).collect::<Vec<_>>(), "prefix {l}, no final certificate");
+        // WITH a QC for the last header: headers 0..l-1 are certified
+        let q = if l < hs.len() { hs[l].qc.clone() } else { fq.clone().unwrap() };
+        let r = verify_header_chain(&cparams(&set), &TestVerifier, Start::Genesis, prefix, Some(&q), 10_000).unwrap();
+        let want = oracle(l - 1);
+        let got: Vec<u64> = r.finalized.iter().map(|p| p.height).collect();
+        assert_eq!(got, (1..=want).collect::<Vec<_>>(), "prefix {l}, with the final certificate");
+        for p in &r.finalized { assert_eq!(p.payload_hash, hs[(p.height - 1) as usize].payload_hash); }
+        if l >= 2 && hs[l - 2].round + 1 != hs[l - 1].round { gap_prefixes += 1; }
+    }
+    assert!(gap_prefixes > 0, "some prefix must end with a round gap, where finality must NOT advance");
+}
+
+#[test]
+fn each_remaining_header_check_fails_alone_on_a_valid_certificate_aimed_at_it() {
+    let (net, bs, fq) = tc_chain();
+    let hs = headers_of(&bs);
+    let f = fx();
+    let set = set_n(4);
+    let ok = |hs: &[PayloadFreeBlock]| verify_header_chain(&cparams(&set), &TestVerifier, Start::Genesis, hs, fq.as_ref(), 10_000);
+    let full = ok(&hs).unwrap();
+    let with = |k: usize, g: &dyn Fn(&mut PayloadFreeBlock)| { let mut v = hs.clone(); g(&mut v[k]); v[k] = resign(v[k].clone()); v };
+    let tcs: Vec<usize> = (0..hs.len()).filter(|k| hs[*k].tc.is_some()).collect();
+    assert!(tcs.len() >= 2, "need two timeout-certificate headers");
+    let k_plain = (2..hs.len()).find(|k| hs[*k].tc.is_none()).unwrap();
+
+    // a valid QC, for the parent's round, that certifies ANOTHER block: only the "certificate's block vs parent_id" check can refuse it
+    let prev_round = hs[k_plain - 1].round;
+    let alien = Cert::Qc(qc_for(&f, prev_round, [99; 32], [98; 32], prev_round - 1, &[0, 1, 2]));
+    let (i, r) = failure_at(ok(&with(k_plain, &|h| h.qc = alien.clone()))); assert_eq!((i, r.as_str()), (k_plain, "parent_id differs from the certificate's block"));
+
+    // a header whose round is NOT above its certificate's round, with a valid TC for the round before it, correct proposer and parent link
+    let (t_old, k_old) = (hs[tcs[0]].tc.as_ref().unwrap().round, tcs[0]);
+    let k = (k_old + 2..hs.len()).find(|k| hs[*k].qc.round() > t_old + 1).expect("a later header with a higher certificate");
+    let old_tc = hs[k_old].tc.clone();
+    let leader = net.nodes[0].as_ref().unwrap().engine().leader_of(t_old + 1);
+    let (i, r) = failure_at(ok(&with(k, &|h| { h.round = t_old + 1; h.tc = old_tc.clone(); h.proposer = leader; })));
+    assert_eq!((i, r.as_str()), (k, "round is not above the certificate's round"));
+
+    // timeout certificates: a forged one, and a genuine one for the wrong round
+    let (i, _) = failure_at(ok(&with(tcs[0], &|h| if let Some(t) = &mut h.tc { t.sigs[0][5] ^= 1; })));
+    assert_eq!(i, tcs[0], "a forged timeout certificate");
+    let wrong = hs[tcs[0]].tc.clone();
+    let (i, r) = failure_at(ok(&with(tcs[1], &|h| h.tc = wrong.clone()))); assert_eq!((i, r.as_str()), (tcs[1], "timeout certificate is not for the previous round"));
+
+    // the final certificate: valid signatures, but for another block at the tip's round, and for the tip's block at another round
+    let tip = full.tip;
+    let other_block = Cert::Qc(qc_for(&f, tip.round, [99; 32], [98; 32], tip.round - 1, &[0, 1, 2]));
+    assert_eq!(verify_header_chain(&cparams(&set), &TestVerifier, Start::Genesis, &hs, Some(&other_block), 10_000), Err(HeaderError::FinalCert));
+    let other_round = Cert::Qc(qc_for(&f, tip.round + 1, tip.id, hs[hs.len() - 2].parent_id, tip.round, &[0, 1, 2]));
+    assert_eq!(verify_header_chain(&cparams(&set), &TestVerifier, Start::Genesis, &hs, Some(&other_round), 10_000), Err(HeaderError::FinalCert));
+    // a final certificate that does not even verify
+    let mut forged = fq.clone().unwrap(); if let Cert::Qc(q) = &mut forged { q.sigs[0][3] ^= 1; }
+    assert!(matches!(verify_header_chain(&cparams(&set), &TestVerifier, Start::Genesis, &hs, Some(&forged), 10_000), Err(HeaderError::Cert { .. })));
+}
+
+#[test]
+fn header_sizes_follow_the_certificate_encodings_and_signer_counts() {
+    let (_net, bs, _) = tc_chain();
+    let n = 4usize;
+    let bm = (n + 7) / 8;
+    for b in &bs {
+        let h = b.to_header();
+        let qc_len = h.qc.encode().len();
+        if let Cert::Qc(q) = &h.qc { assert_eq!(qc_len, 140 + bm + 3315 * q.sigs.len(), "QC = 140 + ceil(n/8) + 3315 k"); }
+        let tc_len = h.tc.as_ref().map(|t| t.encode().len());
+        if let Some(t) = &h.tc { assert_eq!(tc_len.unwrap(), 72 + bm + 3323 * t.sigs.len() + t.high_qc.encode().len(), "TC = 72 + ceil(n/8) + 3323 k + nested certificate"); }
+        assert_eq!(encode_header(&h).len(), 3410 + qc_len + tc_len.map_or(0, |l| 4 + l), "header = 3410 + QC (+ 4 + TC)");
+    }
+}
+
+#[test]
+#[ignore = "diagnostic: prints replay costs; meaningful only with real signatures (pq_hotstuff_engine_fips204)"]
+fn diag_header_verification_and_restart_replay_cost() {
+    let mut net = DNet::new(4, &[], "a");
+    assert!(net.run_until(60000, |n| (0..4).all(|i| n.height(i) >= 150)));
+    let (bs, fq) = chain_to(&net, 0);
+    let hs = headers_of(&bs);
+    let set = set_n(4);
+    let t = std::time::Instant::now();
+    let v = verify_header_chain(&cparams(&set), &TestVerifier, Start::Genesis, &hs, fq.as_ref(), 100_000).unwrap();
+    let el = t.elapsed();
+    let bytes: usize = hs.iter().map(|h| encode_header(h).len()).sum();
+    println!("DIAG headers: {} verified in {:?} = {:.2} ms/header, {} final, {} bytes total = {:.0} bytes/header", hs.len(), el, el.as_secs_f64() * 1000.0 / hs.len() as f64, v.finalized.len(), bytes, bytes as f64 / hs.len() as f64);
+    let blocks = net.nodes[1].as_ref().unwrap().engine().known_blocks().len();
+    let (e, bsx, x) = net.nodes[1].take().unwrap().into_parts();
+    let t = std::time::Instant::now();
+    let (_nd, _) = start_node(restart(e, 1, 4), bsx, { let mut s = x.inner.into_inner(); s.delete_raw("app-state"); s }, &Default::default(), "a", net.now).expect("start");
+    let el = t.elapsed();
+    println!("DIAG restart: {} stored blocks re-validated and {} heights replayed into a fresh executor in {:?} = {:.2} ms/block", blocks, _nd.status().exec.height, el, el.as_secs_f64() * 1000.0 / blocks as f64);
 }
