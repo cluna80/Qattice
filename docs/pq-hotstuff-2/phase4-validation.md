@@ -64,3 +64,8 @@ presence of `pq_devnet_live` match the pushed head `c7b2ffb2e4c5d03f344dce63ae36
 The live run on Windows: all four executed height 6 in 1.8 s; a killed node recovered and caught up; the partitioned node rejoined (heights [22, 21, 20, 21]
 right after healing); after a full restart the chain continued from 25 to 26; every phase reported agreement on block id and state digest (18, 26, 55 and 14
 cross-node comparisons) and no fatal error. The 60-seed real-crypto run was not requested for this commit and has not been run on Windows.
+
+### Windows revision confirmation (owner, relayed)
+The owner confirmed the Windows worktree is at `c7b2ffb2e4c5d03f344dce63ae3668491c6a5af6` (an empty diff is consistent with that exact HEAD), provided the tests ran in
+that unchanged worktree. Recorded against the results above: **68 real-crypto tests, 68 test-double tests and the live four-node test passed on Windows at
+`c7b2ffb`.** The Windows 60-seed soak remains unrun for this revision. This closes no milestone.
