@@ -1,0 +1,36 @@
+E01 engine: no leader check: CAUGHT (1 failing)
+E02 engine: no proposer signature check: CAUGHT (3 failing)
+E03 engine: parent certificate not verified: CAUGHT (1 failing)
+E04 engine: TC presence rule dropped: CAUGHT (1 failing)
+E05 engine: timeout certificate not verified: CAUGHT (1 failing)
+E06 engine: safe_to_vote skipped: CAUGHT (2 failing)
+E07 engine: commit without the consecutive-round check: CAUGHT (1 failing)
+E08 engine: own vote not counted as next leader: CAUGHT (2 failing)
+E09 engine: vote signature not verified: CAUGHT (2 failing)
+E10 engine: payload limit unchecked on receipt: CAUGHT (1 failing)
+E11 engine: TC not broadcast when formed: CAUGHT (1 failing)
+E12 engine: high QC never raised: CAUGHT (7 failing)
+E13 engine: restart re-signs instead of re-sending: CAUGHT (1 failing)
+E14 engine: second vote per voter-round counted: SURVIVED (0 failing)
+C01 certs: quorum check dropped: CAUGHT (2 failing)
+C02 certs: valset hash not compared: CAUGHT (3 failing)
+C03 certs: vote signatures not verified: CAUGHT (6 failing)
+C04 certs: timeout signatures not verified: CAUGHT (5 failing)
+C05 certs: nested max not compared: CAUGHT (1 failing)
+C06 certs: trailing bytes accepted (QC): CAUGHT (1 failing)
+C07 certs: bitmap padding unchecked: CAUGHT (1 failing)
+C08 certs: qc hash omitted from block id: CAUGHT (1 failing)
+C09 certs: genesis block certifiable: CAUGHT (1 failing)
+N01 engine: vote chain id not checked: CAUGHT (1 failing)
+N02 engine: timeout chain id not checked: SURVIVED (0 failing)
+N05 certs: any genesis certificate accepted: CAUGHT (1 failing)
+caught 24 of 26
+
+--- follow-up ---
+Run against tests/pq_hotstuff_engine_fips204.rs (REAL ML-DSA-65). 24 of 26 caught on the first run.
+N02 engine: timeout chain id not checked: SURVIVED. Cause: the other-chain timeout in the test was also rejected for carrying the other chain's genesis
+    certificate, which masked the missing chain-id check. Test strengthened (a genuinely signed timeout that differs only in the chain id, plus a control
+    that is accepted on its own chain). Re-run of the strengthened test: baseline PASS, mutant FAIL (caught).
+E14 engine: a voter's second vote in a round counted: SURVIVED, justified (unchanged from docs/pq-hotstuff-2/phase2-engine-core-mutation-results.txt): not
+    a safety check; honest double voting is prevented by the safety store and tested.
+Final: 25 of 26 caught, 1 justified.
