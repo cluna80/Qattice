@@ -41,3 +41,12 @@ Recorded 2026-11-08 from output the owner pasted (same machine and worktree as a
 | `pq_hotstuff_wire` | 24 passed |
 
 Shows: the engine, certificate verifier and safety store behave on Windows with real FIPS 204 signatures as on Linux, in all five scenarios (honest, silent, equivocating, crash/restart, restart plus equivocator), including the wrong-key, wrong-context and cross-chain rejection tests. Does not show: the 60-seed soak (Linux only), networking, sync, persistence beyond the safety store, node wiring, or anything about epoch transitions. Nothing is merged.
+
+### #135 soak on Windows: 60 seeds per scenario, commit `0b48f27d20efa57c9e3df06f34979f0089d3bc01`
+
+Recorded 2026-11-08 from output the owner pasted. `export PQHS_SEEDS=60` then
+`cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204 --test pq_hotstuff_engine_fips204`
+(`git rev-parse HEAD` confirmed). Result: 36 passed, 0 failed, 1 ignored (diagnostic), finished in 163.80 s. All five scenarios (honest, silent, equivocating,
+crash/restart, restart plus equivocator) ran 60 seeds each with real ML-DSA-65 signatures, with no agreement, double-signing or commit-conflict violation and
+progress after the network stabilized. Linux ran the same soak in 68.4 s. A first attempt that set the variable only on the `cd` command ran the default 10
+seeds and is not counted as a soak.
