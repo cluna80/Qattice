@@ -24,7 +24,7 @@ mod real {
     use std::sync::{Mutex, OnceLock};
 
     use chain_forge_consensus::pq_hotstuff::safety::{ConsensusSigner, ConsensusVerifier, Fips204Signer, Fips204Verifier, SignerError};
-    use fips204_crypto::fips204_backend::MlDsa65Fips204;
+    use chain_forge_crypto::fips204_backend::MlDsa65Fips204;
 
     fn seeds() -> &'static Mutex<HashMap<u8, ([u8; 32], Vec<u8>)>> {
         static S: OnceLock<Mutex<HashMap<u8, ([u8; 32], Vec<u8>)>>> = OnceLock::new();

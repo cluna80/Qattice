@@ -12,7 +12,7 @@ mod doubles;
 
 use chain_forge_consensus::pq_hotstuff::safety::*;
 use chain_forge_consensus::pq_hotstuff::wire::*;
-use fips204_crypto::fips204_backend::MlDsa65Fips204 as Raw;
+use chain_forge_crypto::fips204_backend::MlDsa65Fips204 as Raw;
 use doubles::*;
 
 const ALG: AlgId = AlgId::MLDSA65_FIPS204;

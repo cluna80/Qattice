@@ -7,3 +7,5 @@ pub mod persistence;
 pub mod blocklog;
 pub mod canon;
 pub mod dirlock;
+#[cfg(feature = "pq-devnet")]
+pub mod pq_devnet;

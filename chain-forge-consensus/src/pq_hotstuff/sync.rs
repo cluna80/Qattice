@@ -64,4 +64,6 @@ impl SyncClient {
     }
     pub fn complete(&mut self, id: &BlockId) { self.outstanding.remove(id); }
     pub fn pending(&self) -> usize { self.outstanding.len() }
+    /// Whether a request for `id` is outstanding (a response to anything else is unsolicited).
+    pub fn is_pending(&self, id: &BlockId) -> bool { self.outstanding.contains_key(id) }
 }
