@@ -30,3 +30,5 @@ pub mod blockstore;
 pub mod exec;
 #[cfg(feature = "pq-hotstuff")]
 pub mod driver;
+#[cfg(feature = "pq-hotstuff")]
+pub mod header;
