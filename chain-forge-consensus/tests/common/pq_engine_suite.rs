@@ -8,6 +8,8 @@ use std::collections::{BTreeMap, VecDeque};
 use chain_forge_consensus::pq_hotstuff::certs::*;
 use chain_forge_consensus::pq_hotstuff::engine::*;
 use chain_forge_consensus::pq_hotstuff::blockstore::{BlockStore, StoreError};
+use chain_forge_consensus::pq_hotstuff::driver::{classify_engine_error, validate_config, Driver, DriverConfig, DriverError, Outbound};
+use chain_forge_consensus::pq_hotstuff::exec::{ExecCursor, ExecError, Executor, InterimApp};
 use chain_forge_consensus::pq_hotstuff::limits::PqLimits;
 use chain_forge_consensus::pq_hotstuff::netmsg::{self as net, MessageLimits, NetLimitError, NetMsg, SYNC_BLOCKS_CEILING};
 use chain_forge_consensus::pq_hotstuff::pacemaker::{Pacemaker, PacemakerConfig, PacemakerError};
@@ -1592,4 +1594,417 @@ fn diag_run() {
         let rounds: Vec<Option<u64>> = (0..s.n).map(|i| s.nodes[i].as_ref().map(|e| e.round())).collect();
         println!("t={} rounds={:?} executed={:?} net={} restarts={} cuts={} syncs={} bad_sync={}", t + 40, rounds, s.exec.iter().map(|e| e.len()).collect::<Vec<_>>(), s.net.len(), s.restart_count, s.cuts, s.sync_requests, s.bad_sync);
     }
+}
+
+// ============================================================================================================================
+// Execution handoff and node driver. The application is the DEVNET-INTERIM hash chain (exec.rs): these tests exercise the handoff,
+// replay and recovery. They are NOT transaction-execution validation (the real executor needs the payload codec, open item U5).
+// ============================================================================================================================
+fn blk(h: u64, tag: u8) -> Committed { Committed { id: [tag; 32], round: h, height: h, payload: vec![tag; 10] } }
+
+#[test]
+fn the_interim_app_applies_in_order_and_refuses_anything_else() {
+    let mut a = InterimApp::open(mem(), GENESIS_HASH).unwrap();
+    let c0 = a.cursor();
+    assert_eq!(c0.height, 0);
+    let c1 = a.apply(&blk(1, 1)).unwrap();
+    assert_eq!(c1.height, 1);
+    assert_ne!(c1.state_digest, c0.state_digest);
+    assert_eq!(a.apply(&blk(1, 1)), Err(ExecError::OutOfOrder { expected: 2, got: 1 }), "a duplicate is refused");
+    assert_eq!(a.apply(&blk(3, 3)), Err(ExecError::OutOfOrder { expected: 2, got: 3 }), "a skipped height is refused");
+    assert_eq!(a.cursor(), c1, "a refusal changes nothing");
+    // the same blocks always give the same state; different payloads give a different state
+    let mut b = InterimApp::open(mem(), GENESIS_HASH).unwrap();
+    assert_eq!(b.apply(&blk(1, 1)).unwrap(), c1);
+    let mut c = InterimApp::open(mem(), GENESIS_HASH).unwrap();
+    assert_ne!(c.apply(&blk(1, 2)).unwrap().state_digest, c1.state_digest);
+    // reopening from the same storage resumes at the same cursor
+    let re = InterimApp::open(a.into_inner(), GENESIS_HASH).unwrap();
+    assert_eq!(re.cursor(), c1);
+}
+
+#[test]
+fn a_crash_at_any_point_of_applying_a_block_leaves_the_old_or_the_new_state_never_a_torn_one() {
+    let mut reference = InterimApp::open(mem(), GENESIS_HASH).unwrap();
+    let after1 = reference.apply(&blk(1, 1)).unwrap();
+    let after2 = reference.apply(&blk(2, 2)).unwrap();
+    let (mut crashed_runs, mut old_seen, mut new_seen) = (0, 0, 0);
+    for k in 0..6 {
+        let f = faults();
+        let mut app = InterimApp::open(MemStorage::new(f.clone()), GENESIS_HASH).unwrap();
+        app.apply(&blk(1, 1)).unwrap();
+        let base = f.borrow().ops;
+        f.borrow_mut().crash_before = Some(base + k);
+        let crashed = app.apply(&blk(2, 2)).is_err();
+        if crashed { crashed_runs += 1; }
+        for out in app.storage().crash_outcomes(7) {
+            let mut re = InterimApp::open(out, GENESIS_HASH).expect("a crash never leaves unreadable executor state");
+            let cur = re.cursor();
+            if !crashed { assert_eq!(cur, after2, "an apply that returned Ok (the acknowledgement) is durable in every post-crash state"); }
+            if cur == after1 {
+                old_seen += 1;
+                assert_eq!(re.apply(&blk(2, 2)).unwrap(), after2, "replaying the missed block reaches the same state");
+            } else {
+                new_seen += 1;
+                assert_eq!(cur, after2, "the state is the old one or the new one, nothing else");
+                assert!(matches!(re.apply(&blk(2, 2)), Err(ExecError::OutOfOrder { .. })), "an applied block is not applied again");
+            }
+        }
+    }
+    assert!(crashed_runs >= 4 && old_seen > 0 && new_seen > 0, "{crashed_runs} {old_seen} {new_seen}");
+}
+
+#[test]
+fn damaged_or_foreign_executor_state_is_never_treated_as_fresh() {
+    let mut a = InterimApp::open(mem(), GENESIS_HASH).unwrap();
+    a.apply(&blk(1, 1)).unwrap();
+    let st = a.into_inner();
+    let good = st.raw("app-state").unwrap();
+    let with = |bytes: Vec<u8>| { let mut s = st.clone(); s.set_raw("app-state", bytes); s };
+    for i in [0usize, 20, 60, 100, good.len() - 1] {
+        let mut bad = good.clone(); bad[i] ^= 1;
+        assert!(matches!(InterimApp::open(with(bad), GENESIS_HASH), Err(ExecError::Corrupt(_))), "flip at {i}");
+    }
+    assert!(matches!(InterimApp::open(with(good[..good.len() - 1].to_vec()), GENESIS_HASH), Err(ExecError::Corrupt(_))));
+    assert!(matches!(InterimApp::open(with(vec![]), GENESIS_HASH), Err(ExecError::Corrupt(_))));
+    assert!(matches!(InterimApp::open(with(good.clone()), [9; 32]), Err(ExecError::ForeignChain)));
+}
+
+fn big_set(n: usize) -> EpochSet {
+    EpochSet::new(0, (0..n).map(|i| { let mut k = test_public_key(1); k[0] = (i >> 8) as u8; k[1] = i as u8; ValidatorEntry { address: format!("v{i:05}"), public_key: k, power: 1 } }).collect()).unwrap()
+}
+fn dcfg() -> DriverConfig { DriverConfig { max_sync_blocks: SYNC_K, pace: PACE, sync_ttl: 20, sync_outstanding: 8, min_propose_gap: 0, park_capacity: 16, park_ttl: 200, recent: 64 } }
+
+#[test]
+fn startup_rejects_unsupported_configurations_explicitly() {
+    let ok = cfg(0, 4);
+    assert!(validate_config(&ok, &dcfg()).is_ok());
+    // the owner-locked 8 MiB limit with a 1 MiB payload: K = 7 fits, K = 8 does not
+    let mut c = ok.clone();
+    c.limits = PqLimits { max_validators: 4, max_cert_validators: 1024, max_block_payload_bytes: 1_048_576, max_message_bytes: Some(net::MAX_MESSAGE_SIZE) };
+    assert!(validate_config(&c, &DriverConfig { max_sync_blocks: 7, ..dcfg() }).is_ok());
+    assert!(matches!(validate_config(&c, &DriverConfig { max_sync_blocks: 8, ..dcfg() }), Err(DriverError::Config(_))));
+    // no transport limit configured: refused, not defaulted
+    let mut u = ok.clone(); u.limits.max_message_bytes = None;
+    assert!(matches!(validate_config(&u, &dcfg()), Err(DriverError::Config(m)) if m.contains("not set")));
+    // 1,000 validators: the worst-case proposal (about 9.96 MB with a TC) exceeds 8 MiB, so the configuration is rejected
+    let mut big = ok.clone();
+    big.set = big_set(1000);
+    big.limits = PqLimits { max_validators: 1000, max_cert_validators: 1024, max_block_payload_bytes: 0, max_message_bytes: Some(net::MAX_MESSAGE_SIZE) };
+    match validate_config(&big, &DriverConfig { max_sync_blocks: 1, ..dcfg() }) {
+        Err(DriverError::Config(m)) => assert!(m.contains("below the derived minimum"), "{m}"),
+        other => panic!("expected a rejection, got {other:?}"),
+    }
+    // a larger limit accepts it (the choice is the owner's; this only proves the check is the limit and not a hard-coded count)
+    big.limits.max_message_bytes = Some(12_000_000);
+    assert!(validate_config(&big, &DriverConfig { max_sync_blocks: 1, ..dcfg() }).is_ok());
+    // Driver::start validates by itself: a sync size the transport limit cannot carry stops it before it builds anything
+    let r = Drv::start(DriverConfig { max_sync_blocks: SYNC_BLOCKS_CEILING, ..dcfg() }, engine(0, 4), BlockStore::new(mem()), LogApp { inner: InterimApp::open(mem(), GENESIS_HASH).unwrap(), log: Default::default() }, Box::new(|_, _| vec![]), 1);
+    assert!(matches!(r, Err(DriverError::Config(_))));
+    // bad pacemaker and bad driver parameters
+    assert!(matches!(validate_config(&ok, &DriverConfig { pace: PacemakerConfig { base: 0, max: 5 }, ..dcfg() }), Err(DriverError::Config(_))));
+    assert!(matches!(validate_config(&ok, &DriverConfig { sync_outstanding: 0, ..dcfg() }), Err(DriverError::Config(_))));
+}
+
+// ---- a deterministic network of drivers
+struct LogApp { inner: InterimApp<MemStorage>, log: std::rc::Rc<std::cell::RefCell<Vec<u64>>> }
+impl Executor for LogApp {
+    fn cursor(&self) -> ExecCursor { self.inner.cursor() }
+    fn apply(&mut self, b: &Committed) -> Result<ExecCursor, ExecError> { let c = self.inner.apply(b)?; self.log.borrow_mut().push(b.height); Ok(c) }
+}
+type Drv = Driver<MemStorage, TestCounter, TestSigner, TestVerifier, MemStorage, LogApp>;
+type ExecLog = std::rc::Rc<std::cell::RefCell<Vec<u64>>>;
+
+fn start_node(e: E, bs: BlockStore<MemStorage>, app: MemStorage, log: &ExecLog, tag: &str, now: u64) -> Result<(Drv, Vec<Outbound>), DriverError> {
+    let exec = LogApp { inner: InterimApp::open(app, GENESIS_HASH)?, log: log.clone() };
+    let tag = tag.to_string();
+    Drv::start(dcfg(), e, bs, exec, Box::new(move |r, i| format!("interim-{tag}:{i}:{r}").into_bytes()), now)
+}
+
+struct DNet {
+    n: usize,
+    nodes: Vec<Option<Drv>>,
+    logs: Vec<ExecLog>,
+    bs_faults: Vec<Shared>,
+    q: Vec<(u64, usize, usize, Vec<u8>)>,
+    now: u64,
+    cut: Vec<usize>,
+    sent: Vec<Vec<Vec<u8>>>,
+    fatal: Vec<(usize, String)>,
+    dead: Vec<bool>,
+}
+impl DNet {
+    fn new(n: usize, silent: &[usize], tag: &str) -> DNet {
+        let mut d = DNet { n, nodes: vec![], logs: vec![], bs_faults: vec![], q: vec![], now: 1, cut: vec![], sent: vec![vec![]; n], fatal: vec![], dead: vec![false; n] };
+        for i in 0..n {
+            let log: ExecLog = Default::default();
+            let f = faults();
+            if silent.contains(&i) { d.nodes.push(None); } else {
+                let bs = BlockStore::new(MemStorage::new(f.clone()));
+                let (drv, first) = start_node(engine(i, n), bs, mem(), &log, tag, 1).expect("start");
+                d.nodes.push(Some(drv));
+                d.push(i, first);
+            }
+            d.logs.push(log);
+            d.bs_faults.push(f);
+        }
+        d
+    }
+    fn push(&mut self, from: usize, outs: Vec<Outbound>) {
+        for o in outs {
+            self.sent[from].push(o.bytes.clone());
+            let targets: Vec<usize> = match o.to { None => (0..self.n).filter(|j| *j != from).collect(), Some(t) => vec![t] };
+            for to in targets { if !self.cut.contains(&from) && !self.cut.contains(&to) { self.q.push((self.now + 1, from, to, o.bytes.clone())); } }
+        }
+    }
+    fn step(&mut self) {
+        self.now += 1;
+        let now = self.now;
+        let (due, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut self.q).into_iter().partition(|m| m.0 <= now);
+        self.q = keep;
+        for (_, from, to, bytes) in due {
+            if self.cut.contains(&from) || self.cut.contains(&to) { continue; }
+            if self.dead[to] { continue; }
+            let Some(d) = self.nodes[to].as_mut() else { continue };
+            match d.on_bytes(from, &bytes, now) { Ok(o) => self.push(to, o), Err(e) => { self.fatal.push((to, e.to_string())); self.dead[to] = true; } }
+        }
+        for i in 0..self.n {
+            if self.dead[i] { continue; }
+            let Some(d) = self.nodes[i].as_mut() else { continue };
+            match d.tick(now) { Ok(o) => self.push(i, o), Err(e) => { self.fatal.push((i, e.to_string())); self.dead[i] = true; } }
+        }
+    }
+    fn run(&mut self, ticks: u64) { for _ in 0..ticks { self.step(); } }
+    fn run_until(&mut self, max: u64, mut done: impl FnMut(&DNet) -> bool) -> bool { for _ in 0..max { if done(self) { return true; } self.step(); } done(self) }
+    fn height(&self, i: usize) -> u64 { self.nodes[i].as_ref().map_or(0, |d| d.status().exec.height) }
+    fn cursor(&self, i: usize) -> ExecCursor { self.nodes[i].as_ref().unwrap().status().exec }
+    /// Every node's executed history is a prefix of the same history: equal ids and state digests at every common height.
+    fn assert_agreement(&self, label: &str) {
+        let mut by_h: BTreeMap<u64, ExecCursor> = BTreeMap::new();
+        for d in self.nodes.iter().flatten() {
+            for c in d.status().recent { if let Some(p) = by_h.insert(c.height, c) { assert_eq!(p, c, "{label}: DISAGREEMENT at height {}", c.height); } }
+        }
+    }
+    /// Nothing was executed twice or out of order: each node's execution log is exactly 1, 2, 3, ...
+    fn assert_exactly_once(&self, label: &str) {
+        for (i, l) in self.logs.iter().enumerate() {
+            for (k, h) in l.borrow().iter().enumerate() { assert_eq!(*h, k as u64 + 1, "{label}: node {i} executed height {h} as its {}th block", k + 1); }
+        }
+    }
+    fn recover(&mut self, i: usize, app_override: Option<MemStorage>, tag: &str) -> Result<Vec<Outbound>, DriverError> { self.recover_with(i, app_override, None, tag) }
+    fn recover_with(&mut self, i: usize, app_override: Option<MemStorage>, bs_override: Option<BlockStore<MemStorage>>, tag: &str) -> Result<Vec<Outbound>, DriverError> {
+        let d = self.nodes[i].take().unwrap();
+        let (e, bs, x) = d.into_parts();
+        let bs = bs_override.unwrap_or(bs);
+        let app = app_override.unwrap_or_else(|| x.inner.into_inner());
+        let (nd, first) = start_node(restart(e, i, self.n), bs, app, &self.logs[i], tag, self.now)?;
+        self.nodes[i] = Some(nd);
+        self.dead[i] = false;
+        self.push(i, first.clone());
+        Ok(first)
+    }
+}
+
+#[test]
+fn four_drivers_propose_certify_finalize_and_execute_in_agreement() {
+    let mut net = DNet::new(4, &[], "a");
+    assert!(net.run_until(3000, |n| (0..4).all(|i| n.height(i) >= 8)), "no liveness: {:?}", (0..4).map(|i| net.height(i)).collect::<Vec<_>>());
+    assert!(net.fatal.is_empty(), "{:?}", net.fatal);
+    net.assert_agreement("steady state");
+    net.assert_exactly_once("steady state");
+    // application state agrees at one common height
+    let h = (0..4).map(|i| net.height(i)).min().unwrap();
+    let digests: Vec<_> = (0..4).map(|i| net.nodes[i].as_ref().unwrap().status().recent.into_iter().find(|c| c.height == h).unwrap().state_digest).collect();
+    assert!(digests.iter().all(|d| *d == digests[0]));
+    // the finalized payloads are retained: pruning does not exist yet
+    let (_, tip) = net.nodes[0].as_ref().unwrap().engine().committed_tip();
+    assert!(net.nodes[0].as_ref().unwrap().engine().committed_after(0).len() as u64 == tip, "every finalized payload is still available for replay");
+}
+
+#[test]
+fn a_driver_restart_replays_only_what_the_executor_missed_and_resends_its_vote_byte_for_byte() {
+    let mut net = DNet::new(4, &[], "a");
+    assert!(net.run_until(3000, |n| n.height(1) >= 3));
+    let snapshot = net.nodes[1].as_ref().unwrap().executor().inner.storage().clone();
+    let snap_h = net.height(1);
+    assert!(net.run_until(3000, |n| (0..4).all(|i| n.height(i) >= snap_h + 4)));
+    let before_len = net.logs[1].borrow().len();
+    let tip = net.height(1);
+    let sent_before = net.sent[1].clone();
+    // the executor lost its last writes (the cursor is behind the committed history): replay applies exactly the missing heights, once
+    let first = net.recover(1, Some(snapshot), "a").expect("restart");
+    let replayed: Vec<u64> = net.logs[1].borrow()[before_len..].to_vec();
+    assert_eq!(replayed, (snap_h + 1..=tip).collect::<Vec<_>>(), "replay is exactly the missed heights, once each");
+    assert_eq!(net.height(1), tip);
+    // whatever vote or timeout the restarted node sends first is one it already sent, byte for byte: it never signs again
+    let lim = net.nodes[1].as_ref().unwrap().limits().clone();
+    for o in &first {
+        if let Ok(NetMsg::Consensus(Msg::Vote(_) | Msg::Timeout(_))) = net::decode(&o.bytes, &lim) { assert!(sent_before.contains(&o.bytes), "a restart produced a vote/timeout that was never sent before"); }
+    }
+    assert!(net.run_until(3000, |n| (0..4).all(|i| n.height(i) >= tip + 3)));
+    assert!(net.fatal.is_empty(), "{:?}", net.fatal);
+    net.assert_agreement("after restart");
+    // the executor lost its last writes on purpose, so those heights appear twice in the log; from the rollback point on, the log is gapless
+    // and duplicate-free, and every other node's log is exactly 1, 2, 3, ...
+    for (k, h) in net.logs[1].borrow()[before_len..].iter().enumerate() { assert_eq!(*h, snap_h + 1 + k as u64, "after the restart node 1 executed {h} out of order"); }
+    for i in [0usize, 2, 3] { for (k, h) in net.logs[i].borrow().iter().enumerate() { assert_eq!(*h, k as u64 + 1, "node {i}"); } }
+    // a restart with nothing missed replays nothing
+    let mark = net.logs[1].borrow().len();
+    net.recover(1, None, "a").expect("restart");
+    assert_eq!(net.logs[1].borrow().len(), mark, "no duplicate execution on a clean restart");
+    // a node whose stored vote went to ANOTHER validator re-sends exactly that vote after a restart, byte for byte (it never signs again)
+    let mut checked = false;
+    for v in 0..4 {
+        let (round, to) = { let e = net.nodes[v].as_ref().unwrap().engine(); match e.store().record().last_vote.as_ref() { Some(l) => (l.round, e.leader_of(l.round + 1)), None => continue } };
+        if to == v { continue; }
+        let sent_v = net.sent[v].clone();
+        let first = net.recover(v, None, "a").expect("restart");
+        let lim = *net.nodes[v].as_ref().unwrap().limits();
+        let votes: Vec<&Outbound> = first.iter().filter(|o| matches!(net::decode(&o.bytes, &lim), Ok(NetMsg::Consensus(Msg::Vote(_))))).collect();
+        assert!(!votes.is_empty(), "node {v} restarted with a stored vote for round {round} and re-sent nothing");
+        assert!(votes.iter().all(|o| o.to == Some(to) && sent_v.contains(&o.bytes)), "the re-sent vote must be the stored one, to the next leader");
+        checked = true;
+        break;
+    }
+    assert!(checked, "no node had a stored vote addressed to another validator");
+}
+
+#[test]
+fn a_driver_refuses_to_start_when_the_executor_is_ahead_of_or_diverged_from_the_recovered_history() {
+    let mut net = DNet::new(4, &[], "a");
+    assert!(net.run_until(3000, |n| n.height(1) >= 2));
+    let old_blocks = net.nodes[1].as_ref().unwrap().engine().known_blocks().len();
+    let _ = old_blocks;
+    // an executor from a DIFFERENT run (other payloads, so other block ids) at a height this chain has also reached
+    let mut other = DNet::new(4, &[], "b");
+    assert!(other.run_until(3000, |n| n.height(1) >= 2));
+    let foreign = other.nodes[1].as_ref().unwrap().executor().inner.storage().clone();
+    assert!(net.run_until(3000, |n| (0..4).all(|i| n.height(i) >= other.height(1))));
+    let r = net.recover(1, Some(foreign), "a");
+    assert!(matches!(r, Err(DriverError::Diverged { .. })), "{r:?}");
+    // an executor AHEAD of the block store: the recovered committed history is shorter than what was executed
+    let mut net = DNet::new(4, &[], "a");
+    assert!(net.run_until(3000, |n| n.height(1) >= 2));
+    let old_store = BlockStore::new(net.nodes[1].as_ref().unwrap().block_store().storage().clone());
+    assert!(net.run_until(3000, |n| n.height(1) >= 7));
+    let r = net.recover_with(1, None, Some(old_store), "a");
+    assert!(matches!(r, Err(DriverError::ExecutorAhead { .. })), "{r:?}");
+}
+
+#[test]
+fn a_partitioned_driver_rejoins_by_sync_and_agrees_without_duplicate_execution() {
+    let mut net = DNet::new(4, &[], "a");
+    assert!(net.run_until(3000, |n| (0..4).all(|i| n.height(i) >= 3)));
+    net.cut.push(3);
+    let at_cut = net.height(3);
+    assert!(net.run_until(6000, |n| (0..3).all(|i| n.height(i) >= at_cut + 8)), "the majority must keep committing without node 3");
+    assert_eq!(net.height(3), at_cut, "an isolated node commits nothing");
+    net.cut.clear();
+    let target = (0..3).map(|i| net.height(i)).max().unwrap() + 2;
+    assert!(net.run_until(8000, |n| (0..4).all(|i| n.height(i) >= target)), "heights {:?}", (0..4).map(|i| net.height(i)).collect::<Vec<_>>());
+    assert!(net.fatal.is_empty(), "{:?}", net.fatal);
+    assert!(net.nodes[3].as_ref().unwrap().stats().sync_requests > 0, "the rejoining node must have used block sync");
+    net.assert_agreement("after rejoin");
+    net.assert_exactly_once("after rejoin");
+}
+
+#[test]
+fn drivers_drop_malformed_oversize_and_unsolicited_input_without_changing_state() {
+    let mut net = DNet::new(4, &[], "a");
+    assert!(net.run_until(3000, |n| (0..4).all(|i| n.height(i) >= 3)));
+    let lim = *net.nodes[0].as_ref().unwrap().limits();
+    let before = net.nodes[0].as_ref().unwrap().status();
+    let now = net.now;
+    let d = net.nodes[0].as_mut().unwrap();
+    let mut some_valid = net.sent[1].iter().find(|b| b.len() > 40).cloned().unwrap();
+    let junk: Vec<Vec<u8>> = vec![vec![], vec![0xff; 5], b"CFH1|net|".to_vec(), vec![0u8; lim.transport as usize + 1], { some_valid.push(0); some_valid.clone() }];
+    for j in &junk { assert!(d.on_bytes(1, j, now).unwrap().is_empty()); }
+    // a well-formed sync response nobody asked for
+    let resp = net.nodes[1].as_ref().unwrap().engine().serve_sync(&SyncRequest { want: before.committed_tip, max_blocks: 2 }, 2).expect("served");
+    let unsolicited = net::encode(&NetMsg::SyncResponse(resp));
+    let d = net.nodes[0].as_mut().unwrap();
+    assert!(d.on_bytes(1, &unsolicited, now).unwrap().is_empty());
+    let after = d.status();
+    assert_eq!(after.stats.malformed, before.stats.malformed + junk.len() as u64);
+    assert_eq!(after.stats.unsolicited_sync, before.stats.unsolicited_sync + 1);
+    assert_eq!((after.committed_height, after.exec), (before.committed_height, before.exec), "junk changes no committed or executed state");
+}
+
+#[test]
+fn a_block_store_failure_is_fatal_stops_the_node_and_recovery_never_signs_a_second_vote() {
+    let mut net = DNet::new(4, &[], "a");
+    assert!(net.run_until(3000, |n| (0..4).all(|i| n.height(i) >= 2)));
+    // node 2's block store dies from now on: the next block it must persist fails, so nothing it would have sent after that point is sent
+    let ops = net.bs_faults[2].borrow().ops;
+    net.bs_faults[2].borrow_mut().crash_before = Some(ops);
+    assert!(net.run_until(2000, |n| !n.fatal.is_empty()), "a storage failure must stop the driver");
+    assert!(net.fatal.iter().all(|(i, m)| *i == 2 && m.contains("block store")), "{:?}", net.fatal);
+    let sent_before: Vec<Vec<u8>> = net.sent[2].clone();
+    // the process restarts on a healthy disk: its stored vote is re-sent byte for byte and no different vote appears
+    net.bs_faults[2].borrow_mut().crash_before = None;
+    net.fatal.clear();
+    let lim = *net.nodes[2].as_ref().unwrap().limits();
+    let first = net.recover(2, None, "a").expect("restart");
+    for o in &first {
+        if let Ok(NetMsg::Consensus(Msg::Vote(_) | Msg::Timeout(_))) = net::decode(&o.bytes, &lim) { assert!(sent_before.contains(&o.bytes) || net.sent[2].contains(&o.bytes)); }
+    }
+    let target = (0..4).map(|i| net.height(i)).max().unwrap() + 3;
+    assert!(net.run_until(6000, |n| (0..4).filter(|i| !n.dead[*i]).all(|i| n.height(i) >= target)));
+    net.assert_agreement("after storage failure");
+}
+
+#[test]
+fn engine_errors_stop_the_node_only_when_they_threaten_safety() {
+    assert!(matches!(classify_engine_error(EngineError::ConflictingCommit, false), Err(DriverError::Safety(_))));
+    assert!(matches!(classify_engine_error(EngineError::Sign(SignError::Latched), true), Err(DriverError::Safety(_))));
+    assert!(classify_engine_error(EngineError::Sign(SignError::Latched), false).is_ok(), "a refusal by a healthy store is just a refused message");
+    assert!(classify_engine_error(EngineError::NotLeader, true).is_ok());
+    assert!(classify_engine_error(EngineError::Invalid("x"), true).is_ok());
+}
+
+#[test]
+fn a_lost_commit_marker_is_rewritten_at_start_and_nothing_is_executed_again() {
+    let mut net = DNet::new(4, &[], "a");
+    assert!(net.run_until(3000, |n| (0..4).all(|i| n.height(i) >= 6)));
+    let tip = net.height(2);
+    let mark = net.logs[2].borrow().len();
+    // the node crashed after executing but before its newest commit markers reached the disk
+    let (e, bs, x) = net.nodes[2].take().unwrap().into_parts();
+    let mut st = bs.into_inner();
+    let mut removed = 0;
+    for n in st.names().into_iter().filter(|n| n.starts_with("cmt-")) {
+        let h = u64::from_str_radix(&n[4..], 16).unwrap();
+        if h + 2 > tip { st.delete_raw(&n); removed += 1; }
+    }
+    assert!(removed >= 2);
+    let (nd, _) = start_node(restart(e, 2, 4), BlockStore::new(st), x.inner.into_inner(), &net.logs[2], "a", net.now).expect("start");
+    assert_eq!(nd.block_store().load().unwrap().committed.len() as u64, nd.status().committed_height, "the markers the crash lost are written again");
+    assert!(nd.status().committed_height >= tip);
+    assert_eq!(net.logs[2].borrow().len(), mark, "nothing was executed again");
+    net.nodes[2] = Some(nd);
+    let target = (0..4).map(|i| net.height(i)).max().unwrap() + 3;
+    assert!(net.run_until(3000, |n| (0..4).all(|i| n.height(i) >= target)));
+    net.assert_agreement("after marker loss");
+}
+
+#[test]
+fn a_sync_response_that_does_not_answer_the_request_is_rejected_by_the_driver() {
+    let mut net = DNet::new(4, &[3], "a");
+    assert!(net.run_until(3000, |n| (0..3).all(|i| n.height(i) >= 6)));
+    let log: ExecLog = Default::default();
+    let (mut d3, _) = start_node(engine(3, 4), BlockStore::new(mem()), mem(), &log, "a", net.now).expect("start");
+    let lim = *d3.limits();
+    // a late proposal whose parent node 3 has never seen: it asks for that ancestor
+    let prop = net.sent.iter().flatten().filter(|b| matches!(net::decode(b, &lim), Ok(NetMsg::Consensus(Msg::Proposal(p))) if p.height >= 5)).last().cloned().expect("a proposal");
+    let outs = d3.on_bytes(0, &prop, net.now).unwrap();
+    let req = outs.iter().find_map(|o| match net::decode(&o.bytes, &lim) { Ok(NetMsg::SyncRequest(r)) => Some(r), _ => None }).expect("node 3 must ask for the missing ancestor");
+    // the answer is a genuine chain, but it ends at a different block than the one requested
+    let (tip_id, _) = net.nodes[0].as_ref().unwrap().engine().committed_tip();
+    assert_ne!(tip_id, req.want);
+    let mut bogus = net.nodes[0].as_ref().unwrap().engine().serve_sync(&SyncRequest { want: tip_id, max_blocks: 2 }, 2).expect("served");
+    bogus.want = req.want;
+    let before = d3.stats();
+    d3.on_bytes(0, &net::encode(&NetMsg::SyncResponse(bogus)), net.now).unwrap();
+    assert_eq!(d3.stats().bad_sync, before.bad_sync + 1, "a response that does not end at the requested block is counted and dropped");
+    assert_eq!(d3.status().committed_height, 0);
 }

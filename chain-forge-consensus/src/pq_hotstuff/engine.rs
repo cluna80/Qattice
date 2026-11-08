@@ -130,6 +130,7 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
     pub fn high_qc(&self) -> &Cert { &self.high_qc }
     pub fn committed_tip(&self) -> (BlockId, u64) { (self.committed_tip, self.committed_height) }
     pub fn genesis_id(&self) -> BlockId { self.genesis_id }
+    pub fn config(&self) -> &EngineConfig { &self.cfg }
     pub fn store(&self) -> &SafetyStore<S, C> { &self.store }
     pub fn into_parts(self) -> (SafetyStore<S, C>, G, V) { (self.store, self.signer, self.verifier) }
     pub fn known_blocks(&self) -> Vec<&Block> { self.blocks.values().map(|s| &s.block).collect() }

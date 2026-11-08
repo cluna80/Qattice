@@ -26,3 +26,7 @@ pub mod pacemaker;
 pub mod netmsg;
 #[cfg(feature = "pq-hotstuff")]
 pub mod blockstore;
+#[cfg(feature = "pq-hotstuff")]
+pub mod exec;
+#[cfg(feature = "pq-hotstuff")]
+pub mod driver;

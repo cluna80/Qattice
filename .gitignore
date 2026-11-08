@@ -21,3 +21,7 @@ __pycache__/
 *.db
 *.db-shm
 *.db-wal
+
+# PQ-HotStuff-2 devnet validator seeds: generated locally, never committed
+*.seed
+validator.seed
