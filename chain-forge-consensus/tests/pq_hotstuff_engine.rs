@@ -11,7 +11,10 @@ mod doubles;
 // The tests live in tests/common/pq_engine_suite.rs so that the same assertions also run against real FIPS 204 signatures
 // (tests/pq_hotstuff_engine_fips204.rs).
 const DEFAULT_SEEDS: u64 = 10;
+/// Whether the test keys are deterministic (the test doubles): golden byte values are only asserted when they are.
+const DETERMINISTIC_KEYS: bool = true;
 include!("common/pq_engine_suite.rs");
 #[path = "common/pq_tree_doubles.rs"]
 mod tree_doubles;
 include!("common/pq_recovery_suite.rs");
+include!("common/pq_checkpoint_suite.rs");

@@ -16,6 +16,8 @@ pub const TAG_VOTE: &[u8] = b"CFH1|vote|";
 pub const TAG_TIMEOUT: &[u8] = b"CFH1|timeout|";
 pub const TAG_BLOCK: &[u8] = b"CFH1|block|";
 pub const TAG_BLOCK_ID: &[u8] = b"CFH1|blockid|";
+/// Profile v3 id preimage tag (domain separated from v2; deliberately NOT in `ALL_TAGS`, which pins the v2 formats).
+pub const TAG_BLOCK_ID_V3: &[u8] = b"CFH1|blockid3|";
 pub const TAG_POP: &[u8] = b"CFH1|pop|";
 pub const ALL_TAGS: [&[u8]; 5] = [TAG_VOTE, TAG_TIMEOUT, TAG_BLOCK, TAG_BLOCK_ID, TAG_POP];
 
@@ -115,6 +117,13 @@ pub struct BlockIdInput {
     pub qc_hash: [u8; HASH_LEN],
     pub tc_hash: Option<[u8; HASH_LEN]>,
     pub proposer: String,
+}
+
+/// The v3 block-id preimage: the v2 fields under a different tag, followed by the optional checkpoint-reference hash. v2 chains never use it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockIdInputV3 {
+    pub base: BlockIdInput,
+    pub checkpoint_hash: Option<[u8; HASH_LEN]>,
 }
 
 /// The validator proof-of-possession message (context `qattice/validator-pop/v2`).

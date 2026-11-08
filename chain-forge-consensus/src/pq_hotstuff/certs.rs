@@ -9,7 +9,8 @@ use sha3::{Digest, Sha3_256};
 
 use super::safety::{ConsensusVerifier, Kind, CTX_TIMEOUT, CTX_VOTE};
 use super::types::{EpochSet, ValidatorEntry};
-use super::wire::{AlgId, BlockIdInput, TimeoutMessage, VoteMessage, HASH_LEN, MAX_NAME_LEN, MLDSA65_SIGNATURE_LEN};
+use super::checkpoint::{is_v3, CheckpointRef};
+use super::wire::{AlgId, BlockIdInput, BlockIdInputV3, TimeoutMessage, VoteMessage, HASH_LEN, MAX_NAME_LEN, MLDSA65_SIGNATURE_LEN};
 
 pub type BlockId = [u8; HASH_LEN];
 
@@ -148,6 +149,8 @@ pub struct Block {
     pub payload: Vec<u8>,
     pub proposer: usize,
     pub signature: Vec<u8>,
+    /// Profile v3 only: an optional checkpoint reference, committed to by the block id. Always `None` on profile v2.
+    pub checkpoint: Option<CheckpointRef>,
 }
 
 impl GenesisCert {
@@ -359,10 +362,20 @@ pub struct IdCtx<'a> { pub protocol_profile: &'a str, pub chain_id: &'a str, pub
 /// certificate through `H(qc)` and the timeout certificate through `H(tc)`.
 pub fn block_id_of(b: &Block, ctx: &IdCtx) -> Result<BlockId, CertError> {
     let proposer = ctx.set.entries().get(b.proposer).ok_or(CertError::Invalid("proposer index"))?.address.clone();
-    BlockIdInput {
-        alg_id: ALG, protocol_profile: ctx.protocol_profile.to_string(), chain_id: ctx.chain_id.to_string(), epoch: b.epoch, round: b.round,
-        height: b.height, parent_id: b.parent_id, payload_hash: sha3(&b.payload), qc_hash: b.qc.hash(), tc_hash: b.tc.as_ref().map(Tc::hash), proposer,
-    }.block_id().map_err(|_| CertError::Invalid("block id input"))
+    id_from_parts(ctx, b.epoch, b.round, b.height, b.parent_id, sha3(&b.payload), b.qc.hash(), b.tc.as_ref().map(Tc::hash), proposer, b.checkpoint.as_ref())
+}
+
+/// The block id from its parts. Profile v2: the original preimage, byte for byte (a reference there is invalid). Profile v3: the domain-separated preimage that also
+/// commits to the optional checkpoint reference. Shared by [`block_id_of`] and the payload-free header form so the two cannot diverge.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn id_from_parts(ctx: &IdCtx, epoch: u64, round: u64, height: u64, parent_id: BlockId, payload_hash: [u8; 32], qc_hash: [u8; 32], tc_hash: Option<[u8; 32]>, proposer: String, checkpoint: Option<&CheckpointRef>) -> Result<BlockId, CertError> {
+    let base = BlockIdInput { alg_id: ALG, protocol_profile: ctx.protocol_profile.to_string(), chain_id: ctx.chain_id.to_string(), epoch, round, height, parent_id, payload_hash, qc_hash, tc_hash, proposer };
+    if is_v3(ctx.protocol_profile) {
+        BlockIdInputV3 { base, checkpoint_hash: checkpoint.map(CheckpointRef::hash) }.block_id().map_err(|_| CertError::Invalid("block id input"))
+    } else {
+        if checkpoint.is_some() { return Err(CertError::Invalid("checkpoint reference on a profile without checkpoints")); }
+        base.block_id().map_err(|_| CertError::Invalid("block id input"))
+    }
 }
 
 /// Kind of the proposer's signature context (re-exported for callers building blocks).

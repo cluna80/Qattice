@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::certs::*;
+use super::checkpoint::{check_reference, effective_genesis_hash, final_height_after, is_v3, Alarm, ChainRefState, CheckpointConfig, CheckpointRef, Evidence, RefContext, RootCheck};
 use super::leader::leader_index;
 use super::limits::PqLimits;
 use super::rules::{commits_parent, next_round, safe_to_timeout, safe_to_vote, BlockHeader, TcInfo, TimeoutRequest, VoterState};
@@ -66,6 +67,8 @@ pub enum EngineError {
     ConflictingCommit,
     #[error("recovery refused: {0}")]
     Restore(String),
+    #[error("signing is halted by a safety/execution-consistency alarm: {0}")]
+    Halted(String),
 }
 
 #[derive(Debug, Clone)]
@@ -78,9 +81,11 @@ pub struct EngineConfig {
     pub limits: PqLimits,
     /// Leader-rotation seed (the reduction of the epoch seed is unspecified, finding K3); 0 in Phase 0.
     pub seed: u64,
+    /// Profile v3 only (and required there): the genesis-bound checkpoint parameters and the local proposer policy.
+    pub checkpoint: Option<CheckpointConfig>,
 }
 
-struct Stored { block: Block, round: Round, height: u64, parent: BlockId }
+struct Stored { block: Block, round: Round, height: u64, parent: BlockId, state: ChainRefState }
 
 type VoteKey = (Round, BlockId, BlockId, Round);
 
@@ -102,7 +107,23 @@ pub struct Engine<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: Consen
     voted: BTreeSet<(usize, Round)>,
     timeouts: BTreeMap<Round, BTreeMap<usize, (u64, Vec<u8>, Cert)>>,
     proposed: Round,
+    // checkpoint references (profile v3); all empty and unused on profile v2
+    roots: BTreeMap<u64, [u8; 32]>,
+    executed_height: u64,
+    deferred: BTreeSet<BlockId>,
+    final_refs: BTreeMap<u64, CheckpointRef>,
+    certified_refs: BTreeMap<u64, CheckpointRef>,
+    alarm: Option<Alarm>,
+    evidence: Vec<Evidence>,
+    omit_until: Round,
+    proposed_ref_round: Option<Round>,
+    proposed_ref_block: Option<BlockId>,
+    omit_streak: u32,
 }
+
+/// Bounds on the volatile checkpoint bookkeeping.
+const MAX_DEFERRED: usize = 64;
+const MAX_EVIDENCE: usize = 32;
 
 impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> Engine<S, C, G, V> {
     pub fn new(cfg: EngineConfig, store: SafetyStore<S, C>, signer: G, verifier: V) -> Result<Self, EngineError> {
@@ -116,12 +137,16 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
             return Err(EngineError::Config("the safety store belongs to another key".into()));
         }
         let valset_hash = cfg.set.validator_set_hash();
-        let genesis = GenesisCert { protocol_profile: cfg.protocol_profile.clone(), chain_id: cfg.chain_id.clone(), genesis_hash: cfg.genesis_hash, valset_hash };
+        // v3: the validity-affecting checkpoint parameters are bound into the genesis, so a validator configured differently has a different genesis
+        let genesis_hash = effective_genesis_hash(&cfg.protocol_profile, &cfg.genesis_hash, cfg.checkpoint.as_ref().map(|c| &c.params)).map_err(|e| EngineError::Config(e.to_string()))?;
+        if let Some(c) = &cfg.checkpoint { c.policy.validate().map_err(|e| EngineError::Config(e.to_string()))?; }
+        let genesis = GenesisCert { protocol_profile: cfg.protocol_profile.clone(), chain_id: cfg.chain_id.clone(), genesis_hash, valset_hash };
         let genesis_id = genesis.block_id();
         Ok(Self {
             valset_hash, genesis_id, high_qc: Cert::Genesis(genesis.clone()), genesis, cfg, store, signer, verifier,
             blocks: BTreeMap::new(), high_tc: None, round: 1, committed_tip: genesis_id, committed_height: 0,
             votes: BTreeMap::new(), voted: BTreeSet::new(), timeouts: BTreeMap::new(), proposed: 0,
+            roots: BTreeMap::new(), executed_height: 0, deferred: BTreeSet::new(), final_refs: BTreeMap::new(), certified_refs: BTreeMap::new(), alarm: None, evidence: vec![], omit_until: 0, proposed_ref_round: None, proposed_ref_block: None, omit_streak: 0,
         })
     }
 
@@ -161,8 +186,36 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
     // ------------------------------------------------------------------------------------------------------ proposals
     pub fn on_proposal(&mut self, b: Block) -> Result<Vec<Output>, EngineError> {
         let Some((id, mut out)) = self.accept(b.clone())? else { return Ok(vec![]) };
-        self.vote_for(&b, id, &mut out)?;
+        self.vote_or_defer(&b, id, &mut out)?;
         Ok(out)
+    }
+
+    /// Rule R5 (a voting rule, not a validity rule): a block that carries a reference is voted for only if the validator's own root matches; `NotYet` defers the
+    /// vote until the executor catches up; `Unknown` and `Mismatch` withhold it (a mismatch against an uncertified proposal is evidence, not an alarm). A halted
+    /// engine votes for nothing.
+    fn vote_or_defer(&mut self, b: &Block, id: BlockId, out: &mut Vec<Output>) -> Result<(), EngineError> {
+        if self.alarm.is_some() { return Ok(()); }
+        let Some(r) = b.checkpoint else { return self.vote_for(b, id, out) };
+        match self.ref_outcome(&r) {
+            RootCheck::Match => self.vote_for(b, id, out),
+            RootCheck::NotYet => { if self.deferred.len() >= MAX_DEFERRED { if let Some(first) = self.deferred.iter().next().copied() { self.deferred.remove(&first); } } self.deferred.insert(id); Ok(()) }
+            outcome => { self.note_evidence(id, r, outcome); Ok(()) }
+        }
+    }
+
+    fn note_evidence(&mut self, block_id: BlockId, reference: CheckpointRef, outcome: RootCheck) {
+        if self.evidence.len() >= MAX_EVIDENCE { self.evidence.remove(0); }
+        self.evidence.push(Evidence { block_id, reference, outcome, own_root: self.roots.get(&reference.height).copied() });
+    }
+
+    /// R5: compare a reference with this validator's own execution.
+    pub fn ref_outcome(&self, r: &CheckpointRef) -> RootCheck {
+        match self.roots.get(&r.height) {
+            Some(root) => if *root == r.state_root { RootCheck::Match } else { RootCheck::Mismatch },
+            None if r.height > self.executed_height => RootCheck::NotYet,
+            None if self.final_refs.get(&r.height) == Some(r) => RootCheck::Match, // authenticated by a final ancestor carrying the identical reference
+            None => RootCheck::Unknown,
+        }
     }
 
     /// A block received through block sync (not as a live proposal): validated exactly like a proposal and added to the tree,
@@ -204,7 +257,15 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
             _ => return Err(EngineError::Invalid("timeout certificate presence")),
         }
 
-        self.blocks.insert(id, Stored { block: b.clone(), round: b.round, height: b.height, parent: b.parent_id });
+        let (final_height, last_ref) = self.child_state(&b.parent_id);
+        if let (true, Some(cc)) = (is_v3(&self.cfg.protocol_profile), self.cfg.checkpoint) {
+            if let Some(r) = &b.checkpoint {
+                let at = |h: u64| self.ancestor_at(&b.parent_id, h);
+                check_reference(r, &RefContext { params: &cc.params, final_height, last_ref, block_id_at: &at }).map_err(|e| EngineError::Invalid(e.reason()))?;
+            }
+        }
+        let state = ChainRefState { final_height, last_ref: b.checkpoint.or(last_ref) };
+        self.blocks.insert(id, Stored { block: b.clone(), round: b.round, height: b.height, parent: b.parent_id, state });
         let mut out = vec![Output::PersistBlock(b.clone())];
         self.observe_cert(&b.qc.clone(), &mut out)?;
         if let Some(t) = &b.tc { self.observe_tc(t.clone(), &mut out); }
@@ -274,6 +335,8 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
     fn observe_cert(&mut self, c: &Cert, out: &mut Vec<Output>) -> Result<(), EngineError> {
         let Cert::Qc(q) = c else { return Ok(()) };
         let Some(cr) = self.round_of(&q.block_id) else { return Ok(()) }; // block not known: cannot extend or commit through it
+        if let Some(r) = self.blocks.get(&q.block_id).and_then(|s| s.block.checkpoint) { self.note_certified(r); }
+        if self.proposed_ref_block == Some(q.block_id) { self.proposed_ref_block = None; self.omit_streak = 0; } // our reference-bearing proposal was certified
         if q.round > self.high_qc.round() { self.high_qc = c.clone(); out.push(Output::PersistHighQc(c.clone())); }
         if let Some(parent) = self.blocks.get(&q.block_id).map(|s| s.parent) {
             if let Some(pr) = self.round_of(&parent) {
@@ -321,6 +384,7 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
             let s = &self.blocks[&id];
             out.push(Output::PersistCommit { height: s.height, id });
             out.push(Output::Commit(Committed { id, round: s.round, height: s.height, payload: s.block.payload.clone() }));
+            if let Some(r) = s.block.checkpoint { self.final_refs.insert(r.height, r); }
             self.committed_tip = id;
             self.committed_height = s.height;
         }
@@ -330,7 +394,18 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
     // ------------------------------------------------------------------------------------------------------ timeouts -> TC
     /// The round timer expired: sign and broadcast a timeout for the current round (if the safety rules allow it).
     pub fn local_timeout(&mut self) -> Result<Vec<Output>, EngineError> {
+        self.refuse_if_halted()?;
         let r = self.round;
+        // a reference-bearing proposal of this node failed to gather a QC: omit references for a growing number of leader rotations (doubling per consecutive failure,
+        // capped at 2^9 rotations) so that a quorum that cannot check references is not asked again every rotation
+        if self.proposed_ref_round == Some(r) {
+            self.proposed_ref_round = None;
+            if let Some(cc) = self.cfg.checkpoint {
+                self.omit_streak = self.omit_streak.saturating_add(1).min(10);
+                let rotations = cc.policy.omit_rotations.saturating_mul(1u64 << (self.omit_streak - 1));
+                self.omit_until = r.saturating_add((self.cfg.set.len() as u64).saturating_mul(rotations));
+            }
+        }
         let req = TimeoutRequest { round: r, high_qc_round: self.high_qc.round(), tc_round: self.high_tc.as_ref().map(|t| t.round) };
         let msg = TimeoutMessage { alg_id: ALG, chain_id: self.cfg.chain_id.clone(), epoch: self.cfg.set.epoch(), round: r, high_qc_round: self.high_qc.round() };
         let bytes = msg.encode().map_err(|_| EngineError::Invalid("timeout message"))?;
@@ -493,6 +568,13 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
     // ------------------------------------------------------------------------------------------------------ proposing
     /// Propose for the current round with an opaque (`devnet-interim`) payload. The leader processes its own proposal, so it votes.
     pub fn propose(&mut self, payload: Vec<u8>) -> Result<Vec<Output>, EngineError> {
+        let checkpoint = self.suggest_ref();
+        self.propose_with(payload, checkpoint)
+    }
+
+    /// Like [`Engine::propose`] with an explicit reference (tests and tools). The block is still subject to every rule when the leader processes its own proposal.
+    pub fn propose_with(&mut self, payload: Vec<u8>, checkpoint: Option<CheckpointRef>) -> Result<Vec<Output>, EngineError> {
+        self.refuse_if_halted()?;
         let r = self.round;
         if !self.is_leader() { return Err(EngineError::NotLeader); }
         if r <= self.proposed { return Err(EngineError::Invalid("already proposed this round")); }
@@ -503,15 +585,110 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
         let tc = if qc.round().checked_add(1) == Some(r) { None } else {
             match &self.high_tc { Some(t) if t.round.checked_add(1) == Some(r) => Some(t.clone()), _ => return Err(EngineError::NoTc) }
         };
-        let mut b = Block { epoch: self.cfg.set.epoch(), round: r, height, parent_id, qc, tc, payload, proposer: self.cfg.my_index, signature: vec![] };
+        let mut b = Block { epoch: self.cfg.set.epoch(), round: r, height, parent_id, qc, tc, payload, proposer: self.cfg.my_index, signature: vec![], checkpoint };
         let id = block_id_of(&b, &self.idctx())?;
         let msg = BlockSigningMessage { alg_id: ALG, block_id: id };
         b.signature = self.store.sign_proposal(b.epoch, r, &msg, &mut self.signer)?.envelope.signature;
         self.proposed = r;
+        self.proposed_ref_round = if b.checkpoint.is_some() { Some(r) } else { None };
+        self.proposed_ref_block = if b.checkpoint.is_some() { Some(id) } else { None };
         let mut out = vec![Output::Broadcast(Msg::Proposal(b.clone()))];
         out.extend(self.on_proposal(b)?);
         Ok(out)
     }
+
+    // ------------------------------------------------------------------------------------------------------ checkpoint references
+    fn refuse_if_halted(&self) -> Result<(), EngineError> {
+        match &self.alarm { Some(a) => Err(EngineError::Halted(format!("{a:?}"))), None => Ok(()) }
+    }
+
+    /// `(F(B), last reference)` for a child of `parent`: the two-chain rule applied to the parent and its own parent, and the most recent reference on the chain.
+    fn child_state(&self, parent: &BlockId) -> (u64, Option<CheckpointRef>) {
+        let Some(c) = self.blocks.get(parent) else { return (0, None) }; // the genesis block
+        let p = if c.parent == self.genesis_id { None } else { self.blocks.get(&c.parent).map(|s| (s.round, s.height)) };
+        (final_height_after(c.state.final_height, c.round, p), c.state.last_ref)
+    }
+
+    /// The id of the block at `height` on the chain ending at `from` (walking parents), if it is known.
+    fn ancestor_at(&self, from: &BlockId, height: u64) -> Option<BlockId> {
+        let mut cur = *from;
+        loop {
+            let s = self.blocks.get(&cur)?;
+            if s.height == height { return Some(cur); }
+            if s.height < height { return None; }
+            cur = s.parent;
+        }
+    }
+
+    /// Record a root this validator computed by executing the block at a checkpoint height. A different root for the same height is refused.
+    pub fn record_root(&mut self, height: u64, root: [u8; 32]) -> Result<(), EngineError> {
+        if let Some(prev) = self.roots.get(&height) { if *prev != root { return Err(EngineError::Invalid("a different root is already recorded for this height")); } return Ok(()); }
+        self.roots.insert(height, root);
+        if let Some(r) = self.certified_refs.get(&height).copied() { self.note_certified(r); }
+        Ok(())
+    }
+
+    /// The executor has durably executed up to `height` (no votes are produced; see [`Engine::on_executed`]).
+    pub fn set_executed(&mut self, height: u64) { if height > self.executed_height { self.executed_height = height; } }
+
+    /// The executor advanced: re-evaluate the proposals whose vote was deferred for lack of a root, and vote for those that now match.
+    pub fn on_executed(&mut self, height: u64) -> Result<Vec<Output>, EngineError> {
+        self.set_executed(height);
+        let mut out = vec![];
+        for id in std::mem::take(&mut self.deferred) {
+            let Some(b) = self.blocks.get(&id).map(|s| s.block.clone()) else { continue };
+            let Some(r) = b.checkpoint else { continue };
+            match self.ref_outcome(&r) {
+                RootCheck::Match => { if self.alarm.is_none() { self.vote_for(&b, id, &mut out)?; } }
+                RootCheck::NotYet => { self.deferred.insert(id); }
+                outcome => self.note_evidence(id, r, outcome),
+            }
+        }
+        Ok(out)
+    }
+
+    /// A reference carried by a block that has a QC (so a quorum accepted it): contradictions raise a generic alarm and halt signing. Nothing is attributed.
+    fn note_certified(&mut self, r: CheckpointRef) {
+        if self.alarm.is_some() { return; }
+        if let Some(prev) = self.certified_refs.get(&r.height).copied() {
+            if prev != r { self.alarm = Some(Alarm::ConflictingCertifiedRoots { first: prev, second: r }); return; }
+        } else { self.certified_refs.insert(r.height, r); }
+        if let Some(own) = self.roots.get(&r.height).copied() { if own != r.state_root { self.alarm = Some(Alarm::LocalDivergence { reference: r, own_root: own }); } }
+    }
+
+    /// The reference this node would put in a proposal built on its high QC, by policy (not a validity rule): the newest checkpoint height that is final, at least
+    /// `margin` blocks behind its own executor, has a recorded root, is not already covered by the chain's last reference, and passes every validity rule.
+    pub fn suggest_ref(&self) -> Option<CheckpointRef> {
+        let cc = self.cfg.checkpoint?;
+        if !is_v3(&self.cfg.protocol_profile) || !cc.policy.propose_refs || self.round < self.omit_until { return None; }
+        let parent = self.high_qc.block_id();
+        let (final_height, last_ref) = self.child_state(&parent);
+        let limit = final_height.min(self.executed_height.checked_sub(cc.policy.margin)?);
+        let h = limit - limit % cc.params.interval;
+        if h == 0 || last_ref.map_or(false, |l| h <= l.height) { return None; }
+        let r = CheckpointRef { height: h, block_id: self.ancestor_at(&parent, h)?, state_root: *self.roots.get(&h)? };
+        let at = |x: u64| self.ancestor_at(&parent, x);
+        check_reference(&r, &RefContext { params: &cc.params, final_height, last_ref, block_id_at: &at }).ok()?;
+        Some(r)
+    }
+
+    /// Heights between the committed tip and the most recent reference on the committed chain (or the whole committed height if there is none): the monitoring
+    /// figure for "optional references do not guarantee checkpoint progress".
+    pub fn checkpoint_age(&self) -> u64 {
+        let last = self.blocks.get(&self.committed_tip).and_then(|s| s.state.last_ref).map_or(0, |r| r.height);
+        self.committed_height.saturating_sub(last)
+    }
+    /// Whether `checkpoint_age` exceeds the configured alarm age (a number of intervals); always false without checkpoint configuration.
+    pub fn checkpoint_stale(&self) -> bool {
+        self.cfg.checkpoint.map_or(false, |c| self.checkpoint_age() > c.params.interval.saturating_mul(c.policy.alarm_age_intervals))
+    }
+    pub fn alarm(&self) -> Option<&Alarm> { self.alarm.as_ref() }
+    pub fn evidence(&self) -> &[Evidence] { &self.evidence }
+    pub fn root(&self, height: u64) -> Option<[u8; 32]> { self.roots.get(&height).copied() }
+    pub fn deferred_len(&self) -> usize { self.deferred.len() }
+    pub fn executed_height(&self) -> u64 { self.executed_height }
+    /// The chain-derived reference state of a known block (tests, monitoring).
+    pub fn chain_ref_state(&self, id: &BlockId) -> Option<ChainRefState> { self.blocks.get(id).map(|s| s.state) }
 
     /// Envelope of a signature, for callers that need to forward a stored signature (the wire envelope of spec 3.2).
     pub fn envelope(sig: Vec<u8>) -> SignatureEnvelope { SignatureEnvelope { alg_id: ALG, signature: sig } }

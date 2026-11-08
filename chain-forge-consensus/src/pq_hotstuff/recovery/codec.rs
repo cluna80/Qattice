@@ -48,6 +48,8 @@ impl CodecLimits {
     pub fn header_max(&self) -> Option<u64> {
         3410u64.checked_add(qc_max_bytes(self.n)?)?.checked_add(4)?.checked_add(tc_max_bytes(self.n, self.n)?)
     }
+    /// The same with the checkpoint extension a profile-v3 header may carry (a flag byte and a 72-byte reference): the bound the decoder applies.
+    pub fn header_max_v3(&self) -> Option<u64> { self.header_max()?.checked_add(crate::pq_hotstuff::checkpoint::REF_EXTENSION_LEN as u64) }
     pub fn qc_max(&self) -> Option<u64> { qc_max_bytes(self.n) }
     /// Largest legal message of `kind` under these limits (never above the transport limit).
     pub fn max_len(&self, kind: u8) -> Option<u64> {
@@ -55,7 +57,7 @@ impl CodecLimits {
             KIND_HEADER_REQ => ENVELOPE + 44,
             KIND_MANIFEST_REQ => ENVELOPE + 80,
             KIND_CHUNK_REQ => ENVELOPE + 44,
-            KIND_HEADER_RESP => ENVELOPE.checked_add(8 + 1 + 32 + 4)?.checked_add(u64::from(self.max_headers).checked_mul(4u64.checked_add(self.header_max()?)?)?)?.checked_add(1 + 4)?.checked_add(self.qc_max()?)?.checked_add(8)?,
+            KIND_HEADER_RESP => ENVELOPE.checked_add(8 + 1 + 32 + 4)?.checked_add(u64::from(self.max_headers).checked_mul(4u64.checked_add(self.header_max_v3()?)?)?)?.checked_add(1 + 4)?.checked_add(self.qc_max()?)?.checked_add(8)?,
             KIND_MANIFEST_RESP => ENVELOPE.checked_add(8 + 1 + 72 + MANIFEST_FIXED)?.checked_add(32u64.checked_mul(u64::from(self.max_chunk_count))?)?,
             KIND_CHUNK_RESP => ENVELOPE.checked_add(8 + 1 + 32 + 4 + 4)?.checked_add(u64::from(self.max_chunk_size))?,
             _ => return None,
@@ -64,24 +66,7 @@ impl CodecLimits {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct CheckpointRef { pub height: u64, pub block_id: BlockId, pub state_root: [u8; 32] }
-
-impl CheckpointRef {
-    pub fn encode(&self) -> [u8; 72] {
-        let mut o = [0u8; 72];
-        o[..8].copy_from_slice(&self.height.to_be_bytes());
-        o[8..40].copy_from_slice(&self.block_id);
-        o[40..].copy_from_slice(&self.state_root);
-        o
-    }
-    pub fn decode(b: &[u8]) -> Result<Self, CodecError> {
-        if b.len() != 72 { return Err(CodecError::Malformed("reference length")); }
-        Ok(CheckpointRef { height: u64::from_be_bytes(b[..8].try_into().unwrap()), block_id: b[8..40].try_into().unwrap(), state_root: b[40..].try_into().unwrap() })
-    }
-    /// `SHA3-256("CFH1|ckpt|" || reference)`.
-    pub fn hash(&self) -> [u8; 32] { sha3(&[b"CFH1|ckpt|", &self.encode()]) }
-}
+pub use crate::pq_hotstuff::checkpoint::CheckpointRef;
 
 pub fn sha3(parts: &[&[u8]]) -> [u8; 32] { let mut h = Sha3_256::new(); for p in parts { h.update(p); } h.finalize().into() }
 
@@ -225,7 +210,7 @@ impl<'a> Rd<'a> {
     fn u32(&mut self) -> Result<u32, CodecError> { Ok(u32::from_be_bytes(self.take(4)?.try_into().unwrap())) }
     fn u64(&mut self) -> Result<u64, CodecError> { Ok(u64::from_be_bytes(self.take(8)?.try_into().unwrap())) }
     fn h32(&mut self) -> Result<[u8; 32], CodecError> { Ok(self.take(32)?.try_into().unwrap()) }
-    fn cref(&mut self) -> Result<CheckpointRef, CodecError> { CheckpointRef::decode(self.take(72)?) }
+    fn cref(&mut self) -> Result<CheckpointRef, CodecError> { CheckpointRef::decode(self.take(72)?).ok_or(CodecError::Malformed("reference length")) }
 }
 
 /// Decode a recovery message. The whole length is checked against the kind's maximum first; nothing is allocated from a reported length.
@@ -251,7 +236,7 @@ pub fn decode(b: &[u8], lim: &CodecLimits) -> Result<RecoveryMsg, CodecError> {
                     let count = r.u32()?;
                     if count == 0 { return Err(CodecError::Invalid("OK with no headers")); }
                     if count > lim.max_headers { return Err(CodecError::Invalid("header count")); }
-                    let hmax = lim.header_max().ok_or(CodecError::Invalid("header size"))?;
+                    let hmax = lim.header_max_v3().ok_or(CodecError::Invalid("header size"))?;
                     let mut headers = Vec::new();
                     for _ in 0..count {
                         let n = r.u32()? as usize;

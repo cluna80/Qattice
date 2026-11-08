@@ -43,7 +43,7 @@ fn limits(n: usize) -> PqLimits {
 }
 fn mlim() -> MessageLimits { MessageLimits::derive(&limits(4), 4, CHAIN.len(), SYNC_K).expect("limits") }
 fn cfg(i: usize, n: usize) -> EngineConfig {
-    EngineConfig { chain_id: CHAIN.into(), protocol_profile: PROFILE.into(), set: set_n(n), my_index: i, genesis_hash: GENESIS_HASH, limits: limits(n), seed: 0 }
+    EngineConfig { chain_id: CHAIN.into(), protocol_profile: PROFILE.into(), set: set_n(n), my_index: i, genesis_hash: GENESIS_HASH, limits: limits(n), seed: 0, checkpoint: None }
 }
 fn binding(i: usize) -> CounterBinding { CounterBinding { public_key: test_public_key(i as u8 + 1), instance_id: [i as u8; 16] } }
 fn fresh_store(i: usize, f: Shared) -> St {
@@ -258,7 +258,7 @@ fn tc_validity_rejections() {
 // ================================================================================================ block identity
 
 fn base_block(f: &Fx) -> Block {
-    Block { epoch: 0, round: 6, height: 5, parent_id: [5; 32], qc: Cert::Qc(mk_qc(f, 5, 5, &[0, 1, 2])), tc: None, payload: b"devnet-interim payload".to_vec(), proposer: 1, signature: vec![] }
+    Block { checkpoint: None, epoch: 0, round: 6, height: 5, parent_id: [5; 32], qc: Cert::Qc(mk_qc(f, 5, 5, &[0, 1, 2])), tc: None, payload: b"devnet-interim payload".to_vec(), proposer: 1, signature: vec![] }
 }
 
 #[test]
@@ -354,7 +354,7 @@ fn a_proposal_from_the_wrong_leader_or_with_a_tampered_field_is_rejected() {
     assert!(nodes[other].on_proposal(Block { round: 2, ..b.clone() }).is_err());
     assert!(nodes[other].on_proposal(Block { proposer: other, ..b.clone() }).is_err());
     // epoch change is refused
-    assert!(nodes[other].on_proposal(Block { epoch: 1, ..b.clone() }).is_err());
+    assert!(nodes[other].on_proposal(Block { checkpoint: None, epoch: 1, ..b.clone() }).is_err());
     // the genuine block is accepted
     assert!(nodes[other].on_proposal(b).is_ok());
 }
@@ -457,7 +457,7 @@ fn signed_block(f: &Fx, mut b: Block) -> Block {
 }
 fn has_vote(o: &[Output]) -> bool { o.iter().any(|o| matches!(o, Output::Send { msg: Msg::Vote(_), .. })) }
 fn genesis_block(f: &Fx, round: u64, proposer: usize) -> Block {
-    Block { epoch: 0, round, height: 1, parent_id: f.genesis.block_id(), qc: Cert::Genesis(f.genesis.clone()), tc: None, payload: b"x".to_vec(), proposer, signature: vec![] }
+    Block { checkpoint: None, epoch: 0, round, height: 1, parent_id: f.genesis.block_id(), qc: Cert::Genesis(f.genesis.clone()), tc: None, payload: b"x".to_vec(), proposer, signature: vec![] }
 }
 
 #[test]
@@ -483,10 +483,10 @@ fn a_block_with_an_invalid_parent_qc_is_rejected_even_when_correctly_signed() {
     e.on_proposal(b1).unwrap();
     let mut forged = Qc { epoch: 0, round: 1, block_id: id1, parent_id: f.genesis.block_id(), parent_round: 0, valset_hash: f.vh, signers: vec![true, true, true, false], sigs: vec![vec![0u8; 3309]; 3] };
     let l2 = e.leader_of(2);
-    let b2 = signed_block(&f, Block { epoch: 0, round: 2, height: 2, parent_id: id1, qc: Cert::Qc(forged.clone()), tc: None, payload: b"y".to_vec(), proposer: l2, signature: vec![] });
+    let b2 = signed_block(&f, Block { checkpoint: None, epoch: 0, round: 2, height: 2, parent_id: id1, qc: Cert::Qc(forged.clone()), tc: None, payload: b"y".to_vec(), proposer: l2, signature: vec![] });
     assert!(e.on_proposal(b2).is_err(), "a forged QC must not be accepted");
     forged.sigs = mk_qc(&f, 1, 0, &[0, 1, 2]).sigs; // signatures over a different block
-    let b2 = signed_block(&f, Block { epoch: 0, round: 2, height: 2, parent_id: id1, qc: Cert::Qc(forged), tc: None, payload: b"y".to_vec(), proposer: l2, signature: vec![] });
+    let b2 = signed_block(&f, Block { checkpoint: None, epoch: 0, round: 2, height: 2, parent_id: id1, qc: Cert::Qc(forged), tc: None, payload: b"y".to_vec(), proposer: l2, signature: vec![] });
     assert!(e.on_proposal(b2).is_err());
 }
 
@@ -506,12 +506,12 @@ fn a_block_that_skips_a_higher_qc_reported_by_its_timeout_certificate_gets_no_vo
     // a TC for round 3 reporting a QC of round 2 (some other block), signed by three validators
     let qc2 = mk_qc(&f, 2, 9, &[0, 1, 2]);
     let tc = mk_tc(&f, 3, &[(0, 2), (1, 2), (2, 2)], Cert::Qc(qc2));
-    let skipping = signed_block(&f, Block { epoch: 0, round: 4, height: 2, parent_id: id1, qc: Cert::Qc(qc1.clone()), tc: Some(tc), payload: b"z".to_vec(), proposer: e.leader_of(4), signature: vec![] });
+    let skipping = signed_block(&f, Block { checkpoint: None, epoch: 0, round: 4, height: 2, parent_id: id1, qc: Cert::Qc(qc1.clone()), tc: Some(tc), payload: b"z".to_vec(), proposer: e.leader_of(4), signature: vec![] });
     let out = e.on_proposal(skipping).unwrap();
     assert!(!has_vote(&out), "voted for a block whose QC is below the TC's highest reported QC");
     // control: the same shape with a TC that reports only round 1 is votable
     let tc_ok = mk_tc(&f, 3, &[(0, 1), (1, 1), (2, 1)], Cert::Qc(qc1.clone()));
-    let fine = signed_block(&f, Block { epoch: 0, round: 4, height: 2, parent_id: id1, qc: Cert::Qc(qc1), tc: Some(tc_ok), payload: b"w".to_vec(), proposer: e.leader_of(4), signature: vec![] });
+    let fine = signed_block(&f, Block { checkpoint: None, epoch: 0, round: 4, height: 2, parent_id: id1, qc: Cert::Qc(qc1), tc: Some(tc_ok), payload: b"w".to_vec(), proposer: e.leader_of(4), signature: vec![] });
     assert!(has_vote(&e.on_proposal(fine).unwrap()));
 }
 
@@ -585,7 +585,7 @@ fn a_proposal_with_a_forged_timeout_certificate_is_rejected() {
     let qc1 = Qc { epoch: 0, round: 1, block_id: id1, parent_id: f.genesis.block_id(), parent_round: 0, valset_hash: f.vh, signers: vec![true, true, true, false], sigs: [0usize, 1, 2].iter().map(|i| sign(*i, CTX_VOTE, &m)).collect() };
     let mut tc = mk_tc(&f, 3, &[(0, 1), (1, 1), (2, 1)], Cert::Qc(qc1.clone()));
     tc.sigs.iter_mut().for_each(|s| s[9] ^= 1); // structurally valid, signatures forged
-    let b4 = signed_block(&f, Block { epoch: 0, round: 4, height: 2, parent_id: id1, qc: Cert::Qc(qc1), tc: Some(tc), payload: b"t".to_vec(), proposer: e.leader_of(4), signature: vec![] });
+    let b4 = signed_block(&f, Block { checkpoint: None, epoch: 0, round: 4, height: 2, parent_id: id1, qc: Cert::Qc(qc1), tc: Some(tc), payload: b"t".to_vec(), proposer: e.leader_of(4), signature: vec![] });
     assert!(e.on_proposal(b4).is_err());
 }
 
@@ -755,7 +755,7 @@ fn messages_and_certificates_from_another_chain_are_rejected() {
 fn worst_qc(f: &Fx) -> Qc { mk_qc(f, 9, 9, &[0, 1, 2, 3]) }
 fn worst_tc(f: &Fx) -> Tc { mk_tc(f, 10, &[(0, 9), (1, 9), (2, 9), (3, 9)], Cert::Qc(worst_qc(f))) }
 fn worst_block(f: &Fx, payload: usize) -> Block {
-    Block { epoch: 0, round: 11, height: 7, parent_id: [1; 32], qc: Cert::Qc(worst_qc(f)), tc: Some(worst_tc(f)), payload: vec![7u8; payload], proposer: 3, signature: vec![5u8; 3309] }
+    Block { checkpoint: None, epoch: 0, round: 11, height: 7, parent_id: [1; 32], qc: Cert::Qc(worst_qc(f)), tc: Some(worst_tc(f)), payload: vec![7u8; payload], proposer: 3, signature: vec![5u8; 3309] }
 }
 fn big_vote() -> VoteMsg {
     VoteMsg { voter: 2, msg: VoteMessage { alg_id: ALG, chain_id: CHAIN.into(), epoch: 0, round: u64::MAX, block_id: [3; 32], parent_id: [4; 32], parent_round: u64::MAX }, signature: vec![9u8; 3309] }
@@ -1675,7 +1675,7 @@ fn damaged_or_foreign_executor_state_is_never_treated_as_fresh() {
 fn big_set(n: usize) -> EpochSet {
     EpochSet::new(0, (0..n).map(|i| { let mut k = test_public_key(1); k[0] = (i >> 8) as u8; k[1] = i as u8; ValidatorEntry { address: format!("v{i:05}"), public_key: k, power: 1 } }).collect()).unwrap()
 }
-fn dcfg() -> DriverConfig { DriverConfig { max_sync_blocks: SYNC_K, pace: PACE, sync_ttl: 20, sync_outstanding: 8, min_propose_gap: 0, park_capacity: 16, park_ttl: 200, recent: 64 } }
+fn dcfg() -> DriverConfig { DriverConfig { max_sync_blocks: SYNC_K, pace: PACE, sync_ttl: 20, sync_outstanding: 8, min_propose_gap: 0, park_capacity: 16, park_ttl: 200, recent: 64, exec_per_tick: None } }
 
 #[test]
 fn startup_rejects_unsupported_configurations_explicitly() {
@@ -1717,6 +1717,8 @@ impl Executor for LogApp {
 type Drv = Driver<MemStorage, TestCounter, TestSigner, TestVerifier, MemStorage, LogApp>;
 type ExecLog = std::rc::Rc<std::cell::RefCell<Vec<u64>>>;
 
+fn engine_f(i: usize, n: usize, cc: &Option<CheckpointConfig>) -> E { match cc { Some(c) => engine3(i, n, c), None => engine(i, n) } }
+fn restart_f(e: E, i: usize, n: usize, cc: &Option<CheckpointConfig>) -> E { match cc { Some(c) => restart3(e, i, n, c), None => restart(e, i, n) } }
 fn start_node(e: E, bs: BlockStore<MemStorage>, app: MemStorage, log: &ExecLog, tag: &str, now: u64) -> Result<(Drv, Vec<Outbound>), DriverError> {
     let exec = LogApp { inner: InterimApp::open(app, GENESIS_HASH)?, log: log.clone() };
     let tag = tag.to_string();
@@ -1734,16 +1736,18 @@ struct DNet {
     sent: Vec<Vec<Vec<u8>>>,
     fatal: Vec<(usize, String)>,
     dead: Vec<bool>,
+    cc: Option<CheckpointConfig>,
 }
 impl DNet {
-    fn new(n: usize, silent: &[usize], tag: &str) -> DNet {
-        let mut d = DNet { n, nodes: vec![], logs: vec![], bs_faults: vec![], q: vec![], now: 1, cut: vec![], sent: vec![vec![]; n], fatal: vec![], dead: vec![false; n] };
+    fn new(n: usize, silent: &[usize], tag: &str) -> DNet { Self::new_cp(n, silent, tag, None) }
+    fn new_cp(n: usize, silent: &[usize], tag: &str, cc: Option<CheckpointConfig>) -> DNet {
+        let mut d = DNet { n, nodes: vec![], logs: vec![], bs_faults: vec![], q: vec![], now: 1, cut: vec![], sent: vec![vec![]; n], fatal: vec![], dead: vec![false; n], cc };
         for i in 0..n {
             let log: ExecLog = Default::default();
             let f = faults();
             if silent.contains(&i) { d.nodes.push(None); } else {
                 let bs = BlockStore::new(MemStorage::new(f.clone()));
-                let (drv, first) = start_node(engine(i, n), bs, mem(), &log, tag, 1).expect("start");
+                let (drv, first) = start_node(engine_f(i, n, &cc), bs, mem(), &log, tag, 1).expect("start");
                 d.nodes.push(Some(drv));
                 d.push(i, first);
             }
@@ -1799,7 +1803,7 @@ impl DNet {
         let (e, bs, x) = d.into_parts();
         let bs = bs_override.unwrap_or(bs);
         let app = app_override.unwrap_or_else(|| x.inner.into_inner());
-        let (nd, first) = start_node(restart(e, i, self.n), bs, app, &self.logs[i], tag, self.now)?;
+        let (nd, first) = start_node(restart_f(e, i, self.n, &self.cc), bs, app, &self.logs[i], tag, self.now)?;
         self.nodes[i] = Some(nd);
         self.dead[i] = false;
         self.push(i, first.clone());
@@ -2015,7 +2019,7 @@ fn a_sync_response_that_does_not_answer_the_request_is_rejected_by_the_driver() 
 // Payload-free headers and header-chain verification (snapshot-recovery Step 1). Headers authenticate committed HISTORY (ids, payload hashes,
 // finality); they say nothing about application state, which no block commits to.
 // ============================================================================================================================
-fn cparams(set: &EpochSet) -> ChainParams<'_> { ChainParams { protocol_profile: PROFILE, chain_id: CHAIN, set, genesis_hash: GENESIS_HASH, seed: 0 } }
+fn cparams(set: &EpochSet) -> ChainParams<'_> { ChainParams { protocol_profile: PROFILE, chain_id: CHAIN, set, genesis_hash: GENESIS_HASH, seed: 0, checkpoint: None } }
 
 /// The linear chain from genesis to the block certified by node `i`'s high QC, and that QC (None while only the genesis certificate exists).
 fn chain_to(net: &DNet, i: usize) -> (Vec<Block>, Option<Cert>) {
@@ -2204,12 +2208,12 @@ fn a_chain_verifies_in_segments_from_a_final_anchor_with_the_same_finality() {
     assert!(full.finalized.len() >= 4);
     let a: ChainPoint = full.finalized[full.finalized.len() / 2];
     let rest = &hs[a.height as usize..];
-    let seg = verify_header_chain(&cparams(&set), &TestVerifier, Start::Anchor(Anchor { id: a.id, height: a.height, round: a.round }), rest, fq.as_ref(), 10_000).unwrap();
+    let seg = verify_header_chain(&cparams(&set), &TestVerifier, Start::Anchor(Anchor { id: a.id, height: a.height, round: a.round, parent_round: a.round - 1, final_height: a.height, last_ref: None, ancestors: vec![] }), rest, fq.as_ref(), 10_000).unwrap();
     let above: Vec<ChainPoint> = full.finalized.iter().filter(|p| p.height > a.height).copied().collect();
     assert_eq!(seg.finalized, above, "the same blocks become final whether or not the prefix is re-verified");
     assert_eq!(seg.tip, full.tip);
     // a wrong anchor id, height or round is refused
-    for bad in [Anchor { id: [1; 32], height: a.height, round: a.round }, Anchor { id: a.id, height: a.height + 1, round: a.round }, Anchor { id: a.id, height: a.height, round: a.round + 1 }] {
+    for bad in [Anchor { id: [1; 32], height: a.height, round: a.round, parent_round: a.round - 1, final_height: a.height, last_ref: None, ancestors: vec![] }, Anchor { id: a.id, height: a.height + 1, round: a.round, parent_round: a.round - 1, final_height: a.height, last_ref: None, ancestors: vec![] }, Anchor { id: a.id, height: a.height, round: a.round + 1, parent_round: a.round - 1, final_height: a.height, last_ref: None, ancestors: vec![] }] {
         assert!(verify_header_chain(&cparams(&set), &TestVerifier, Start::Anchor(bad), rest, fq.as_ref(), 10_000).is_err());
     }
 }
@@ -2326,4 +2330,20 @@ fn diag_header_verification_and_restart_replay_cost() {
     let (_nd, _) = start_node(restart(e, 1, 4), bsx, { let mut s = x.inner.into_inner(); s.delete_raw("app-state"); s }, &Default::default(), "a", net.now).expect("start");
     let el = t.elapsed();
     println!("DIAG restart: {} stored blocks re-validated and {} heights replayed into a fresh executor in {:?} = {:.2} ms/block", blocks, _nd.status().exec.height, el, el.as_secs_f64() * 1000.0 / blocks as f64);
+}
+
+#[test]
+#[ignore = "diagnostic: prints golden v2 values"]
+fn diag_print_golden_v2_values() {
+    let f = fx();
+    let b = base_block(&f);
+    let id = block_id_of(&b, &idctx(&f)).unwrap();
+    let h = b.to_header();
+    println!("GOLDEN block_id {}", id.iter().map(|x| format!("{x:02x}")).collect::<String>());
+    println!("GOLDEN genesis_id {}", f.genesis.block_id().iter().map(|x| format!("{x:02x}")).collect::<String>());
+    println!("GOLDEN header_id {}", h.id(&idctx(&f)).unwrap().iter().map(|x| format!("{x:02x}")).collect::<String>());
+    println!("GOLDEN block_len {}", encode_block(&b).len());
+    println!("GOLDEN header_len {}", encode_header(&h).len());
+    println!("GOLDEN block_bytes_hash {}", rcodec::sha3(&[&encode_block(&b)]).iter().map(|x| format!("{x:02x}")).collect::<String>());
+    println!("GOLDEN header_bytes_hash {}", rcodec::sha3(&[&encode_header(&h)]).iter().map(|x| format!("{x:02x}")).collect::<String>());
 }

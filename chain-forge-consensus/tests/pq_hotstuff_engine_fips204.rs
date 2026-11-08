@@ -62,7 +62,10 @@ mod real {
 
 /// Seeds per simulation campaign with real signatures (raise with PQHS_SEEDS for a longer soak).
 const DEFAULT_SEEDS: u64 = 10;
+/// Whether the test keys are deterministic (the test doubles): golden byte values are only asserted when they are.
+const DETERMINISTIC_KEYS: bool = false;
 include!("common/pq_engine_suite.rs");
 #[path = "common/pq_tree_doubles.rs"]
 mod tree_doubles;
 include!("common/pq_recovery_suite.rs");
+include!("common/pq_checkpoint_suite.rs");

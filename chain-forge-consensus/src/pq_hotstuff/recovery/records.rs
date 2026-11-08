@@ -36,7 +36,7 @@ impl<'a> Rd<'a> {
     fn u64(&mut self) -> Result<u64, RecordError> { Ok(u64::from_be_bytes(self.take(8)?.try_into().unwrap())) }
     fn h32(&mut self) -> Result<[u8; 32], RecordError> { Ok(self.take(32)?.try_into().unwrap()) }
     fn done(&self) -> Result<(), RecordError> { if self.p == self.b.len() { Ok(()) } else { Err(RecordError::Damaged("trailing bytes")) } }
-    fn cref(&mut self) -> Result<CheckpointRef, RecordError> { CheckpointRef::decode(self.take(72)?).map_err(|_| RecordError::Damaged("reference")) }
+    fn cref(&mut self) -> Result<CheckpointRef, RecordError> { CheckpointRef::decode(self.take(72)?).ok_or(RecordError::Damaged("reference")) }
     fn point(&mut self) -> Result<ChainPoint, RecordError> { Ok(ChainPoint { id: self.h32()?, height: self.u64()?, round: self.u64()?, payload_hash: self.h32()? }) }
 }
 fn put_point(o: &mut Vec<u8>, p: &ChainPoint) { o.extend_from_slice(&p.id); o.extend_from_slice(&p.height.to_be_bytes()); o.extend_from_slice(&p.round.to_be_bytes()); o.extend_from_slice(&p.payload_hash); }

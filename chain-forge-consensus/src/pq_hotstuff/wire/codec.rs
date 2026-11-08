@@ -277,3 +277,22 @@ impl KeyRegistration {
         Ok(v)
     }
 }
+
+impl BlockIdInputV3 {
+    /// `TAG_BLOCK_ID_V3 || (the v2 body after its tag) || flag || [checkpoint hash]`.
+    pub fn encode(&self) -> Result<Vec<u8>, WireError> {
+        let v2 = self.base.encode()?;
+        let mut o = Vec::with_capacity(v2.len() + 40);
+        o.extend_from_slice(TAG_BLOCK_ID_V3);
+        o.extend_from_slice(&v2[TAG_BLOCK_ID.len()..]);
+        match &self.checkpoint_hash {
+            None => o.push(0),
+            Some(h) => { o.push(1); o.extend_from_slice(h); }
+        }
+        Ok(o)
+    }
+    pub fn block_id(&self) -> Result<[u8; HASH_LEN], WireError> {
+        use sha3::{Digest, Sha3_256};
+        Ok(Sha3_256::digest(self.encode()?).into())
+    }
+}

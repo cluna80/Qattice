@@ -74,13 +74,13 @@ impl DevnetConfig {
     pub fn engine_config(&self, public_key: &[u8], genesis_hash: [u8; 32]) -> Result<(EngineConfig, usize), String> {
         let set = self.set()?;
         let my_index = set.entries().iter().position(|e| e.public_key == public_key).ok_or("this node's key is not in the validator set")?;
-        Ok((EngineConfig { chain_id: self.chain_id.clone(), protocol_profile: self.protocol_profile.clone(), set, my_index, genesis_hash, limits: self.limits(), seed: 0 }, my_index))
+        Ok((EngineConfig { chain_id: self.chain_id.clone(), protocol_profile: self.protocol_profile.clone(), set, my_index, genesis_hash, limits: self.limits(), seed: 0, checkpoint: None }, my_index))
     }
 
     pub fn driver_config(&self) -> DriverConfig {
         DriverConfig {
             max_sync_blocks: self.max_sync_blocks, pace: PacemakerConfig { base: self.pacemaker_base_ms, max: self.pacemaker_max_ms },
-            sync_ttl: 3 * self.pacemaker_base_ms, sync_outstanding: 8, min_propose_gap: self.min_propose_gap_ms, park_capacity: 32, park_ttl: 6 * self.pacemaker_base_ms, recent: 64,
+            sync_ttl: 3 * self.pacemaker_base_ms, sync_outstanding: 8, min_propose_gap: self.min_propose_gap_ms, park_capacity: 32, park_ttl: 6 * self.pacemaker_base_ms, recent: 64, exec_per_tick: None,
         }
     }
 
