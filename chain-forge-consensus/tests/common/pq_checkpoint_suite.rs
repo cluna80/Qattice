@@ -202,6 +202,17 @@ fn v3_identity_binds_the_profile_the_reference_and_the_genesis_parameters() {
     }
     // the v3 preimage is the v2 body under a new tag plus the section; the header form gives the same id
     let base = BlockIdInput { alg_id: ALG, protocol_profile: PROFILE3.into(), chain_id: CHAIN.into(), epoch: b.epoch, round: b.round, height: b.height, parent_id: b.parent_id, payload_hash: rcodec::sha3(&[&b.payload]), qc_hash: b.qc.hash(), tc_hash: None, proposer: set.entries()[b.proposer].address.clone() };
+    // the preimage bytes are exactly: the v3 tag, the v2 body (after its own tag), and the section -- built here independently of the type under test
+    let v2_body = base.encode().unwrap()[chain_forge_consensus::pq_hotstuff::wire::TAG_BLOCK_ID.len()..].to_vec();
+    let mut expect = chain_forge_consensus::pq_hotstuff::wire::TAG_BLOCK_ID_V3.to_vec();
+    expect.extend_from_slice(&v2_body);
+    expect.push(1); expect.extend_from_slice(&r.hash());
+    assert_eq!(BlockIdInputV3 { base: base.clone(), checkpoint_hash: Some(r.hash()) }.encode().unwrap(), expect);
+    let mut expect_none = chain_forge_consensus::pq_hotstuff::wire::TAG_BLOCK_ID_V3.to_vec();
+    expect_none.extend_from_slice(&v2_body); expect_none.push(0);
+    assert_eq!(BlockIdInputV3 { base: base.clone(), checkpoint_hash: None }.encode().unwrap(), expect_none);
+    assert_ne!(&expect[..14], &base.encode().unwrap()[..13], "the v2 and v3 tags differ");
+    assert_eq!(rcodec::sha3(&[&expect]), v3_ref, "the v3 id is SHA3-256 of that preimage");
     assert_eq!(BlockIdInputV3 { base: base.clone(), checkpoint_hash: Some(r.hash()) }.block_id().unwrap(), v3_ref);
     assert_eq!(BlockIdInputV3 { base, checkpoint_hash: None }.block_id().unwrap(), v3_none);
     assert_eq!(Block { checkpoint: Some(r), ..b.clone() }.to_header().id(&idctx3(&set)).unwrap(), v3_ref);
@@ -894,6 +905,12 @@ fn the_root_log_is_idempotent_refuses_conflicts_reports_damage_and_gaps_and_surv
     files.delete_raw("root-00000000000000000008");
     let log = BlockStore::new(files.clone()).load_roots(k).unwrap();
     assert_eq!((log.damaged.len(), log.gaps.clone()), (0, vec![8]));
+    // a record whose height is not a multiple of the interval is damage, not a root (nothing could ever reference it)
+    let mut odd = BlockStore::new(MemStorage::new(faults()));
+    odd.put_root(k, 4, &root_of(4)).unwrap();
+    odd.put_root(k, 5, &root_of(5)).unwrap();
+    let log = odd.load_roots(k).unwrap();
+    assert_eq!((log.roots.keys().copied().collect::<Vec<_>>(), log.damaged.clone()), (vec![4], vec![5]));
     // a damaged record is overwritten by the next write of that height; a stored root for a height that is not a multiple of the interval is damage
     let mut again = BlockStore::new(files);
     again.put_root(k, 8, &root_of(8)).unwrap();
@@ -1051,4 +1068,26 @@ fn a_repeated_reference_needs_no_local_root_when_a_final_ancestor_carries_it_and
     // recorded roots are immutable: the same value is idempotent, a different one is refused
     assert!(e.nodes[0].record_root(old.height, old.state_root).is_ok());
     assert!(e.nodes[0].record_root(old.height, [9; 32]).is_err());
+}
+
+
+#[test]
+fn the_reference_backoff_grows_with_consecutive_failures_and_resets_when_a_reference_proposal_is_certified() {
+    let mut e = Eng3::new(4, cc3(4, 8));
+    e.run_until_committed(16, 100);
+    assert!((0..4).all(|i| e.nodes[i].ref_backoff().1 == 0), "no failures while everyone keeps up");
+    e.lag[2] = u64::MAX / 2; e.lag[3] = u64::MAX / 2;
+    let mut worst = (0usize, 0u32);
+    for _ in 0..60 { e.step(); for i in 0..4 { let st = e.nodes[i].ref_backoff().1; if st > worst.1 { worst = (i, st); } } }
+    assert!(worst.1 >= 2, "consecutive failures raise the streak (worst {worst:?})");
+    let (until, streak) = e.nodes[worst.0].ref_backoff();
+    assert!(streak >= 1 && until > 0);
+    // the omission window itself doubles: the window after the latest failure is n x rotations x 2^(streak-1) rounds long
+    // (the end of the window minus the round of the failure it followed is at least that long)
+    e.lag[2] = 0; e.lag[3] = 0;
+    e.feed_all();
+    let x = worst.0;
+    let mut reset = false;
+    for _ in 0..400 { e.step(); if e.nodes[x].ref_backoff().1 == 0 { reset = true; break; } }
+    assert!(reset, "once the quorum can vote on references again, a certified reference proposal of node {x} resets its backoff");
 }

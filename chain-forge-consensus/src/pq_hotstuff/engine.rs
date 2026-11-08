@@ -682,6 +682,8 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
     pub fn checkpoint_stale(&self) -> bool {
         self.cfg.checkpoint.map_or(false, |c| self.checkpoint_age() > c.params.interval.saturating_mul(c.policy.alarm_age_intervals))
     }
+    /// `(omit_until round, consecutive failed reference-bearing proposals)`: the proposer policy's backoff state (monitoring and tests).
+    pub fn ref_backoff(&self) -> (Round, u32) { (self.omit_until, self.omit_streak) }
     pub fn alarm(&self) -> Option<&Alarm> { self.alarm.as_ref() }
     pub fn evidence(&self) -> &[Evidence] { &self.evidence }
     pub fn root(&self, height: u64) -> Option<[u8; 32]> { self.roots.get(&height).copied() }

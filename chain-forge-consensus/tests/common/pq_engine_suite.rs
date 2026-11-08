@@ -2331,19 +2331,3 @@ fn diag_header_verification_and_restart_replay_cost() {
     let el = t.elapsed();
     println!("DIAG restart: {} stored blocks re-validated and {} heights replayed into a fresh executor in {:?} = {:.2} ms/block", blocks, _nd.status().exec.height, el, el.as_secs_f64() * 1000.0 / blocks as f64);
 }
-
-#[test]
-#[ignore = "diagnostic: prints golden v2 values"]
-fn diag_print_golden_v2_values() {
-    let f = fx();
-    let b = base_block(&f);
-    let id = block_id_of(&b, &idctx(&f)).unwrap();
-    let h = b.to_header();
-    println!("GOLDEN block_id {}", id.iter().map(|x| format!("{x:02x}")).collect::<String>());
-    println!("GOLDEN genesis_id {}", f.genesis.block_id().iter().map(|x| format!("{x:02x}")).collect::<String>());
-    println!("GOLDEN header_id {}", h.id(&idctx(&f)).unwrap().iter().map(|x| format!("{x:02x}")).collect::<String>());
-    println!("GOLDEN block_len {}", encode_block(&b).len());
-    println!("GOLDEN header_len {}", encode_header(&h).len());
-    println!("GOLDEN block_bytes_hash {}", rcodec::sha3(&[&encode_block(&b)]).iter().map(|x| format!("{x:02x}")).collect::<String>());
-    println!("GOLDEN header_bytes_hash {}", rcodec::sha3(&[&encode_header(&h)]).iter().map(|x| format!("{x:02x}")).collect::<String>());
-}
