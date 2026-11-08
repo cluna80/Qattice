@@ -23,3 +23,21 @@ The five simulation campaigns (all honest, one silent, one equivocator, crash/re
 * Shows: the foundation and the fixed-validator-set engine behave on Windows as on Linux at these commits.
 * Does not show: behaviour with real FIPS 204 signatures in the engine (these simulations use the non-cryptographic test doubles); the PO-4 epoch-transition question; anything about networking, sync or persistence beyond the safety store.
 * This validates the two draft PRs; neither is merged.
+
+---
+
+## #135 real FIPS 204 ML-DSA-65 engine validation, commit `0b48f27d20efa57c9e3df06f34979f0089d3bc01` (`git rev-parse HEAD` confirmed)
+
+Recorded 2026-11-08 from output the owner pasted (same machine and worktree as above). Command:
+`cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204 --test pq_hotstuff_engine_fips204 --test pq_hotstuff_engine --test pq_hotstuff_safety_fips204 --test pq_hotstuff_foundation --test pq_hotstuff_safety --test pq_hotstuff_wire`
+
+| Suite | Result |
+|---|---|
+| `pq_hotstuff_engine` (fast doubles, 10 seeds per scenario) | 36 passed, 1 ignored (diagnostic), 70.65 s |
+| `pq_hotstuff_engine_fips204` (REAL ML-DSA-65, 10 seeds per scenario) | 36 passed, 1 ignored (diagnostic), 27.26 s |
+| `pq_hotstuff_safety_fips204` | 11 passed |
+| `pq_hotstuff_foundation` | 30 passed |
+| `pq_hotstuff_safety` | 76 passed |
+| `pq_hotstuff_wire` | 24 passed |
+
+Shows: the engine, certificate verifier and safety store behave on Windows with real FIPS 204 signatures as on Linux, in all five scenarios (honest, silent, equivocating, crash/restart, restart plus equivocator), including the wrong-key, wrong-context and cross-chain rejection tests. Does not show: the 60-seed soak (Linux only), networking, sync, persistence beyond the safety store, node wiring, or anything about epoch transitions. Nothing is merged.
