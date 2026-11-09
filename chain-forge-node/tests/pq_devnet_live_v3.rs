@@ -22,6 +22,11 @@ const N: usize = 4;
 const VICTIM: usize = 3;
 const K: u64 = 4;
 
+/// The live tests each run four OS processes that do synchronous file I/O and real signatures. Run concurrently (cargo's default) they compete for the same disk and CPU,
+/// which slows every sync and widens the window in which a kill can interrupt a signing commit. They add nothing to each other, so they run one at a time.
+static LIVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn serial() -> std::sync::MutexGuard<'static, ()> { LIVE.lock().unwrap_or_else(|e| e.into_inner()) }
+
 struct Net { dirs: Vec<PathBuf>, cfg: PathBuf, kids: Vec<Option<Child>>, root: PathBuf, genesis_hash_file: PathBuf }
 
 impl Drop for Net {
@@ -222,6 +227,7 @@ fn check_log(label: &str, log: &[u64], first: u64, max_gaps: usize) {
 
 #[test]
 fn live_v3_four_processes_snapshot_recovery_kill_restart_second_install_and_agreement_without_duplicate_execution() {
+    let _serial = serial();
     let mut net = Net::new("a");
     let _ = &net.genesis_hash_file;
 
@@ -335,6 +341,7 @@ fn live_v3_four_processes_snapshot_recovery_kill_restart_second_install_and_agre
 
 #[test]
 fn live_v3_a_crash_between_the_staging_writes_never_lets_the_node_sign_on_a_half_staged_snapshot_and_a_stale_staging_changes_nothing() {
+    let _serial = serial();
     let mut net = Net::new("c");
     for i in 0..N { net.start(i); }
     net.wait("all four execute height 48", 240, |n| n.heights().iter().all(|h| *h >= 48));
