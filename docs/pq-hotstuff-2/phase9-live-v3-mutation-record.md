@@ -133,3 +133,36 @@ Run one at a time in a disposable git worktree with its own target directory, af
 @@ -209 +208,0 @@
 -        d.try_complete_recovery();
 ```
+
+
+---
+
+## Final review follow-up — the stall fix and the proposal gate at the process level (code `a4a2ebd40ef7115e3aa9a561ffe30a0316ac052b`)
+
+This section SUPERSEDES the earlier follow-up above where they differ (that one called the proposal gate closed, then not closed, before the cause of an unreliable scenario was understood). One mutant at a time in a disposable worktree, after a baseline for each command (both passed: live controlled-leader test 187.2 s, in-process catch-up test 45.3 s).
+
+| Mutation | Level | Runs | Result | Failure observed |
+|---|---|---|---|---|
+| sync: release an answered request's slot (the stall fix) | in-process reproduction | 1 | CAUGHT | STALL: gap 40 above the base 36; missing=Some("the block certified by the high QC (round 45) has not arrived"); stats=Stats { |
+| proposal gate removed - PROCESS level (controlled-leader scenario) | process level, controlled leader | 3 | CAUGHT / CAUGHT / CAUGHT | timed out (30s) waiting for: the gate is reached: the engine is asked to propose while recovering and refuses; heights [190, 1 |
+
+**How to read the proposal-gate result.** It is caught 3 of 3 at the process level **by the refusal counter**: with the gate removed the engine no longer reports `Recovering` to the driver, the counter stays at zero, and the test times out at "the gate is reached" (30 s) in each run. That detects that the gate stopped firing. It is not a signing event, and it does not show a proposal would be signed without the gate: the SafetyStore refuses a conflicting same-round proposal, so in the common state it is a second line of defense (defense in depth, not a defect). The three coverage results are separate - deterministic in-process mutation detection (caught), process-level reachability (shown), process-level mutation detection (caught 3 of 3, by the counter) - and the re-send of a stored timeout remains in-process only.
+
+
+### The exact diffs
+
+#### sync: release an answered request's slot (the stall fix) — CAUGHT
+```diff
+--- a/chain-forge-consensus/src/pq_hotstuff/driver.rs
++++ b/chain-forge-consensus/src/pq_hotstuff/driver.rs
+@@ -366 +365,0 @@
+-        self.sync.complete(&want);
+```
+
+#### proposal gate removed - PROCESS level (controlled-leader scenario) — CAUGHT / CAUGHT / CAUGHT
+```diff
+--- a/chain-forge-consensus/src/pq_hotstuff/engine.rs
++++ b/chain-forge-consensus/src/pq_hotstuff/engine.rs
+@@ -626 +625,0 @@
+-        self.refuse_if_recovering()?;
+```
