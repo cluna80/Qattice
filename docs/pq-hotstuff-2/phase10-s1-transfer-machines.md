@@ -36,12 +36,13 @@ What the transfer tests establish (in-process; a real driver network; in-memory 
 The crash matrix found a real defect in the first S-1 revision (a filesystem failure while staging was retried without end); it is fixed and the test fails without the fix.
 
 ## Mutation record
-Campaign 1 (against the first S-1 commit): **9 of 12 mutants caught; 3 survived.** Survivors: (1) no pump after a message, (2) per-peer capacity check removed,
-(3) chunk-for-another-snapshot check removed. Follow-up: a message-driven test killed (1). At `41be391` (with the direct tests of the next paragraph for (2); and (1)):
-(1) caught, (2) caught, (3) **still survived**, and a new mutant (storage failure retried) was caught by the crash matrix.
-At the frozen commit `26872ce`: all four of (1), (2), (3) and the storage-failure mutant are **caught** - (2) by a unit test that shares one peer's capacity across request kinds
-(the request table's own cap is per kind), (3) by a unit test that calls the chunk logic directly with a chunk naming another snapshot (the request table normally refuses such
-a response first on the echoed selector, so (3) cannot be reached through the public API while the table is correct).
+Campaign 1 (first S-1 commit): **9 of 12 mutants caught; 3 survived** - (1) no pump after a message, (2) per-peer capacity check removed, (3) chunk-for-another-snapshot
+check removed. A message-driven test was then added for (1).
+Rerun at `41be391`: (1) caught, (2) caught (by a new unit test that shares one peer's capacity across request kinds; the request table's own cap is per kind),
+(3) **still survived**; a new mutant (storage failure retried without end) was caught by the crash matrix.
+Rerun at the frozen commit `26872ce`: (1), (2), (3) and the storage-failure mutant are all **caught** - (3) by a unit test that calls the chunk logic directly with a chunk
+naming another snapshot (the request table normally refuses such a response first, on the echoed selector, so (3) cannot be reached through the public API while the table is
+correct).
 These two checks are therefore **defence in depth behind the request table**; they were not shown equivalent to anything, they were killed by direct tests. Whether to keep them
 is a design choice, not an unresolved test gap. Mutation is a spot check of 12 chosen mutants, not a proof.
 
@@ -63,4 +64,5 @@ cargo test --release -p chain-forge-consensus --features pq-hotstuff --test pq_h
 cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204 --test pq_hotstuff_engine_fips204 2>&1 | tee s1-engine-fips204.log
 cargo test --release -p chain-forge-node --features pq-devnet --test pq_devnet_live --test pq_devnet_live_v3 -- --nocapture 2>&1 | tee s1-node-live.log
 ```
+Node regressions at the same commit (Linux): v2 live 1/1, v3 live 4/4, node `pq_devnet` unit tests 5/5, all exit 0.
 Expected: lib 101; each engine file 187 passed + 2 ignored; node live: v2 1 and v3 4 tests. Report `git rev-parse HEAD`, each exit status, and any antivirus/exception state as found (do not change it to get a pass).
