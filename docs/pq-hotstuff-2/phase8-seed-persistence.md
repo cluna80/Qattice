@@ -64,3 +64,11 @@ Mutation: 29 of 31 caught on `308d9dc`; the previously surviving base-root mutan
 | No duplicate execution in the tested scenarios | Real Qattice application snapshot integration |
 | Base-aware storage and explicit sync advice | Pruning and bounded evidence growth |
 | A conflicting root at exactly the base height is `Mismatch` evidence and never signed for (with a matching-root control) | A run on Windows; this PR's own review |
+
+## Windows results (supplied by the owner; MINGW64, `C:\Dev\qattice-main-wt`, branch `feat/pq-hotstuff-2-seed-persistence`) — recorded separately
+`git rev-parse HEAD` printed **`e610932ec04296319f9a1b0c850dcc4f663df8cf`** after a fetch and checkout from a worktree that had been on the #142 branch (an earlier prompt on that branch was NOT counted; the branch was switched and the hash confirmed first). The worktree was clean (`git status --short` empty) and `git diff dc89d45 HEAD -- chain-forge-consensus chain-forge-node` printed nothing, so the production and test code are those validated on Linux. Release mode:
+| Run | Result | Time |
+|---|---|---|
+| real ML-DSA-65 `pq_hotstuff_engine_fips204`, default seeds | 167 passed, 0 failed, 2 ignored | 198.41 s |
+| doubles `pq_hotstuff_engine`, default seeds | 167 passed, 0 failed, 2 ignored | 481.06 s |
+This validates the targeted tests of this revision on Windows. It does not validate profile v3 over TCP or as a process (still unwired in the node), network snapshot installation, a real application snapshot, or pruning. Those remain missing, as listed above.
