@@ -302,8 +302,15 @@ fn the_reference_rules_have_exact_boundaries_and_checked_arithmetic() {
     assert!(check(&p1, 10, last, &rf(8, 1), &ident).is_ok());
     assert!(check(&p1, 1_000_000, last, &rf(8, 1), &|_| None).is_ok(), "a repeat is legal at any age and needs no ancestor lookup");
     assert_eq!(check(&p1, 1_000_000, last, &rf(9, 1), &ident), Err(RefError::TooOld), "but a NEW old reference is not");
+    // R6 is checked BEFORE the ancestor lookup, so a stale reference never triggers the (chain-depth) walk, and a fresh one is bounded by max_age
+    let calls = std::cell::Cell::new(0u32);
+    let counting = |h: u64| -> Option<BlockId> { calls.set(calls.get() + 1); Some([h as u8; 32]) };
+    assert_eq!(check(&p1, 10, None, &rf(6, 1), &counting), Err(RefError::TooOld));
+    assert_eq!(calls.get(), 0, "a too-old reference must be refused without any ancestor lookup");
+    assert!(check(&p1, 10, None, &rf(7, 1), &counting).is_ok());
+    assert_eq!(calls.get(), 1);
     // extremes do not overflow
-    assert!(check(&p1, u64::MAX, None, &rf(u64::MAX, 1), &|_| Some([0xFF; 32])).is_ok() || true);
+    assert!(check(&p1, u64::MAX, None, &CheckpointRef { height: u64::MAX, block_id: [0xFF; 32], state_root: [1; 32] }, &|_| Some([0xFF; 32])).is_ok(), "age 0 at the largest height");
     assert_eq!(check(&p1, u64::MAX, None, &rf(1, 1), &ident), Err(RefError::TooOld));
     let huge = CheckpointParams { interval: 1 << 40, max_age: 1 << 50 };
     assert!(check(&huge, 1 << 41, None, &CheckpointRef { height: 1 << 40, block_id: [0; 32], state_root: [0; 32] }, &|_| Some([0; 32])).is_ok());
@@ -663,6 +670,24 @@ fn l5_the_stall_threshold_is_exactly_the_fault_budget_one_lagging_validator_of_f
     assert_eq!(e.timeouts, t0, "three voters are a quorum: no round timed out");
     assert!(last_ref_on_chain(&e.chain(e.lead())) > l0 + 8, "references keep advancing without the lagging validator");
     assert!(e.nodes[3].deferred_len() >= 1, "the lagging validator defers its votes instead of voting blindly");
+}
+
+#[test]
+fn a_validator_that_never_executes_keeps_a_full_deferral_set_of_the_most_recent_proposals() {
+    // assumptions: validator 3 never executes; the other three propose references on every block, so 3 defers more proposals than the cap allows
+    let mut e = Eng3::new(4, cc3(4, 8));
+    e.run_until_committed(12, 100);
+    let lag_start = e.nodes[3].round();
+    e.lag[3] = u64::MAX / 2;
+    e.run(400);
+    let n = &e.nodes[3];
+    assert_eq!(n.deferred_len(), 64, "the cap was reached (otherwise this test proves nothing)");
+    let (m, top) = (n.deferred_min_round().unwrap(), n.deferred_max_round().unwrap());
+    // eviction drops the lowest round, so the retained set is the RECENT past: it covers the latest two thirds of the lag period (a coarse bound: only
+    // reference-bearing proposals are deferred, about one in four rounds here) and its newest member is current
+    assert!(m >= lag_start + (n.round() - lag_start) / 3, "the oldest remaining deferral (round {m}) is recent: lag began at {lag_start}, now {}", n.round());
+    assert!(top + 8 >= n.round(), "the newest deferral (round {top}) is current (now {})", n.round());
+    assert!(n.alarm().is_none());
 }
 
 // ---- header-chain verification of the checkpoint rules

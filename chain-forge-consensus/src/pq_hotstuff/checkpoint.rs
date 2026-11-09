@@ -149,13 +149,14 @@ pub fn check_reference(r: &CheckpointRef, c: &RefContext) -> Result<(), RefError
     }
     if r.height > c.final_height { return Err(RefError::NotFinal); }
     if !repeated {
+        // R6 before R3: the age check is O(1), and it bounds the ancestor walk below to `max_age` plus the finality lag, so a stale
+        // reference cannot make a verifier walk the whole chain before being refused. (r.height <= final_height was checked above.)
+        if c.final_height - r.height > c.params.max_age { return Err(RefError::TooOld); }
         match (c.block_id_at)(r.height) {
             Some(id) if id == r.block_id => {}
             Some(_) => return Err(RefError::WrongAncestor),
             None => return Err(RefError::Unverifiable),
         }
-        // r.height <= final_height was just checked, so the subtraction cannot underflow
-        if c.final_height - r.height > c.params.max_age { return Err(RefError::TooOld); }
     }
     Ok(())
 }

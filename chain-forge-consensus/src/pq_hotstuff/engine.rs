@@ -198,10 +198,22 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
         let Some(r) = b.checkpoint else { return self.vote_for(b, id, out) };
         match self.ref_outcome(&r) {
             RootCheck::Match => self.vote_for(b, id, out),
-            RootCheck::NotYet => { if self.deferred.len() >= MAX_DEFERRED { if let Some(first) = self.deferred.iter().next().copied() { self.deferred.remove(&first); } } self.deferred.insert(id); Ok(()) }
+            RootCheck::NotYet => { if self.deferred.len() >= MAX_DEFERRED { self.evict_oldest_deferred(); } self.deferred.insert(id); Ok(()) }
             outcome => { self.note_evidence(id, r, outcome); Ok(()) }
         }
     }
+
+    /// Drop the deferred proposal of the LOWEST round (the one least likely to be votable still), not an arbitrary one: ids are hashes, so set order says nothing about age.
+    fn evict_oldest_deferred(&mut self) {
+        let oldest = self.deferred.iter().min_by_key(|id| self.blocks.get(*id).map(|s| s.round).unwrap_or(0)).copied();
+        if let Some(o) = oldest { self.deferred.remove(&o); }
+    }
+
+    /// The lowest round among the deferred proposals (monitoring and tests).
+    pub fn deferred_min_round(&self) -> Option<u64> { self.deferred.iter().filter_map(|id| self.blocks.get(id).map(|s| s.round)).min() }
+
+    /// The highest round among the deferred proposals (monitoring and tests).
+    pub fn deferred_max_round(&self) -> Option<u64> { self.deferred.iter().filter_map(|id| self.blocks.get(id).map(|s| s.round)).max() }
 
     fn note_evidence(&mut self, block_id: BlockId, reference: CheckpointRef, outcome: RootCheck) {
         if self.evidence.len() >= MAX_EVIDENCE { self.evidence.remove(0); }
