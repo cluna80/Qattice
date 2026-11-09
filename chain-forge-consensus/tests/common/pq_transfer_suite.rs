@@ -500,3 +500,69 @@ fn a_crash_between_the_evidence_and_the_application_fails_closed_keeps_the_prior
     assert!(net.fatal.is_empty(), "{:?}", net.fatal);
     once_from(&net, 3, rec.cref.height, "after the crash and the redone install");
 }
+
+fn hex32(b: &[u8; 32]) -> String { b.iter().map(|x| format!("{x:02x}")).collect() }
+
+#[test]
+fn a_local_storage_failure_fails_closed_with_bounded_requests_and_the_prior_published_state_and_floors_survive() {
+    let cc = cc3(4, 8);
+    let mut net = DNet::new_cp(4, &[], "S", Some(cc));
+    run_to(&mut net, 24);
+    // generation 1: a complete, evidenced install of an EARLIER checkpoint (the prior published state)
+    let f = tfaults(); let mut fs = MemTreeFs::new(f.clone()); extras(&mut fs);
+    let bs = bs_cell();
+    let mut r1 = rig_full(&donor_of(&net), &[Mode::Honest], tlim(), ev_for(&bs, None), fs);
+    r1.run(3_000);
+    let rec1 = r1.done().expect("the first install");
+    let (mut inst, _) = r1.req.into_parts();
+    inst.complete_seed().expect("the engine was seeded from the install: the installer is idle again");
+    let fs = inst.into_fs();
+    let gen1 = fs.raw(&format!("{}/app-state", gen_dir(rec1.generation))).unwrap();
+    run_to(&mut net, 44);
+    let d2 = donor_of(&net);
+    let top = d2.refs.iter().filter(|c| c.height <= d2.headers.last().unwrap().height).last().copied().unwrap();
+    assert!(top.height > rec1.cref.height, "the second checkpoint is newer");
+    let sid2 = d2.by_ref[&top.height];
+
+    for (label, path) in [("a chunk's fsync fails", format!("staging/{}/chunk-00001", hex32(&sid2))), ("the generations directory cannot be made durable", "generations".to_string())] {
+        f.borrow_mut().fail_sync.clear();
+        let mut r2 = rig_full(&d2, &[Mode::Honest, Mode::Honest], tlim(), ev_for(&bs, None), fs.clone());
+        f.borrow_mut().fail_sync.insert(path); // the disk starts failing after the installer opened cleanly
+        r2.run(2_000);
+        assert!(matches!(r2.req.phase(), TPhase::Failed(m) if m.contains("storage failure") || m.contains("locally")), "{label}: {:?}", r2.req.phase());
+        assert!(r2.sent.len() < 120, "{label}: {} messages: the retries are bounded", r2.sent.len());
+        assert_eq!(r2.req.stats.peers_suppressed, 0, "{label}: no provider is blamed for this machine's disk");
+        let ptr = r2.req.sink().pointer().expect("the prior generation is still published");
+        assert_eq!((ptr.generation, ptr.cursor.height), (rec1.generation, rec1.cref.height), "{label}");
+        assert_eq!(r2.req.sink().fs.raw(&format!("{}/app-state", gen_dir(1))).unwrap(), gen1, "{label}: the prior application state is byte for byte intact");
+        assert_eq!(extras_view(&r2.req.sink().fs), { let mut x = MemTreeFs::new(tfaults()); extras(&mut x); extras_view(&x) }, "{label}: the node's own files are untouched");
+        let ev = stored_evidence(&bs).unwrap();
+        if label.starts_with("a chunk") { assert_eq!(ev.cref, rec1.cref, "{label}: no evidence was written for the failed install"); }
+        else { assert_eq!(ev.cref, top, "{label}: the evidence for the new checkpoint is durable and AHEAD of the published application"); }
+    }
+    // what a restart finds in each case:
+    //   (a) evidence for the prior checkpoint only: the prior published state starts a driver and every floor is where it was
+    //   (b) evidence ahead of the application: the driver refuses to start (fail closed); the install is redone and then it starts
+    {
+        let ev_b = stored_evidence(&bs).unwrap();
+        let throwaway = restart_f(engine_f(3, 4, &net.cc), 3, 4, &net.cc);
+        let mut b = BlockStore::new(mem()); b.put_seed_evidence(ev_b.cref.height, &ev_b.cref.block_id, &ev_b.encode()).unwrap();
+        let err = match start_node(throwaway, b, installed_app(&fs, 1), &Default::default(), "S", net.now) { Err(e) => e, Ok(_) => panic!("evidence ahead of the application must not start") };
+        assert!(matches!(err, DriverError::ExecutorBehindBase { .. }), "{err:?}");
+    }
+    f.borrow_mut().fail_sync.clear();
+    let mut r3 = rig_full(&d2, &[Mode::Honest], tlim(), ev_for(&bs, None), fs.clone());
+    r3.run(3_000);
+    let rec3 = r3.done().expect("with the disk healthy the install completes");
+    assert_eq!(rec3.cref, top);
+    let app = installed_app(&r3.req.sink().fs, rec3.generation);
+    drop(r3);
+    let bs_final = { let b = bs.clone(); drop(bs); Rc::try_unwrap(b).ok().expect("sole owner").into_inner() };
+    // node 3 kept running while the transfers failed; its floors as they are at the moment it is taken down
+    let floor0 = net.nodes[3].as_ref().unwrap().engine().store().record().clone();
+    reinstall(&mut net, 3, bs_final, app, "S").expect("starts after the retry");
+    assert_eq!(net.nodes[3].as_ref().unwrap().engine().store().record(), &floor0, "no signing floor moved through the failures and the retry");
+    assert!(net.run_until(9000, |n| n.nodes[3].as_ref().map_or(false, |x| !x.engine().is_recovering() && x.status().exec.height >= top.height + 6)), "recovers");
+    assert!(net.fatal.is_empty(), "{:?}", net.fatal);
+    once_from(&net, 3, top.height, "after the storage failures and the retry");
+}

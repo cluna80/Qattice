@@ -204,6 +204,8 @@ impl<A: Authenticator, I: InstallSink, E: EvidenceSink> Requester<A, I, E> {
     pub fn remove_peer(&mut self, peer: usize) { self.peers.remove(&peer); }
     pub fn is_finished(&self) -> bool { matches!(self.phase, Phase::Done(_) | Phase::Failed(_)) }
     pub fn sink(&self) -> &I { &self.sink }
+    /// Give back the installer and the evidence sink (a finished or abandoned transfer).
+    pub fn into_parts(self) -> (I, E) { (self.sink, self.evidence) }
     pub fn evidence(&self) -> &E { &self.evidence }
 
     /// Operator-initiated start (the only trigger in this release).
@@ -457,5 +459,29 @@ mod tests {
         let _ = r.on_message(0, &RecoveryMsg::ChunkResp { request_id, snapshot_id: [7; 32], index: 3, body: ChunkBody::Ok(vec![0; 64]) }, 1);
         assert_eq!(r.stats.dropped_mismatch, before.dropped_mismatch + 1);
         assert_eq!(r.stats.chunks_rejected, before.chunks_rejected, "it was dropped before the chunk logic");
+    }
+
+    /// The chunk logic's own snapshot check, exercised directly (the table above normally stops such a response first): a chunk naming another snapshot is never
+    /// handed to the installer, even when its index, length and hash are right for the manifest being staged.
+    #[test]
+    fn the_chunk_logic_itself_refuses_a_chunk_that_names_another_snapshot() {
+        use std::cell::Cell; use std::rc::Rc;
+        struct Count(Rc<Cell<u32>>);
+        impl InstallSink for Count {
+            fn begin(&mut self, _: CheckpointRef, _: Manifest, _: u64) -> Result<(), InstallError> { Ok(()) }
+            fn put_chunk(&mut self, _: u32, _: &[u8]) -> Result<(), InstallError> { self.0.set(self.0.get() + 1); Ok(()) }
+            fn finish_with(&mut self, _: InstallProof, _: &mut dyn FnMut() -> Result<(), String>) -> Result<InstallRecord, InstallError> { Err(InstallError::Rejected("unused")) }
+            fn abort(&mut self) -> Result<(), InstallError> { Ok(()) }
+        }
+        let calls = Rc::new(Cell::new(0));
+        let data = vec![9u8; 64];
+        let mf = Manifest { format_version: 1, snapshot_id: [6; 32], total_bytes: 128, chunk_size: 64, chunk_count: 2, chunk_hashes: vec![chunk_hash(0, &data), chunk_hash(1, &data)] };
+        let mut r = Requester::new(NoAuth, Count(calls.clone()), NoEv, [0; 32], [1; 32], codec(), lim(4, 2), 0).unwrap();
+        r.manifest = Some(mf);
+        r.on_chunk(0, [7; 32], 0, &ChunkBody::Ok(data.clone()), 1);
+        assert_eq!(calls.get(), 0, "another snapshot's chunk was not staged");
+        assert!(r.have.is_empty());
+        r.on_chunk(0, [6; 32], 0, &ChunkBody::Ok(data), 1);
+        assert_eq!(calls.get(), 1, "control: the right snapshot's chunk is staged");
     }
 }
