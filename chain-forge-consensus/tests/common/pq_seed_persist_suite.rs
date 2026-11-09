@@ -337,7 +337,9 @@ fn a_correctly_signed_proposal_with_a_conflicting_root_at_exactly_the_installed_
     let mut bs = store_with(&ev);
     for b in chain.iter().filter(|b| b.height > h) { bs.put_block(&id3(b), b).unwrap(); }
     let fresh = restart_f(engine_f(3, 4, &Some(cc)), 3, 4, &Some(cc));
-    let (mut d, _first) = start_node(fresh, bs, snapshot_app(donor, h), &Default::default(), "M", net.now).expect("start");
+    // the executor is THREE BLOCKS BEYOND the base (the restart case): its cursor is not the checkpoint, so the checkpoint's root can only come from the authenticated evidence
+    let (mut d, _first) = start_node(fresh, bs, snapshot_app(donor, h + 3), &Default::default(), "M", net.now).expect("start");
+    assert!(d.status().exec.height >= h + 3 && h % cc.params.interval == 0);
     assert!(!d.engine().is_recovering(), "every dependency is present: the control below can vote");
     assert_eq!(d.engine().root(h), Some(a.state_root), "the authenticated root of the installed base height is the engine's own record of that height");
     assert!(d.engine().executed_height() >= h, "the executor is at or beyond the base height, so a root at that height is not merely pending");
