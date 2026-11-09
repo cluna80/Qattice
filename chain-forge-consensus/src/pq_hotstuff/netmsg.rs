@@ -23,7 +23,7 @@ const K_TIMEOUT: u8 = 3;
 const K_TC: u8 = 4;
 const K_SYNC_REQ: u8 = 5;
 const K_SYNC_RESP: u8 = 6;
-const K_BELOW_BASE: u8 = 13; // 7..=12 belong to the (disabled) recovery codec, which has its own decoder
+const K_BELOW_BASE: u8 = 15; // 7..=12 are the (disabled) recovery codec's and 13..=14 are RESERVED by it; 15 is this advice-only answer, in the operational decoder only
 /// Exact size of a `BelowBase` message.
 const BELOW_BASE_LEN: u64 = (TAG_NET.len() + 2 + 1 + 32 + 8 + 32 + 32 + 1) as u64;
 /// Owner-locked transport limit for PQ-HotStuff-2 messages: exactly 8 MiB. It is applied through `PqLimits::max_message_bytes`;

@@ -157,8 +157,6 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
             let seed = engine.authenticate_evidence(&ev).map_err(|e| DriverError::SeedEvidence(e.to_string()))?;
             if seed.base().height != h || seed.base().id != id || loaded.seeded_height != h { return Err(DriverError::SeedEvidence("the stored evidence does not describe the checkpoint its name and record claim".into())); }
             engine.seed(seed.clone()).map_err(|e| DriverError::SeedEvidence(e.to_string()))?;
-        } else if loaded.seeded_height != 0 {
-            return Err(DriverError::SeedEvidence("the seed evidence is missing".into()));
         }
         // checkpoint roots (profile v3) are loaded BEFORE recovery so that references in recovered blocks are judged against them; damaged or missing records are
         // left out (a missing root only costs a vote or a deferral, never a guess)

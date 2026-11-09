@@ -272,7 +272,6 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
             return Err(EngineError::Invalid("proposer signature"));
         }
         // parent certificate
-        if self.base.is_some() && matches!(b.qc, Cert::Genesis(_)) { return Err(EngineError::Invalid("does not extend the seeded checkpoint")); }
         verify_cert(&self.ctx(), &b.qc)?;
         if b.qc.block_id() != b.parent_id { return Err(EngineError::Invalid("parent_id differs from the certificate's block")); }
         let parent_height = match &b.qc {

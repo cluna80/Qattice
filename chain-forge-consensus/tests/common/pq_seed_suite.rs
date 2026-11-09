@@ -324,7 +324,7 @@ fn after_seeding_the_engine_applies_the_reference_rules_from_the_base_exactly_as
 }
 
 #[test]
-fn a_committed_history_that_conflicts_with_the_authenticated_checkpoint_is_refused_and_a_genesis_rooted_block_cannot_extend_a_seed() {
+fn a_committed_history_that_conflicts_with_the_authenticated_checkpoint_is_refused_and_a_genesis_rooted_block_is_ignored() {
     let cc = cc3(4, 8);
     let set = set_n(4);
     // two networks with identical keys and parameters whose payloads differ: they fork at height 1, and each is internally valid
@@ -338,12 +338,15 @@ fn a_committed_history_that_conflicts_with_the_authenticated_checkpoint_is_refus
     assert!(matches!(a.nodes[0].seed(auth(&set, &cc, &ev, &r).unwrap()), Err(EngineError::Seed(m)) if m.contains("conflicts")));
     assert_eq!(a.nodes[0].committed_tip(), before, "a refused seed changes nothing");
     assert!(!a.nodes[0].is_recovering() && a.nodes[0].base().is_none());
-    // after a good seed, a block certified by the genesis certificate (it would root a different tree) is refused outright
+    // after a good seed, a block certified by the genesis certificate (it would root a different tree) is IGNORED: its height is at or below the base, which is final
+    // history this node does not hold. It is not stored and changes nothing.
     let mut en = engine3(3, 4, &cc);
     en.seed(auth(&set, &cc, &ev, &r).unwrap()).unwrap();
     let genesis_qc = engine3(3, 4, &cc).high_qc().clone();
     let g = sign_block3(Block { checkpoint: None, epoch: 0, round: 1, height: 1, parent_id: genesis_qc.block_id(), qc: genesis_qc, tc: None, payload: b"g".to_vec(), proposer: en.leader_of(1), signature: vec![] });
-    assert!(matches!(en.on_sync_block(g), Err(EngineError::Invalid(m)) if m.contains("seeded checkpoint")));
+    let tip = en.committed_tip();
+    assert!(en.on_sync_block(g).unwrap().is_empty());
+    assert!(en.known_blocks().is_empty() && en.committed_tip() == tip, "a block at or below the base is not stored and moves nothing");
 }
 
 // ---- tests added after the first mutation run showed what the first versions did not pin down
