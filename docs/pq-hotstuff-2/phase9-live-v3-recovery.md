@@ -40,3 +40,19 @@ Code commit `00e17a958af5c7a9013dad65c4384058a9b1083f`; later commits are docume
 * The proposal gate and the re-send-of-a-stored-timeout gate are not exercised by the process-level test: a proposal is attempted only if the victim leads its post-install round (not controlled), and a stored timeout is re-sent only if the high QC matches the one it was signed on (not arrangeable over processes). Open improvement: report the leader slot in the status and re-stage until the victim leads.
 * The execution log can lose a line (never repeat one) if the process dies between the durable application step and the log append; the test allows at most the kills' worth of gaps and no duplicates.
 * The donor's files are read while its node runs; the tool retries when it sees a half-written chain.
+
+
+## Windows history and the test fix (recorded as it happened; owner-run, MINGW64)
+**Run 1 — `67dc8a3`, whole file (`--nocapture`):** the main live test passed through both installs and every restart; the engine suites passed 167/167 on both backends; the v2 live test passed; **the crash-injection test FAILED** at its "the refused start left the signing-safety state unchanged" assertion (the panic text was not captured, so the exact difference is unknown). The two live tests ran **concurrently** in that run.
+**Run 2 — `67dc8a3`, crash-injection test alone, after the owner added an antivirus exception:** passed (41.40 s).
+**Run 3 — `67dc8a3`, crash-injection test alone, exception status not stated:** passed (31.75 s).
+**Status of the cause: not determined.** Candidates, which can stack: (a) the assertion was too strict - `SafetyStore::open` finishes a signing commit that a kill interrupted (record durable, counter not yet advanced), which advances the counter by one with no new signature, and clears leftover temporary files; (b) real-time antivirus scanning slows or locks file operations, which widens that window; (c) two networks of four processes competing for one disk widen it too. Because the environment changed between the failing and the passing runs, the passes do not show the race is closed and do not identify the cause. **The crash-injection test is therefore NOT recorded as Windows-confirmed.**
+
+**What changed (tests only; production code is identical to `00e17a9`):**
+1. `2ea04ed` - the "nothing was signed" check is now an **exact model**: the record and marker files must be byte-identical (every signature rewrites them; temporary files are ignored); the counter must be exactly where it was, unless a commit was pending (`record_counter == counter_value + 1`), in which case it must be exactly one higher at the record's digest. After the first refused start the state is settled and any change at all fails. A self-test shows the model accepts the one legitimate case and rejects five bad ones.
+2. `383719a` - the two live tests run one at a time.
+3. `855fd0d` - the model returns a result instead of panicking, so a run with `--nocapture` prints no `panicked` lines for expected rejections (they had made a correct run look like a failure).
+
+**Linux evidence for the changed tests:** crash-injection test alone, 5 consecutive passes at `2ea04ed` (30.55-31.11 s); whole file concurrent at `2ea04ed`, 3/3 (149.89 s); whole file serialized, two consecutive passes at `383719a`, 3/3 each (209.32 s, 180.08 s); whole file at `855fd0d` with the Windows command shape (`--nocapture` and the same `grep`), 3/3 (198.03 s), no `panicked` line. The production engine/driver/store suites were last run on `00e17a9` (167/167 on both backends), and `git diff 00e17a9 855fd0d` over the code directories is the test file alone.
+
+**To settle it on Windows:** run the pinned commit's whole file, then the crash-injection test five times in a row, and state whether the antivirus exception is on; ideally also one loop with it off, with the full panic text kept. A repeat of passes still supports reliability only.
