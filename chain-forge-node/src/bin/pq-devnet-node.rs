@@ -3,6 +3,7 @@
 //!
 //!   pq-devnet-node keygen   --dir DIR
 //!   pq-devnet-node assemble --out FILE --chain-id ID (--base-port PORT | --ports P0,P1,P2,P3) --dirs DIR0,DIR1,DIR2,DIR3
+//!   pq-devnet-node inspect  --dir DIR            (read-only: block set, QCs, seed evidence and safety floors of a data directory)
 //!   pq-devnet-node run      --config FILE --dir DIR [--tick-ms 20] [--exec-log FILE]
 //!   (profile v3, OFF by default) assemble ... --checkpoint-interval K --checkpoint-max-age A [--checkpoint-margin M]
 //!   (profile v3, operator-staged, OFFLINE; NOT network installation) pq-devnet-node stage-snapshot --config FILE --donor DIR --dir DIR [--back N] [--lag K]
@@ -31,6 +32,7 @@ fn main() {
         Some("assemble") => assemble(&args),
         Some("run") => run(&args),
         Some("stage-snapshot") => stage(&args),
+        Some("inspect") => inspect(&args),
         _ => Err("usage: pq-devnet-node keygen|assemble|run (see the file header)".into()),
     };
     if let Err(e) = r { eprintln!("pq-devnet-node: {e}"); std::process::exit(2); }
@@ -181,5 +183,35 @@ fn stage(args: &[String]) -> Result<(), String> {
     let lag: usize = flag(args, "--lag").map(|v| v.parse().map_err(|_| "bad --lag")).transpose()?.unwrap_or(0);
     let st = stage_snapshot(&cfg, genesis_hash, &donor, &target, back, lag)?;
     println!("{}", serde_json::json!({"staged": true, "height": st.reference.height, "block_id": hex::encode(st.reference.block_id), "state_root": hex::encode(st.reference.state_root), "evidence_bytes": st.evidence_bytes, "note": "operator-staged, offline; NOT network installation"}));
+    Ok(())
+}
+
+/// Read-only diagnostics of a node's data directory (devnet only): what the block store holds, what the high QC/TC are, the stored seed evidence, and the safety floors.
+fn inspect(args: &[String]) -> Result<(), String> {
+    use chain_forge_consensus::pq_hotstuff::safety::{decode_record, STATE_FILE};
+    use chain_forge_consensus::pq_hotstuff::seed::{SeedEvidence, MAX_EVIDENCE_HEADERS};
+    let dir = PathBuf::from(need(args, "--dir")?);
+    let bs = BlockStore::new(FsStorage::new(dir.join("blocks")).map_err(|e| e.0)?);
+    let loaded = bs.load().map_err(|e| e.to_string())?;
+    let mut heights: Vec<(u64, u64)> = loaded.blocks.iter().map(|b| (b.height, b.round)).collect();
+    heights.sort();
+    let evidence = match bs.load_seed_evidence().map_err(|e| e.to_string())? {
+        None => serde_json::Value::Null,
+        Some((h, id, bytes)) => {
+            let ev = SeedEvidence::decode(&bytes, MAX_EVIDENCE_HEADERS).map_err(|e| e.to_string())?;
+            serde_json::json!({"height": h, "block_id": hex::encode(id), "headers": ev.headers.len(), "high_qc_round": ev.high_qc.round(), "high_qc_block": hex::encode(ev.high_qc.block_id()),
+                "final_qc_round": ev.final_qc.as_ref().map(|c| c.round()), "has_tc": ev.high_tc.is_some(), "last_header_round": ev.headers.last().map(|h| h.round), "last_header_height": ev.headers.last().map(|h| h.height)})
+        }
+    };
+    let storage = FsStorage::new(dir.join("safety")).map_err(|e| e.0)?;
+    let rec = storage.read(STATE_FILE).map_err(|e| e.0)?.map(|b| decode_record(&b).map_err(|e| e.to_string())).transpose()?;
+    println!("{}", serde_json::json!({
+        "seeded_height": loaded.seeded_height, "blocks": heights.len(), "block_heights_and_rounds": heights,
+        "committed_markers": loaded.committed.len(), "committed_last": loaded.committed.last().map(|c| c.0),
+        "high_qc": loaded.high_qc.as_ref().map(|c| serde_json::json!({"round": c.round(), "block": hex::encode(c.block_id())})),
+        "high_tc_round": loaded.high_tc.as_ref().map(|t| t.round), "damaged_blocks": loaded.damaged_blocks, "damaged_hints": loaded.damaged_hints,
+        "seed_evidence": evidence,
+        "safety": rec.map(|r| serde_json::json!({"hvr": r.hvr, "hqr": r.hqr, "counter": r.counter, "last_vote_round": r.last_vote.as_ref().map(|v| v.round), "last_timeout_round": r.last_timeout.as_ref().map(|t| t.round), "last_proposal_round": r.last_proposal.as_ref().map(|p| p.round)})),
+    }));
     Ok(())
 }

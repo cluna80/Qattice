@@ -427,3 +427,31 @@ fn a_seeded_node_that_restarts_with_every_dependency_present_re_sends_its_stored
     assert_eq!(votes[0].signature, stored.envelope.signature);
     assert_eq!(d.engine().store().record(), &record, "a re-send signs nothing: the whole safety record is unchanged");
 }
+
+#[test]
+fn a_seeded_node_installed_far_behind_catches_up_while_the_network_keeps_moving() {
+    // REPRODUCTION of a live stall: the victim's evidence is old (the network moved on while it was down) and every round the victim would lead times out while it recovers.
+    // Catch-up must still complete: the gap above the base is bigger than one sync window.
+    let gap_blocks: u64 = std::env::var("PQ_GAP").ok().and_then(|v| v.parse().ok()).unwrap_or(40);
+    let cc = cc3(4, 8);
+    let mut net = DNet::new_cp(4, &[], "G", Some(cc));
+    run_to(&mut net, 44);
+    let (ev, a) = evidence_from(net.nodes[0].as_ref().unwrap(), 1);
+    let (e3, _old_bs, _x) = net.nodes[3].take().unwrap().into_parts();
+    net.dead[3] = true;
+    run_to(&mut net, a.height + gap_blocks);
+    let app = snapshot_app(net.nodes[0].as_ref().unwrap(), a.height);
+    let (nd, first) = start_node(restart_f(e3, 3, 4, &net.cc), store_with(&ev), app, &Default::default(), "G", net.now).expect("start");
+    net.nodes[3] = Some(nd); net.dead[3] = false; net.push(3, first);
+    let gap = net.height(0) - a.height;
+    let mut trace = vec![];
+    let mut caught_up = false;
+    for chunk in 0..12 {
+        caught_up = net.run_until(500, |n| n.nodes[3].as_ref().map_or(false, |d| !d.engine().is_recovering()) && n.height(3) + 3 >= n.height(0));
+        let d = net.nodes[3].as_ref().unwrap(); let e = d.engine();
+        trace.push(format!("t{}: committed={} held={} hq={} round={} recovering={} sync_req={} queue={} net_h={}", (chunk + 1) * 500, e.committed_tip().1, e.known_blocks().len(), e.high_qc().round(), e.round(), e.is_recovering(), d.stats().sync_requests, net.q.len(), net.height(0)));
+        if caught_up { break; }
+    }
+    let d = net.nodes[3].as_ref().unwrap(); let e = d.engine();
+    assert!(caught_up, "STALL: gap {gap} above the base {}; missing={:?}; stats={:?}\n{}", a.height, e.recovery_missing(), d.stats(), trace.join("\n"));
+}
