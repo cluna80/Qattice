@@ -5,6 +5,7 @@
 // real execution and storage models (real ML-DSA-65 in the fips204 run) - it is NOT the TCP devnet, which does not run profile v3.
 // ============================================================================================================================
 use chain_forge_consensus::pq_hotstuff::seed::{SeedEvidence, MAX_EVIDENCE_HEADERS};
+use chain_forge_consensus::pq_hotstuff::checkpoint::Evidence;
 use chain_forge_consensus::pq_hotstuff::sync::BelowBase;
 
 fn drv_chain(d: &Drv) -> Vec<Block> {
@@ -308,3 +309,90 @@ fn a_seeded_node_answers_a_request_below_its_base_explicitly_and_a_receiver_trea
     assert!(net::decode(&lie[..lie.len() - 1], &lim).is_err());
 }
 
+
+/// Decode every message a driver emitted and say which kinds of SIGNED consensus message are among them.
+fn signed_kinds(lim: &MessageLimits, outs: &[Outbound]) -> Vec<&'static str> {
+    outs.iter().filter_map(|o| match net::decode(&o.bytes, lim) {
+        Ok(NetMsg::Consensus(Msg::Vote(_))) => Some("vote"),
+        Ok(NetMsg::Consensus(Msg::Timeout(_))) => Some("timeout"),
+        Ok(NetMsg::Consensus(Msg::Proposal(_))) => Some("proposal"),
+        _ => None,
+    }).collect()
+}
+
+#[test]
+fn a_correctly_signed_proposal_with_a_conflicting_root_at_exactly_the_installed_base_height_is_mismatch_evidence_and_is_never_signed_for() {
+    let cc = cc3(4, 8);
+    let mut net = DNet::new_cp(4, &[], "M", Some(cc));
+    run_to(&mut net, 56);
+    let donor = net.nodes[0].as_ref().unwrap();
+    let chain = drv_chain(donor);
+    let id_at = |h: u64| id3(&chain[(h - 1) as usize]);
+    // a checkpoint whose FIRST carrier is at least four blocks above it, so a fork from two blocks above it has not yet seen the reference (a new one at that height is legal there)
+    let (ev, a) = (0..8).map(|k| evidence_from(donor, k)).find(|(_, a)| chain.iter().find(|b| b.checkpoint == Some(*a)).map_or(false, |c| c.height >= a.height + 4)).expect("a checkpoint with room above it");
+    let h = a.height;
+    assert!(chain[..(h + 2) as usize].iter().all(|b| b.checkpoint.map_or(true, |r| r.height < h)), "up to the fork point no reference at or above the base height has been carried");
+
+    // a node restarted from stored evidence with every block above the base already in its store: fresh signing floors, executor replayed to the tip, not recovering
+    let mut bs = store_with(&ev);
+    for b in chain.iter().filter(|b| b.height > h) { bs.put_block(&id3(b), b).unwrap(); }
+    let fresh = restart_f(engine_f(3, 4, &Some(cc)), 3, 4, &Some(cc));
+    let (mut d, _first) = start_node(fresh, bs, snapshot_app(donor, h), &Default::default(), "M", net.now).expect("start");
+    assert!(!d.engine().is_recovering(), "every dependency is present: the control below can vote");
+    assert_eq!(d.engine().root(h), Some(a.state_root), "the authenticated root of the installed base height is the engine's own record of that height");
+    assert!(d.engine().executed_height() >= h, "the executor is at or beyond the base height, so a root at that height is not merely pending");
+    let lim = *d.limits();
+
+    // the fork: a SIBLING of the real block at height h+3, extending the real block at height h+2, correctly signed by its round's leader, with a certificate for the parent,
+    // a consecutive round, a final-enough F, a fresh-enough and correctly identified NEW reference at exactly the base height - and a WRONG root. Only the root is wrong.
+    let parent = &chain[(h + 1) as usize];
+    assert_eq!(parent.height, h + 2);
+    let round = parent.round + 1;
+    let proposer = d.engine().leader_of(round);
+    let fork = |root: [u8; 32], payload: &[u8]| sign_block3(Block {
+        checkpoint: Some(CheckpointRef { height: h, block_id: id_at(h), state_root: root }),
+        epoch: 0, round, height: h + 3, parent_id: id3(parent), qc: chain[(h + 2) as usize].qc.clone(), tc: None, payload: payload.to_vec(), proposer, signature: vec![],
+    });
+    let mut wrong = a.state_root; wrong[0] ^= 0xFF;
+    let bad = fork(wrong, b"fork: wrong root");
+    let record_before = d.engine().store().record().clone();
+    let deferred_before = d.engine().deferred_len();
+    let outs = d.on_bytes(proposer, &net::encode(&NetMsg::Consensus(Msg::Proposal(bad.clone()))), net.now).expect("a bad root is not a driver failure");
+
+    // every validity condition passed: the block is in the tree. Only the voting rule (R5) refused it, and said why.
+    assert!(d.engine().known_blocks().iter().any(|b| id3(b) == id3(&bad)), "the proposal was ACCEPTED as valid");
+    assert_eq!(d.engine().evidence().last(), Some(&Evidence { block_id: id3(&bad), reference: bad.checkpoint.unwrap(), outcome: RootCheck::Mismatch, own_root: Some(a.state_root) }), "classified Mismatch against the authenticated root, not Unknown");
+    assert!(d.engine().alarm().is_none(), "an uncertified mismatch is evidence, not an alarm");
+    assert!(signed_kinds(&lim, &outs).is_empty(), "nothing signed was sent: {:?}", signed_kinds(&lim, &outs));
+    assert_eq!(d.engine().store().record(), &record_before, "no vote, timeout or proposal signature: the whole SafetyStore record (floors, last vote/timeout/proposal, counter) is unchanged");
+    assert_eq!(d.engine().deferred_len(), deferred_before, "and it is not deferred: the root is known, not pending");
+
+    // the matching-root control: the same fork with the authenticated root passes the same checks and IS voted for
+    let good = fork(a.state_root, b"fork: right root");
+    let evidence_len = d.engine().evidence().len();
+    d.on_bytes(proposer, &net::encode(&NetMsg::Consensus(Msg::Proposal(good.clone()))), net.now).unwrap();
+    assert!(d.engine().known_blocks().iter().any(|b| id3(b) == id3(&good)));
+    assert_eq!(d.engine().evidence().len(), evidence_len, "a matching root is not evidence of anything");
+    let rec = d.engine().store().record();
+    assert!(rec.hvr == Some(round) && rec.last_vote.is_some(), "the control IS voted for: hvr {:?}", rec.hvr);
+    let vote = VoteMessage::decode(&rec.last_vote.as_ref().unwrap().message, ALG).unwrap();
+    assert_eq!((vote.round, vote.block_id), (round, id3(&good)), "the vote is for the matching-root proposal, not the conflicting one");
+}
+
+#[test]
+fn rewriting_an_existing_commit_marker_with_the_same_content_changes_nothing_but_the_number_of_writes() {
+    // this demonstrates the ONLY sense in which the "commit marker offset" mutant is equivalent: the extra markers it writes are byte-identical to the ones on disk
+    let mut bs = BlockStore::new(mem());
+    for h in 1..=6u64 { bs.put_commit(h, &[h as u8; 32]).unwrap(); }
+    let snap = |bs: &BlockStore<MemStorage>| -> Vec<(String, Vec<u8>)> {
+        let s = bs.storage(); let mut v = vec![];
+        for h in 1..=6u64 { let n = format!("cmt-{h:016x}"); v.push((n.clone(), s.read(&n).unwrap().unwrap())); }
+        v
+    };
+    let before = snap(&bs);
+    for h in 1..=6u64 { bs.put_commit(h, &[h as u8; 32]).unwrap(); } // the mutant's extra writes
+    assert_eq!(snap(&bs), before, "byte-identical files");
+    let l = bs.load().unwrap();
+    assert_eq!(l.committed, (1..=6u64).map(|h| (h, [h as u8; 32])).collect::<Vec<_>>());
+    // NOT shown, and not claimed: that the extra writes cost nothing (each is a write, a sync and a rename), nor what a crash in the middle of one would leave
+}
