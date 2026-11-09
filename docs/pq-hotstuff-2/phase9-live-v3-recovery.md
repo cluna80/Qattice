@@ -71,3 +71,15 @@ The focused review of #143-#145 is in `phase9-recovery-stack-review.md`. Product
 * **Stability, the whole v3 file (4 tests, run one at a time), three consecutive runs:** all passed - 190.50 s, 189.55 s, 203.16 s. (An earlier run of a previous version of the controlled-leader test failed and led to the review's diagnosis; it is described in the review document.) Three timing-based passes support reliability; they do not prove it.
 * **Mutation:** stall fix removed - caught in-process (`STALL`, 125.5 s); proposal gate removed - caught 3 of 3 at the process level by the refusal counter (see the review for what that does and does not show). Literal diffs: `phase9-live-v3-mutation-record.md`.
 * **Windows:** the last owner-run Windows result is at `855fd0d` (whole file 3/3, crash-injection test 5 of 5, antivirus off). It does NOT cover the production changes above. A Windows run at the candidate commit is still needed; no scanner-enabled run with a recorded exception state exists at any commit after `67dc8a3`.
+
+
+## Windows run at the review candidate (owner-run, MINGW64, `set -o pipefail`, full output kept with `tee`)
+`git rev-parse HEAD` printed **`88c0685301fcbbc56edefedb267c41bcdd021c53`** (documentation only on top of the frozen code `a4a2ebd`); the worktree was clean and `git diff a4a2ebd HEAD -- chain-forge-consensus chain-forge-node` printed nothing. Release mode; every command's real exit status was printed and every one was `0 0 0` (cargo, tee, grep):
+| Run | Result | Time |
+|---|---|---|
+| real ML-DSA-65 engine suite `pq_hotstuff_engine_fips204` | 169 passed, 0 failed, 2 ignored | 178.81 s |
+| test-doubles engine suite `pq_hotstuff_engine` | 169 passed, 0 failed, 2 ignored | 428.58 s |
+| whole `pq_devnet_live_v3` file | **4 passed, 0 failed**; eight `agreement ok` lines including the controlled-leader recovery; no `panicked` line | 192.02 s |
+| `pq_devnet_live` (v2 regression) | 1 passed | 34.44 s |
+**Antivirus state (read-only query, not changed to obtain the pass):** `Get-MpComputerStatus` reported `AntivirusEnabled: False` and `RealTimeProtectionEnabled: False`; the exclusion-path and exclusion-process queries printed nothing (not conclusive: reading them can need elevation, and with real-time protection off they are moot); the hand-filled state line was left as its template placeholder, so the query output is the evidence. Defender reporting "disabled" does not show that no other scanner was active; that was not checked. Logs are on the owner's machine (`~/pqhs-win-logs/20261109-101734`), not in the repository.
+**Status:** the review fixes are **Windows-run and passing at the candidate `a4a2ebd`** (the PR head `88c0685`), with the scanner off. **Not shown:** compatibility with the scanner ENABLED and its exact exception state recorded (no such run exists after `67dc8a3`); repeated Windows runs of this candidate (the v3 file ran once); the cause of the single failure at `67dc8a3`, which remains undetermined. One Windows pass supports reliability; it does not prove it.
