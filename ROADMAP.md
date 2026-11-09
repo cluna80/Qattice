@@ -1,5 +1,93 @@
 # Qattice — Public Testnet Alpha: ML-DSA-65 + PQ-HotStuff Launch Plan
 
+## PQ-HotStuff-2 implementation status — 2026-11-09 (newest status; documentation-only; append-only)
+
+> **Status supersession, not gate completion.** This section records what the draft PR stack #133–#144 (plus one PR still to be opened) implements and which of it the owner has Windows-confirmed. It removes nothing: earlier sections, including the locked 2026-11-08 pruning requirements and the 2026-11-06 status below, stay as written. It changes no code, authorizes no merge, activation or deployment, and **marks no QAT gate complete**. Per `CLAUDE.md`, a sandbox/CI run never counts as confirmation, so **no ✅ is used here**: nothing below is merged, and the legend's ✅ means shipped.
+
+### How to read the columns (same four-way split as the 2026-11-05 refresh)
+**Implemented** = code on a draft branch. **Windows-confirmed** = the owner ran the stated command on BossKing (MINGW64) at the stated commit and pasted the result. **Merged** = in `main` (none of these). **Public-alpha ready** = a gate's own acceptance evidence is complete (none).
+
+### The stacked draft PRs (all open, all unmerged; each base is the previous branch)
+| PR | What it adds (all feature-gated, off by default) | Windows-confirmed (owner-run) | State |
+|---|---|---|---|
+| **#133 → #134 → #135** | Engine foundation, fixed-set engine state machine with draft QC/TC encodings, and the engine suite on real FIPS 204 ML-DSA-65 | Recorded in their own PRs | Draft; unmerged |
+| **#136** | Sync, persistent block store with recovery, pacemaker, bounded transport envelope. `MAX_MESSAGE_SIZE = 8388608` (8 MiB) is the owner-locked transport limit (2026-11-08 amendment); limits are derived against the maximum certificate the spec permits | `6ab56ac`: 55 passed in each of the three runs reported | Draft; unmerged |
+| **#138** | Execution handoff (durable cursor, atomic interim application), sans-IO node driver, **four-process TCP devnet on profile v2** with real ML-DSA-65 | `c7b2ffb2…`: 68/68; live devnet test 35 s | Draft; unmerged |
+| **#139** | Payload-free block headers and header-chain verification | `6d45a7f`: 77/77 on both backends | Draft; unmerged |
+| **#140** | Snapshot-recovery specification (documentation only; revisions 2–4) | n/a (docs) | Draft; unmerged |
+| **#141** | Isolated recovery components: codecs, bounded request handling, staged generation-bound installation, crash tests. **Not wired into any node** | `60efdf2`: 108/108 on both backends | Draft; unmerged |
+| **#142** | Checkpoint commitment, **protocol profile v3**: canonical checkpoint reference, rules R1–R4 and R6, voting rule R5, durable root log, header verification of every rule, genesis binding of the parameters. Profile v2 identities unchanged. Consensus review fixed two findings (R6 now checked before the ancestor walk; deferred-vote eviction by round) | `aaad7b2`: 140/140 on both backends | Draft; unmerged |
+| **#143** | Checkpoint-start API and the `Recovering` gate: authenticated seed (`authenticate_checkpoint` is the only constructor), forward-only `Engine::seed`, zero signing while recovering. An install record is a local record and never evidence. Mutation campaign 31/31 caught | Its code is contained in the run recorded for #144; **#143's own head was not run separately** | Draft; unmerged |
+| **#144** | Persisted, re-authenticated seed evidence; base-aware driver and block store; explicit below-base sync answer (advice only); in-process live v3 recovery test. Mutation campaign 29/31 caught, 2 survivors explained (one then closed by a new test, one equivalent in logical effect only) | `e610932`: 167/167 on both backends (real ML-DSA-65 and doubles) | Draft; unmerged |
+| **Live v3 over TCP/processes** (branch `feat/pq-hotstuff-2-live-v3-recovery`; PR to be opened) | Feature-gated profile-v3 devnet wiring (optional checkpoint config; v2 files unchanged), operator-staged offline snapshot tool, four OS processes with real keys, SIGKILL and restart, two installs, crash-injected staging | **Not yet.** Linux development runs pass; stability runs, regressions and Windows validation are pending | In progress |
+
+Standing restrictions that still hold for every row: profile v3 off by default; **network snapshot installation disabled; pruning not implemented**; dynamic membership disabled (PO-4); payloads explicitly devnet-interim (U5); Tendermint unchanged; production keys and counter gated (#109); no merge or activation without separate owner approval.
+
+### What the evidence demonstrates, and what is still missing
+| Demonstrated | Still missing |
+|---|---|
+| Re-authenticated evidence and checkpoint-based restart (in-process, Windows-confirmed at `e610932`) | Automated network snapshot installation (the installer and codecs exist but nothing calls them) |
+| Four drivers recovering on an in-process network | Profile-v3 recovery over TCP and as separate processes (Linux only so far, see the last row above) |
+| No duplicate execution in the tested scenarios, on the **devnet-interim application** (a hash chain of opaque payloads) | Recovery of the real Qattice application: no transaction codec (U5), no snapshot format, no canonical state root |
+| Base-aware storage and explicit sync advice | Pruning and bounded evidence growth (evidence currently starts at genesis and grows with the chain) |
+
+### Mapping to the locked 2026-11-08 milestones (progress, not completion)
+| Milestone | Progress recorded | Still open |
+|---|---|---|
+| **QAT-PRUNE-001** durable store and recovery | Persistent block store, commit and execution cursor handoff, root log, persisted seed evidence; crash injection at store, installer and seeding boundaries; fail-closed starts (executor behind or different at the checkpoint, damaged or unauthentic evidence) | Crashes around checkpoint publication *and deletion* (no deletion exists); real application execution |
+| **QAT-PRUNE-002** validated sync and pacemaker | Bounded block sync, missing-ancestor recovery, capped exponential-backoff pacemaker, partition/rejoin on the local TCP devnet (profile v2), explicit below-base advice | P2P topic integration; breadth of malicious/silent-peer testing beyond the driver and devnet tests |
+| **QAT-PRUNE-003** checkpoint and availability specification | Snapshot spec (#140), checkpoint commitment profile v3 (#142), evidence authentication (#143, #144) | History-availability responsibilities, suffix retention, network transfer of snapshot chunks (codecs exist, disabled), real state root; owner approval of the draft QC/TC encodings |
+| **QAT-PRUNE-004** defensive pruning | **Not implemented.** Pruning stays disabled by default; finality is eligibility, not deletion | Everything: watermark, restartable reclamation, interrupted-pruning and rejoin-beyond-retention tests |
+| **QAT-PRUNE-005** resource and platform validation | Exact commits and commands, Linux and owner-run Windows results recorded per PR | Sustained-workload disk, bandwidth, CPU and RAM measurements; the 1,000-validator / <3 s finality benchmark stays separate and open |
+| **QAT-DIS-HW-001** hardware and phone feasibility | Untouched | All |
+
+### Open owner decisions and gates (unchanged by this section)
+U5 canonical payload codec; approval of the draft QC/TC encodings; PO-4 epoch-transition model checking (#132); D2 certificate sizing; production keys and counter (#109); the canonical state root for the real application; leaders are chosen by count, not power, so there is no lower bound on checkpoint frequency from power assumptions alone. K=1,000 and margin 100 remain provisional configuration. **QAT-06 through QAT-11 and the dependency-ordered public-testnet release gates remain open.**
+
+### Next planned steps (each a separate review; none authorized to merge or activate)
+1. Finish the live v3 recovery PR's verification (stability runs, final-commit regressions, signing-gate mutation checks), open it as a stacked draft, and obtain owner-run Windows results at a pinned commit.
+2. Only then design, as its own reviewed change, **automated** network snapshot installation (staged under the existing gates); it stays disabled until reviewed and Windows-confirmed.
+3. Bounded evidence growth (anchored evidence), real Qattice application snapshot integration (after U5 and a canonical state root), and pruning (after QAT-PRUNE-001 to -003 pass).
+
+---
+
+## Owner architecture decision — 2026-11-08: Defensive pruning and recoverable PQ ledger (LOCKED requirements; implementation open)
+
+**Owner-approved direction:** Qattice combines personhood-bounded PQ-HotStuff-2, real FIPS 204 ML-DSA-65 authentication, and defensive payload pruning. This section is normative implementation guidance for the storage/recovery workstream; it does not claim that pruning, snapshot sync, hardware anchoring, or smartphone validation is implemented. It supplements the native-genesis decision below and supersedes any immediate-delete-at-finality instruction.
+
+### Mandatory storage and protocol integration invariants
+
+1. **Finality is eligibility, not deletion.** Use the implemented, reviewed commit predicate under its stated fault assumptions. Pruning stays disabled by default until durable execution, recovery and authenticated catch-up prerequisites pass acceptance. No fixed two-block retention assumption.
+2. **Durable pruning watermark.** Payload deletion is permitted only below an explicitly persisted, monotonic watermark. Derive eligibility from durable finalized/executed height, a recoverable checkpoint, required consensus dependencies and catch-up retention. Retain blocks needed by locks, high QC, pending proposals, missing ancestors and recovery. Publish the checkpoint and watermark durably before reclaiming payloads; interrupted deletion must be idempotent.
+3. **Execution and safety boundaries.** SafetyStore remains authoritative for signing safety, including write-before-send and byte-for-byte vote retransmission. Coordinate block storage, committed tip, execution cursor and checkpoint through a documented crash-consistency protocol. Recovery must not roll back signing floors, rewrite finalized history or duplicate committed application effects. Until real execution is integrated, retain replay payloads; mock-executor pruning is test-only.
+4. **Commitments are not state or availability.** Specify any history accumulator's encoding, domain separation, append/recovery semantics and proof purpose separately from the application state root. A digest cannot reconstruct payloads or application state. Do not introduce consensus-visible roots or checkpoint certification implicitly; new signed formats and trust rules require explicit specification/review.
+5. **Authenticated catch-up.** A node behind the pruning watermark must have a defined recovery path: retained history from available providers or authenticated state snapshots plus the required suffix. Specify snapshot trust anchors, completeness, state-root binding, chunk bounds and verification. Reject missing/corrupt/foreign/stale-incompatible checkpoints without resetting safety. Local checkpoint durability alone is insufficient if all peers delete history needed for catch-up.
+6. **Bounded transport and resources.** Derive proposal/QC/TC/sync envelope bounds from exact encodings, validator limits and uncompressed ML-DSA-65 signatures using checked arithmetic. Enforce allocation, queue, per-peer and aggregate bounds before expensive verification. **8 MB is an unverified proposal, not an approved protocol constant in this decision**; specify exact bytes and measured worst-case fit before approval. Include bounded sync retries and pacemaker exponential backoff without changing voting/commit rules.
+7. **Cryptography and policy.** Required integration checks use the real FIPS 204 ML-DSA-65 adapter across engine, certificates and SafetyStore, with replay/domain/key-negative cases. Preserve one verified human's bounded voting share; hardware ownership, stake, pruning mode and storage service roles do not increase voting power. No silent signature downgrade.
+8. **Scope safeguards.** Dynamic membership remains disabled pending PO-4 and persistence obligations. U5 canonical payload encoding remains unresolved; interim payloads stay labelled devnet-interim. Production keys/counter remain gated. Tendermint remains unchanged and selectable in Chain Forge. No merges or existing-network/production activation are authorized by this roadmap entry.
+
+### Required implementation and acceptance milestones
+
+| ID | Status | Deliverable / acceptance |
+|---|---|---|
+| **QAT-PRUNE-001 — Durable store and recovery** | Required / open | Persistent block store, commit/execution cursor interfaces and dependency inventory. Inject crashes before/after write, sync, checkpoint publication and recovery; prove fail-closed signing and no duplicate committed effects within the tested execution boundary. |
+| **QAT-PRUNE-002 — Validated sync and pacemaker** | Required / open | P2P topics, bounded block sync, missing-ancestor recovery and capped exponential-backoff policy. Real ML-DSA integration; malformed/oversized/foreign responses, silent/malicious peers, partition/rejoin and restart tests. |
+| **QAT-PRUNE-003 — Checkpoint and availability specification** | Required / open | Explicit snapshot authentication/trust model, history availability responsibilities, suffix retention, checkpoint lifecycle and state/history commitment distinction. A fresh or long-offline node verifies recovery across a pruned interval; unavailable data fails closed and is reported. |
+| **QAT-PRUNE-004 — Defensive pruning implementation** | Required / gated on 001–003 | Monotonic durable watermark and restartable reclamation. Retain required certificates/headers/safety dependencies and recovery checkpoints. Test interrupted pruning, corrupted checkpoint, concurrent sync, active dependencies and rejoin beyond retained history. Remains disabled until prerequisites pass. |
+| **QAT-PRUNE-005 — Resource and platform validation** | Required / open | Publish exact commits, commands, configs, seeds, runtimes and Linux/owner-confirmed Windows evidence. Measure disk, live state, retained metadata, CPU/RAM, bandwidth and catch-up cost under sustained workload. Keep the 1,000-validator / <3 s finality benchmark separate and open until measured. |
+| **QAT-DIS-HW-001 — Hardware and phone feasibility** | Future / separately gated | Phone-local wallet signing is distinct from full validator operation and hardware-isolated signing. Verify actual ML-DSA support, non-exportability and recovery before claiming hardware anchoring; benchmark phone validation, connectivity, battery/thermal limits and background availability before claiming feasibility. |
+
+### Claims and non-goals
+
+- Goal: reduce retained historical payloads and lower validator storage burden. Live application state, certificates, indices and checkpoints may still grow; **no permanently tiny or constant-total-storage claim**.
+- Pruning is a node storage policy coupled to validated recovery interfaces, not a change in transaction validity or finality. It does not itself improve transaction processing speed.
+- Post-quantum signatures address a defined cryptographic threat model; no quantum immunity, future-proof security, automatic end-to-end PQ transport, or unconditional finality claim.
+- “Succinct, Hardware-Anchored Post-Quantum Ledger” is an aspirational product description, not an adopted standard or a claim of succinct validity proofs. Hardware anchoring and succinct-proof machinery are not established by pruning.
+- Do not assert that every Bitcoin/Ethereum validator retains all historical transactions, that smartphones automatically become suitable validators, or that the implemented two-chain rule alone proves minimum possible latency/messages.
+- **Completion gate:** implementation PRs must map each invariant and acceptance criterion to code and evidence. Documentation approval is not implementation completion; maintain open checkboxes until actual review and platform confirmation.
+
+---
+
 ## Owner architecture decision — 2026-11-07: PQ-HotStuff-2-native Qattice (LOCKED)
 
 > **Superseding direction; documentation only.** This decision supersedes older Qattice development plans wherever they require migrating a Tendermint chain to PQ-HotStuff-2 or retaining Tendermint in the **new Qattice network's active consensus path**. Historical milestones and test evidence below remain intact. This roadmap change does not implement an engine, close an acceptance gate, merge PR #130, activate a network, or authorize production key handling.
