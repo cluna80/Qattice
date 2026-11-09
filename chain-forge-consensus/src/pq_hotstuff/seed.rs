@@ -46,6 +46,8 @@ impl CheckpointSeed {
     pub fn reference(&self) -> &CheckpointRef { &self.cref }
     /// The last verified header; the blocks from the base up to here are the dependencies the engine needs before it may sign again.
     pub fn tip(&self) -> &ChainPoint { &self.tip }
+    /// The verified chain point with this block id, if the authenticated chain contains it.
+    pub fn chain_point(&self, id: &BlockId) -> Option<ChainPoint> { self.chain.iter().find(|p| p.id == *id).copied() }
     pub fn high_qc_round(&self) -> u64 { self.high_qc.round() }
     /// `(height, id)` of the blocks strictly above the base up to the high QC's block: the dependencies that must arrive as full blocks.
     pub fn required_blocks(&self) -> Vec<(u64, BlockId)> {

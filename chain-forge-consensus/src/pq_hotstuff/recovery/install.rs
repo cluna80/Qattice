@@ -223,7 +223,12 @@ impl<F: TreeFs, A: ShadowApp> Installer<F, A> {
     }
 
     /// Steps 3 to 8 of the protocol. Returns the install record once the pointer is published; the caller seeds the engine and then calls `complete_seed`.
-    pub fn finish(&mut self, proof: InstallProof) -> Result<InstallRecord, InstallError> {
+    pub fn finish(&mut self, proof: InstallProof) -> Result<InstallRecord, InstallError> { self.finish_with(proof, &mut || Ok(())) }
+
+    /// [`Installer::finish`] with a hook that runs after the staged state has been measured against the authenticated reference and flushed, and BEFORE anything is
+    /// published (no rename, record or pointer yet). The caller persists the seed evidence there, so every published generation already has durable, matching,
+    /// re-authenticatable evidence. If the hook fails the install is discarded and nothing is published.
+    pub fn finish_with(&mut self, proof: InstallProof, before_publish: &mut dyn FnMut() -> Result<(), String>) -> Result<InstallRecord, InstallError> {
         let (cref, manifest, generation, complete) = {
             let s = self.staging.as_ref().ok_or(InstallError::Rejected("no install in progress"))?;
             (s.cref, s.manifest.clone(), s.generation, s.received.len() == s.manifest.chunk_count as usize)
@@ -241,6 +246,8 @@ impl<F: TreeFs, A: ShadowApp> Installer<F, A> {
         if let Err(e) = self.walk(&state, &mut files, &mut dirs) { return Err(self.discard(format!("walk: {e}"))); }
         for f in &files { if let Err(e) = self.fs.sync_file(f) { return Err(self.discard(format!("flush {f}: {e}"))); } }
         for d in dirs.iter().rev() { if let Err(e) = self.fs.sync_dir(d) { return Err(self.discard(format!("flush {d}: {e}"))); } }
+        // 4b: the caller's durable evidence, BEFORE the application generation exists
+        if let Err(e) = before_publish() { return Err(self.discard(format!("before publish: {e}"))); }
         // 5: into place as a new generation (directory entries made durable in `generations/` and the old parent)
         let live = gen_dir(generation);
         if let Err(e) = self.fs.rename(&state, &live).and_then(|_| self.fs.sync_dir(GENS)).and_then(|_| self.fs.sync_dir(&stage)) { return Err(self.discard(format!("rename: {e}"))); }
