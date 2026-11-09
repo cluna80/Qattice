@@ -37,7 +37,7 @@ Code commit `00e17a958af5c7a9013dad65c4384058a9b1083f`; later commits are docume
 | Base-aware storage and explicit sync advice | Pruning and bounded evidence growth (evidence still starts at genesis) |
 
 ## Known limits of this PR's own checks
-* The proposal gate and the re-send-of-a-stored-timeout gate are not exercised by the process-level test: a proposal is attempted only if the victim leads its post-install round (not controlled), and a stored timeout is re-sent only if the high QC matches the one it was signed on (not arrangeable over processes). Open improvement: report the leader slot in the status and re-stage until the victim leads.
+* Process-level coverage of the signing gates (current; see `phase9-recovery-stack-review.md`): the proposal gate is REACHED (the controlled-leader scenario puts the victim on its slot and the engine is asked to propose and refuses) and its removal is caught by the refusal counter; the SafetyStore's same-round rule is a second line of defense for proposals. The re-send of a stored timeout is not reachable over processes (it needs the high QC to equal the one the timeout was signed on) and is covered in-process only. The first version of this PR's check left both unexercised; that history is in the mutation record.
 * The execution log can lose a line (never repeat one) if the process dies between the durable application step and the log append; the test allows at most the kills' worth of gaps and no duplicates.
 * The donor's files are read while its node runs; the tool retries when it sees a half-written chain.
 
