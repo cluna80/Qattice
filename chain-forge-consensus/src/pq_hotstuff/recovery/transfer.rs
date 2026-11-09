@@ -89,6 +89,10 @@ impl<S: ProviderStore> Provider<S> {
         }
     }
 }
+/// Failures that mean the snapshot's DATA was wrong (as opposed to this machine's storage or the caller's evidence sink).
+fn provider_attributable(e: &InstallError) -> bool {
+    matches!(e, InstallError::Aborted(r) if r.starts_with("assemble:") || r.starts_with("measure:") || r.starts_with("the staged state does not match"))
+}
 fn reply_kind(m: &RecoveryMsg) -> u8 { m.kind() }
 fn is_not_found(m: &RecoveryMsg) -> bool { matches!(m, RecoveryMsg::HeaderResp { body: HeaderBody::NotFound, .. } | RecoveryMsg::ManifestResp { body: ManifestBody::NotFound, .. } | RecoveryMsg::ChunkResp { body: ChunkBody::NotFound, .. }) }
 
@@ -338,7 +342,11 @@ impl<A: Authenticator, I: InstallSink, E: EvidenceSink> Requester<A, I, E> {
                 if malformed { self.stats.manifests_rejected += 1; self.blame(peer, now); return; }
                 // over the local staging budget, or a snapshot already shown not to measure: refused WITHOUT blame (a local limit is not misbehaviour)
                 if mf.total_bytes > self.lim.max_staging_bytes || self.bad_snapshots.contains(&mf.snapshot_id) { self.stats.manifests_rejected += 1; self.cool.note_unserved(peer, Selector::Ref(cref), now); return; }
-                if self.sink.begin(cref, mf.clone(), self.local_height).is_err() { self.stats.manifests_rejected += 1; self.cool.note_unserved(peer, Selector::Ref(cref), now); return; }
+                match self.sink.begin(cref, mf.clone(), self.local_height) {
+                    Ok(()) => {}
+                    Err(InstallError::Fs(e)) => { self.fail(format!("storage failure while starting the install: {e}")); return; }
+                    Err(_) => { self.stats.manifests_rejected += 1; self.cool.note_unserved(peer, Selector::Ref(cref), now); return; }
+                }
                 self.manifest = Some(mf.clone()); self.manifest_src = Some(peer); self.phase = Phase::Chunks;
             }
             other => { let a = advice_of(&RecoveryMsg::ManifestResp { request_id: 0, cref, body: other.clone() }); self.advise(peer, Selector::Ref(cref), a, now); }
@@ -353,7 +361,12 @@ impl<A: Authenticator, I: InstallSink, E: EvidenceSink> Requester<A, I, E> {
                 // the manifest's hash decides, never the provider; a bad chunk costs the provider its standing, not the transfer its progress
                 let want = mf.chunk_hashes.get(idx as usize).copied();
                 if want != Some(chunk_hash(idx, data)) || mf.chunk_len(idx) != Some(data.len() as u64) { self.stats.chunks_rejected += 1; self.blame(peer, now); return; }
-                if self.sink.put_chunk(idx, data).is_err() { self.stats.chunks_rejected += 1; return; }
+                match self.sink.put_chunk(idx, data) {
+                    Ok(()) => {}
+                    // a storage failure is LOCAL: retrying the same chunk against a failing disk would never end (and no provider is at fault)
+                    Err(InstallError::Fs(e)) => { self.fail(format!("storage failure while staging a chunk: {e}")); return; }
+                    Err(_) => { self.stats.chunks_rejected += 1; return; }
+                }
                 self.have.insert(idx); self.chunk_src.insert(idx, peer);
                 self.cool.note_served(peer, Selector::Chunk(sid, idx));
                 if self.have.len() == mf.chunk_count as usize { self.finish(now); }
@@ -376,6 +389,8 @@ impl<A: Authenticator, I: InstallSink, E: EvidenceSink> Requester<A, I, E> {
             Ok(rec) => self.phase = Phase::Done(rec),
             // the evidence could not be made durable: a LOCAL failure. Nothing was published; no provider is blamed and the transfer stops.
             Err(_) if local.is_some() => self.fail(format!("the seed evidence could not be made durable: {}", local.unwrap_or_default())),
+            // anything but bad snapshot DATA (the files did not assemble, did not measure, or measured to another state) is a local failure: stop, blame nobody
+            Err(e) if !provider_attributable(&e) => self.fail(format!("the install failed locally: {e}")),
             Err(_) => {
                 // the staged state did not measure to the authenticated root. The manifest's source is to blame; retry with another snapshot id and provider
                 // rather than trusting the same manifest again.
@@ -394,5 +409,53 @@ impl<A: Authenticator, I: InstallSink, E: EvidenceSink> Requester<A, I, E> {
         let h = ev.headers.iter().find(|h| h.checkpoint == Some(*cref))?;
         let id = self.auth.header_id(h)?;
         self.chosen.as_ref()?.seed.chain_point(&id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Direct tests of defences that the serial phases of the requester normally never reach together.
+    use super::*;
+    use crate::pq_hotstuff::recovery::codec::{ChunkBody, RecoveryMsg};
+
+    struct NoAuth; impl Authenticator for NoAuth { fn authenticate(&self, _: &SeedEvidence) -> Result<CheckpointSeed, String> { Err("unused".into()) } fn header_id(&self, _: &PayloadFreeBlock) -> Option<BlockId> { None } }
+    struct NoEv; impl EvidenceSink for NoEv { fn persist(&mut self, _: &SeedEvidence) -> Result<(), String> { Ok(()) } }
+    struct NoSink; impl InstallSink for NoSink {
+        fn begin(&mut self, _: CheckpointRef, _: Manifest, _: u64) -> Result<(), InstallError> { Ok(()) }
+        fn put_chunk(&mut self, _: u32, _: &[u8]) -> Result<(), InstallError> { Ok(()) }
+        fn finish_with(&mut self, _: InstallProof, _: &mut dyn FnMut() -> Result<(), String>) -> Result<InstallRecord, InstallError> { Err(InstallError::Rejected("unused")) }
+        fn abort(&mut self) -> Result<(), InstallError> { Ok(()) }
+    }
+    fn codec() -> CodecLimits { CodecLimits { transport: 8_388_608, n: 4, max_headers: 64, max_chunk_size: 262_144, max_chunk_count: 65_536, max_snapshot_bytes: 256 << 20 } }
+    fn lim(total: usize, per_peer: usize) -> RequesterLimits { RequesterLimits { headers_per_request: 8, max_accumulated_headers: 100, max_staging_bytes: 1 << 20, max_outstanding: total, per_peer_outstanding: per_peer, request_timeout_ms: 1_000, overall_timeout_ms: 100_000 } }
+    fn req(l: RequesterLimits) -> Requester<NoAuth, NoSink, NoEv> { let mut r = Requester::new(NoAuth, NoSink, NoEv, [0; 32], [1; 32], codec(), l, 0).unwrap(); r.add_peer(0); r.add_peer(1); r }
+    fn cref() -> CheckpointRef { CheckpointRef { height: 8, block_id: [2; 32], state_root: [3; 32] } }
+
+    /// The per-peer budget counts requests of EVERY kind: the request table's own cap is per kind, so a peer could otherwise hold one header, one manifest and one
+    /// chunk request at once.
+    #[test]
+    fn one_peer_s_capacity_is_shared_by_every_request_kind() {
+        let mut r = req(lim(8, 2));
+        let mut out = vec![];
+        assert!(r.issue(0, Selector::After([5; 32]), 0, &mut out));
+        assert!(r.issue(0, Selector::Ref(cref()), 0, &mut out));
+        assert!(!r.issue(0, Selector::Chunk([6; 32], 0), 0, &mut out), "a third request of another kind to the same peer is refused");
+        assert_eq!(r.outstanding_for(0), 2);
+        assert!(r.issue(1, Selector::Chunk([6; 32], 0), 0, &mut out), "another peer's capacity is its own");
+        assert_eq!(out.len(), 3);
+    }
+
+    /// A chunk response whose peer, request id, kind, index and size all match an outstanding request but which names ANOTHER snapshot never reaches the chunk
+    /// logic: the request table refuses it on the echoed selector.
+    #[test]
+    fn a_chunk_for_another_snapshot_with_every_other_field_matching_is_refused_by_the_table() {
+        let mut r = req(lim(4, 2));
+        let mut out = vec![];
+        assert!(r.issue(0, Selector::Chunk([6; 32], 3), 0, &mut out));
+        let RecoveryMsg::ChunkReq { request_id, .. } = out[0].msg.clone() else { panic!() };
+        let before = r.stats;
+        let _ = r.on_message(0, &RecoveryMsg::ChunkResp { request_id, snapshot_id: [7; 32], index: 3, body: ChunkBody::Ok(vec![0; 64]) }, 1);
+        assert_eq!(r.stats.dropped_mismatch, before.dropped_mismatch + 1);
+        assert_eq!(r.stats.chunks_rejected, before.chunks_rejected, "it was dropped before the chunk logic");
     }
 }

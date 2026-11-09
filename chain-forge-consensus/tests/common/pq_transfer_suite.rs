@@ -56,9 +56,15 @@ impl Authenticator for TAuth {
     fn header_id(&self, h: &PayloadFreeBlock) -> Option<BlockId> { h.id(&idctx3(&self.set)).ok() }
 }
 #[derive(Default)]
-struct RecEv { saved: Rc<TRefCell<Vec<SeedEvidence>>>, fail: bool }
+struct RecEv { saved: Rc<TRefCell<Vec<SeedEvidence>>>, fail: bool, bs: Option<Rc<TRefCell<BlockStore<MemStorage>>>>, faults: Option<TShared>, ops_at_persist: Rc<std::cell::Cell<Option<usize>>> }
+impl RecEv { fn plain(saved: Rc<TRefCell<Vec<SeedEvidence>>>, fail: bool) -> Self { RecEv { saved, fail, bs: None, faults: None, ops_at_persist: Default::default() } } }
 impl EvidenceSink for RecEv {
-    fn persist(&mut self, ev: &SeedEvidence) -> Result<(), String> { if self.fail { return Err("disk full".into()); } self.saved.borrow_mut().push(ev.clone()); Ok(()) }
+    fn persist(&mut self, ev: &SeedEvidence) -> Result<(), String> {
+        if self.fail { return Err("disk full".into()); }
+        if let Some(f) = &self.faults { self.ops_at_persist.set(Some(f.borrow().ops)); }
+        if let Some(bs) = &self.bs { bs.borrow_mut().put_seed_evidence(ev.cref.height, &ev.cref.block_id, &ev.encode()).map_err(|e| e.to_string())?; }
+        self.saved.borrow_mut().push(ev.clone()); Ok(())
+    }
 }
 type Inst = Installer<MemTreeFs, InterimShadow>;
 
@@ -68,6 +74,11 @@ fn donor_net() -> (DNet, Arc<Donor>) {
     let cc = cc3(4, 8);
     let mut net = DNet::new_cp(4, &[], "T", Some(cc.clone()));
     run_to(&mut net, 36);
+    let d = donor_of(&net);
+    (net, d)
+}
+/// What a peer serving from node 0 of `net` can offer right now.
+fn donor_of(net: &DNet) -> Arc<Donor> {
     let d0 = net.nodes[0].as_ref().unwrap();
     let chain = drv_chain(d0);
     let set = set_n(4);
@@ -87,7 +98,7 @@ fn donor_net() -> (DNet, Arc<Donor>) {
     }
    
     let genesis_id = d0.engine().genesis_id();
-    (net, Arc::new(Donor { headers, ids, hq, snaps, by_ref, refs, genesis_id }))
+    Arc::new(Donor { headers, ids, hq, snaps, by_ref, refs, genesis_id })
 }
 fn tlim() -> RequesterLimits { RequesterLimits { headers_per_request: 16, max_accumulated_headers: 10_000, max_staging_bytes: 1 << 20, max_outstanding: 4, per_peer_outstanding: 2, request_timeout_ms: 200, overall_timeout_ms: 120_000 } }
 fn serve_cfg() -> ServeConfig { ServeConfig { limit: net::MAX_MESSAGE_SIZE, burst: 2 * net::MAX_MESSAGE_SIZE, refill_per_s: net::MAX_MESSAGE_SIZE / 2, aggregate_per_s: net::MAX_MESSAGE_SIZE * 8, max_concurrent: 16, per_peer_outstanding: 8, min_spacing_ms: 0, chunk_size: 64 } }
@@ -96,14 +107,18 @@ fn provider(d: &Arc<Donor>, mode: Mode, now: u64) -> Provider<Peer> { Provider::
 enum Node { Serve(Provider<Peer>), BlackHole }
 struct Rig { req: Requester<TAuth, Inst, RecEv>, peers: Vec<Node>, now: u64, saved: Rc<TRefCell<Vec<SeedEvidence>>>, max_out: usize, sent: Vec<(usize, RecoveryMsg)>, per_peer_max: usize }
 fn rig_with(d: &Arc<Donor>, modes: &[Mode], lim: RequesterLimits, fail_evidence: bool) -> Rig {
+    let mut fs = MemTreeFs::new(tfaults()); extras(&mut fs);
+    rig_full(d, modes, lim, RecEv::plain(Default::default(), fail_evidence), fs)
+}
+/// A requester over an explicit installer filesystem and evidence sink (so a test can crash the one and keep the other).
+fn rig_full(d: &Arc<Donor>, modes: &[Mode], lim: RequesterLimits, ev: RecEv, fs: MemTreeFs) -> Rig {
     let cc = cc3(4, 8);
     let e = engine3(0, 4, &cc);
     let gid = e.genesis_id();
-    let saved: Rc<TRefCell<Vec<SeedEvidence>>> = Default::default();
-    let mut fs = MemTreeFs::new(tfaults()); extras(&mut fs);
+    let saved = ev.saved.clone();
     let mut inst: Inst = Installer::new(fs, interim(), GENESIS_HASH, rl(), Box::new(|c: &Cert| if matches!(c, Cert::Qc(_)) { Ok(()) } else { Err("not a QC".into()) })).unwrap();
     inst.start().unwrap();
-    let mut req = Requester::new(TAuth { e, set: set_n(4) }, inst, RecEv { saved: saved.clone(), fail: fail_evidence }, gid, GENESIS_HASH, rl(), lim, 0).expect("limits");
+    let mut req = Requester::new(TAuth { e, set: set_n(4) }, inst, ev, gid, GENESIS_HASH, rl(), lim, 0).expect("limits");
     let mut peers = vec![];
     for (i, m) in modes.iter().enumerate() { req.add_peer(i); peers.push(if *m == Mode::BlackHole { Node::BlackHole } else { Node::Serve(provider(d, *m, 1)) }); }
     Rig { req, peers, now: 1, saved, max_out: 0, sent: vec![], per_peer_max: 0 }
@@ -353,7 +368,7 @@ fn nothing_newer_than_the_local_state_means_no_manifest_is_ever_requested_and_no
     let mut fs = MemTreeFs::new(tfaults()); extras(&mut fs);
     let mut inst: Inst = Installer::new(fs, interim(), GENESIS_HASH, rl(), Box::new(|_c: &Cert| Ok(()))).unwrap();
     inst.start().unwrap();
-    let req = Requester::new(TAuth { e, set: set_n(4) }, inst, RecEv { saved: saved.clone(), fail: false }, gid, GENESIS_HASH, rl(), tlim(), top).unwrap();
+    let req = Requester::new(TAuth { e, set: set_n(4) }, inst, RecEv::plain(saved.clone(), false), gid, GENESIS_HASH, rl(), tlim(), top).unwrap();
     let mut r = Rig { req, peers: vec![Node::Serve(provider(&d, Mode::Honest, 1))], now: 1, saved, max_out: 0, sent: vec![], per_peer_max: 0 };
     r.req.add_peer(0);
     r.run(300);
@@ -369,4 +384,119 @@ fn an_honest_transfer_is_driven_by_messages_alone_a_released_slot_is_reused_at_o
     let mut r = rig_with(&d, &[Mode::Honest, Mode::Honest], lim, false);
     let first = r.req.start(r.now); r.settle(first); // NO on_tick afterwards
     assert!(r.done().is_some(), "stalled without a timer: {:?} {:?} outstanding {}", r.req.phase(), r.req.stats, r.req.outstanding());
+}
+
+// ------------------------------------------------------------------------------------------------------------------------------ recovery-boundary checks
+fn bs_cell() -> Rc<TRefCell<BlockStore<MemStorage>>> { Rc::new(TRefCell::new(BlockStore::new(mem()))) }
+fn ev_for(bs: &Rc<TRefCell<BlockStore<MemStorage>>>, f: Option<TShared>) -> RecEv { RecEv { saved: Default::default(), fail: false, bs: Some(bs.clone()), faults: f, ops_at_persist: Default::default() } }
+/// The interim application's `app-state` record that an installed generation holds, as the storage a restarted executor opens.
+fn installed_app(fs: &MemTreeFs, generation: u64) -> MemStorage { let mut s = mem(); s.set_raw("app-state", fs.raw(&format!("{}/app-state", gen_dir(generation))).expect("the generation's app-state")); s }
+fn stored_evidence(bs: &Rc<TRefCell<BlockStore<MemStorage>>>) -> Option<SeedEvidence> { bs.borrow().load_seed_evidence().unwrap().map(|(_, _, b)| SeedEvidence::decode(&b, MAX_EVIDENCE_HEADERS).unwrap()) }
+
+#[test]
+fn a_driver_restarts_from_the_installed_state_and_the_persisted_evidence_without_moving_a_signing_floor() {
+    let cc = cc3(4, 8);
+    let mut net = DNet::new_cp(4, &[], "H", Some(cc));
+    run_to(&mut net, 40);
+    let d = donor_of(&net);
+    let floor0 = net.nodes[3].as_ref().unwrap().engine().store().record().clone();
+    let bs = bs_cell();
+    let mut fs = MemTreeFs::new(tfaults()); extras(&mut fs);
+    let mut r = rig_full(&d, &[Mode::Honest, Mode::ForgedHeaders], tlim(), ev_for(&bs, None), fs);
+    r.run(6_000);
+    let rec = r.done().expect("the transfer installs");
+    let app = installed_app(&r.req.sink().fs, rec.generation);
+    drop(r);
+    let bs = Rc::try_unwrap(bs).ok().expect("sole owner").into_inner();
+    reinstall(&mut net, 3, bs, app, "H").expect("a driver starts from what the transfer produced");
+    {
+        let n = net.nodes[3].as_ref().unwrap();
+        assert_eq!(n.engine().base().map(|b| (b.height, b.id)), Some((rec.cref.height, rec.cref.block_id)));
+        assert!(n.engine().is_recovering());
+        assert_eq!(n.engine().store().record(), &floor0, "no signing floor moved");
+        assert_eq!(n.status().exec.height, rec.cref.height);
+    }
+    assert!(net.run_until(8000, |n| n.nodes[3].as_ref().map_or(false, |x| !x.engine().is_recovering() && x.status().exec.height >= rec.cref.height + 8)), "the recipient recovers and executes on");
+    assert!(net.fatal.is_empty(), "{:?}", net.fatal);
+    once_from(&net, 3, rec.cref.height, "after the transferred install");
+}
+
+#[test]
+fn a_crash_between_the_evidence_and_the_application_fails_closed_keeps_the_prior_state_and_the_install_can_be_redone() {
+    let cc = cc3(4, 8);
+    let mut net = DNet::new_cp(4, &[], "K", Some(cc));
+    run_to(&mut net, 40);
+    let d = donor_of(&net);
+    let floor0 = net.nodes[3].as_ref().unwrap().engine().store().record().clone();
+    let old_app = snapshot_app(net.nodes[3].as_ref().unwrap(), 8); // the recipient's prior usable state
+    // 1. a clean run, to learn when the evidence is written and how many mutating operations the install takes
+    let (h_ops, total) = {
+        let f = tfaults(); let mut fs = MemTreeFs::new(f.clone()); extras(&mut fs);
+        let ev = ev_for(&bs_cell(), Some(f.clone())); let probe = ev.ops_at_persist.clone();
+        let mut r = rig_full(&d, &[Mode::Honest], tlim(), ev, fs); r.run(3_000); assert!(r.done().is_some());
+        let t = f.borrow().ops; (probe.get().expect("the hook ran"), t)
+    };
+    assert!(total > h_ops + 4, "there are operations after the evidence: {h_ops} {total}");
+    // 2. a crash before every mutating operation from well before the evidence to the end; every possible post-crash disk state
+    let before = { let mut fs = MemTreeFs::new(tfaults()); extras(&mut fs); extras_view(&fs) };
+    let mut ahead = 0; let mut published = 0;
+    let points: Vec<usize> = [h_ops / 2, h_ops.saturating_sub(1)].into_iter().chain(h_ops..=total).collect();
+    for k in points {
+        let f = tfaults();
+        let mut fs = MemTreeFs::new(f.clone()); extras(&mut fs);
+        let bs = bs_cell();
+        let mut r = rig_full(&d, &[Mode::Honest], tlim(), ev_for(&bs, Some(f.clone())), fs);
+        f.borrow_mut().crash_before = Some(k); // the process dies before this mutating operation (operations are counted from the start of the installer's life)
+        r.run(400);
+        let have_ev = stored_evidence(&bs);
+        let outcomes = r.req.sink().fs.crash_outcomes(6);
+        drop(r);
+        for (n, fs2) in outcomes.into_iter().enumerate() {
+            assert_eq!(extras_view(&fs2), before, "k={k} outcome {n}: the node's own files (prior state, safety, blocks) are untouched");
+            let mut inst: Inst = Installer::new(fs2, interim(), GENESIS_HASH, rl(), Box::new(|_c: &Cert| Ok(()))).unwrap();
+            let out = inst.start().unwrap();
+            if let Some(p) = inst.pointer() {
+                published += 1;
+                // THE invariant: a published application generation always has durable, matching evidence
+                let ev = have_ev.clone().unwrap_or_else(|| panic!("k={k} outcome {n}: generation {} is published but no evidence is durable", p.generation));
+                assert_eq!((ev.cref.height, ev.cref.block_id, ev.cref.state_root), (p.cursor.height, p.cursor.block_id, p.cursor.state_root), "k={k}: the evidence names the published checkpoint");
+                assert!(engine3(0, 4, &cc3(4, 8)).authenticate_evidence(&ev).is_ok(), "k={k}: the durable evidence re-authenticates from the node's own genesis");
+                let _ = out;
+            } else if have_ev.is_some() { ahead += 1; }
+        }
+    }
+    assert!(ahead > 0 && published > 0, "the matrix reached both 'evidence ahead of the application' ({ahead}) and 'published' ({published})");
+
+    // 3. the dangerous state, end to end: evidence durable for the new checkpoint, application still the prior one. The driver refuses to start (nothing signed),
+    //    then the install is redone and the node recovers with every floor where it was.
+    let f = tfaults(); let mut fs = MemTreeFs::new(f.clone()); extras(&mut fs);
+    let bs = bs_cell();
+    let ev = ev_for(&bs, Some(f.clone())); let probe = ev.ops_at_persist.clone();
+    // crash exactly at the first operation after the evidence was written
+    let mut r = rig_full(&d, &[Mode::Honest], tlim(), ev, fs);
+    f.borrow_mut().crash_before = Some(h_ops);
+    r.run(400);
+    assert_eq!(probe.get(), Some(h_ops));
+    assert!(r.done().is_none() && r.req.sink().pointer().is_none());
+    let crashed_fs = r.req.sink().fs.crash_outcomes(1).remove(0);
+    drop(r);
+    let evidence = stored_evidence(&bs).expect("the evidence is durable");
+    let bad_bs = { let mut b = BlockStore::new(mem()); b.put_seed_evidence(evidence.cref.height, &evidence.cref.block_id, &evidence.encode()).unwrap(); b };
+    // a throwaway engine: the refusal must come from the driver's own checks, and nothing of the real node 3 is consumed
+    let throwaway = restart_f(engine_f(3, 4, &net.cc), 3, 4, &net.cc);
+    let err = match start_node(throwaway, bad_bs, old_app, &Default::default(), "K", net.now) { Err(e) => e, Ok(_) => panic!("a driver must not start with evidence ahead of its application") };
+    assert!(matches!(err, DriverError::ExecutorBehindBase { .. }), "{err:?}");
+    // redo: the recovered installer (nothing published) runs the transfer again; the same evidence is accepted again
+    let mut r2 = rig_full(&d, &[Mode::Honest], tlim(), ev_for(&bs, None), crashed_fs);
+    r2.run(3_000);
+    let rec = r2.done().expect("the install can be redone after the crash");
+    assert_eq!(extras_view(&r2.req.sink().fs), before, "the prior state is still there, untouched");
+    let app = installed_app(&r2.req.sink().fs, rec.generation);
+    drop(r2);
+    let bs = Rc::try_unwrap(bs).ok().expect("sole owner").into_inner();
+    reinstall(&mut net, 3, bs, app, "K").expect("the redone install starts a driver");
+    assert_eq!(net.nodes[3].as_ref().unwrap().engine().store().record(), &floor0, "the whole episode moved no signing floor");
+    assert!(net.run_until(8000, |n| n.nodes[3].as_ref().map_or(false, |x| !x.engine().is_recovering() && x.status().exec.height >= rec.cref.height + 8)), "recovers");
+    assert!(net.fatal.is_empty(), "{:?}", net.fatal);
+    once_from(&net, 3, rec.cref.height, "after the crash and the redone install");
 }
