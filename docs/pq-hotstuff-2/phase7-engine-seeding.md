@@ -32,3 +32,16 @@ The 18 tests cover: authentication refusals (wrong root, non-final block, forged
 
 ## Mutation check — complete
 31 mutants of the seeding, gate and authentication code were run one at a time in a disposable git worktree (own target directory; the committed code was not touched) against the 18 seed tests on the test doubles, after a baseline run of the same command (18 passed, 18.4 s). Result: **31 caught, 0 survived, 0 timeouts, 0 build errors, 0 not applicable.** Every mutation's literal diff, result, time and failing test is in `phase7-mutation-record.md`. An earlier run of the same list had 15 survivors; each was a test gap and was closed by a new or strengthened test (not by weakening an assertion), and one redundant line was removed. The campaign was then re-run from the start on the committed code `46c2de7` (not resumed). Limits: it covers the seeding, gate and authentication code only, on the doubles backend; it says nothing about the existing #142 rules, which have their own record.
+
+## Linux results (sandbox; NOT a milestone confirmation — Windows confirmation is still required)
+Run at `826c23054911ee142546f12db136c7c68f1b2a85` on a clean tree; the code is identical to `46c2de70734fe1e3319c0f7299802da8b2cce183` (verified: no diff under `chain-forge-consensus` or `chain-forge-node`). Release mode, `PQHS_SEEDS=10`.
+| Suite | Result |
+|---|---|
+| real ML-DSA-65 `pq_hotstuff_engine_fips204` | 158 passed, 0 failed, 2 ignored (140 + 18 new) |
+| doubles `pq_hotstuff_engine` | 158 passed, 0 failed, 2 ignored |
+| foundation / safety (doubles, fips204) / wire | 30 / 76 + 11 / 24 passed |
+| consensus lib (`pq-hotstuff`, `pq-hotstuff-fips204`, default features) | 98 / 98 / 98 passed |
+| core lib / p2p lib | 74 / 21 passed |
+| node: default check, `pq-devnet` check, `pq_devnet` unit tests | ok / ok / 4 passed |
+| LIVE four-node devnet (profile v2) | 1 passed, 38 s |
+The live devnet test runs profile v2: profile v3 and the seeding path are unwired there, so it validates nothing about them. The 18 seed tests run on both backends (the real-crypto backend uses real ML-DSA-65 signatures for blocks, QCs and timeouts).
