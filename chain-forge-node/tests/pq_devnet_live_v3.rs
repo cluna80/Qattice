@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use chain_forge_consensus::pq_hotstuff::safety::{decode_record, STATE_FILE};
 use serde_json::Value;
 
 const BIN: &str = env!("CARGO_BIN_EXE_pq-devnet-node");
@@ -154,6 +155,62 @@ fn diff_names(a: &std::collections::BTreeMap<String, Vec<u8>>, b: &std::collecti
     v.sort(); v.dedup(); v
 }
 
+/// The signing-safety state of a STOPPED node, reduced to what decides whether anything was signed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SafetySig {
+    /// Every file under `safety/` except temporary files (an interrupted commit can leave one, and opening the store clears it).
+    files: std::collections::BTreeMap<String, Vec<u8>>,
+    /// The monotonic counter's committed value and digest (bytes 76..116 of the counter file; the session token at 116..124 is bumped by merely opening it).
+    counter_value: u64,
+    counter_digest: [u8; 32],
+    /// The counter and digest of the durable safety RECORD.
+    record_counter: u64,
+    record_digest: [u8; 32],
+}
+fn safety_sig(vd: &Path) -> SafetySig {
+    let mut files = tree(&vd.join("safety"));
+    files.retain(|k, _| !k.ends_with(".tmp"));
+    let c = std::fs::read(vd.join("counter")).unwrap();
+    let state = files.get(STATE_FILE).expect("the safety record exists").clone();
+    SafetySig {
+        counter_value: u64::from_be_bytes(c[76..84].try_into().unwrap()), counter_digest: c[84..116].try_into().unwrap(),
+        record_counter: decode_record(&state).expect("the safety record decodes").counter, record_digest: state[state.len() - 32..].try_into().unwrap(), files,
+    }
+}
+/// Nothing was SIGNED between `before` and `after`. Exact model, no tolerance: every signature rewrites the record, so the record and marker files must be byte-identical.
+/// The only thing opening the store may legitimately do is finish a commit that a kill interrupted - the record is durable but the counter has not advanced
+/// (`record_counter == counter_value + 1`; "nothing from this record was ever returned") - and then the counter must be EXACTLY at that record's digest, one higher.
+/// Otherwise the counter must be exactly where it was.
+fn assert_no_signing(label: &str, before: &SafetySig, after: &SafetySig) {
+    assert!(before.files == after.files, "{label}: the signing-safety files changed (a new signature?): {:?}", diff_names(&before.files, &after.files));
+    let interrupted = before.record_counter == before.counter_value + 1;
+    let want = if interrupted { (before.counter_value + 1, before.record_digest) } else { (before.counter_value, before.counter_digest) };
+    assert!((after.counter_value, after.counter_digest) == want,
+        "{label}: the counter is at {} but the exact model wants {} (an interrupted commit was {}pending before: record counter {}, counter {})",
+        after.counter_value, want.0, if interrupted { "" } else { "NOT " }, before.record_counter, before.counter_value);
+}
+
+#[test]
+fn the_no_signing_model_accepts_the_completion_of_an_interrupted_commit_and_nothing_else() {
+    let sig = |files: &[(&str, &[u8])], cv: u64, cd: u8, rc: u64, rd: u8| SafetySig { files: files.iter().map(|(k, v)| (k.to_string(), v.to_vec())).collect(), counter_value: cv, counter_digest: [cd; 32], record_counter: rc, record_digest: [rd; 32] };
+    let quiet = sig(&[("state", b"a")], 7, 1, 7, 1);
+    assert_no_signing("unchanged", &quiet, &quiet.clone());
+    // a kill landed between "record durable" and "counter advanced": opening finishes it - exactly one step, to the record's digest
+    let window = sig(&[("state", b"a")], 7, 1, 8, 2);
+    assert_no_signing("interrupted commit completed", &window, &sig(&[("state", b"a")], 8, 2, 8, 2));
+    // (what, before, after): each of these must be REJECTED
+    let bad = [
+        ("a new signature rewrote the record", quiet.clone(), sig(&[("state", b"b")], 8, 3, 8, 3)),
+        ("the counter moved with no interrupted commit", quiet.clone(), sig(&[("state", b"a")], 8, 2, 7, 1)),
+        ("the counter moved but not to the record's digest", window.clone(), sig(&[("state", b"a")], 8, 9, 8, 2)),
+        ("the counter moved more than one step", window.clone(), sig(&[("state", b"a")], 9, 2, 8, 2)),
+        ("an interrupted commit was left pending", window.clone(), window.clone()),
+    ];
+    for (what, before, after) in bad {
+        assert!(std::panic::catch_unwind(|| assert_no_signing(what, &before, &after)).is_err(), "the model must reject: {what}");
+    }
+}
+
 /// No duplicates, strictly increasing; at most `max_gaps` missing heights (a kill between the durable application step and the log append can lose one line, never repeat one).
 fn check_log(label: &str, log: &[u64], first: u64, max_gaps: usize) {
     assert!(!log.is_empty(), "{label}: nothing executed");
@@ -287,10 +344,8 @@ fn live_v3_a_crash_between_the_staging_writes_never_lets_the_node_sign_on_a_half
     std::fs::remove_dir_all(vd.join("app")).unwrap();
     std::fs::rename(vd.join("exec.log"), vd.join("exec.log.epoch0")).unwrap();
     net.wait("the three others keep finalizing", 120, |n| (0..3).all(|i| n.height(i) >= 56));
-    // the signing-safety files, and the monotonic counter's VALUE and DIGEST (bytes 76..116 of the counter file; they change only when a signature is committed). The file's
-    // session token (bytes 116..124) is bumped by merely OPENING the counter, which a refused start does, so it is deliberately not part of "nothing was signed".
-    let safety = |vd: &Path| -> (std::collections::BTreeMap<String, Vec<u8>>, Vec<u8>) { (tree(&vd.join("safety")), std::fs::read(vd.join("counter")).unwrap()[76..116].to_vec()) };
-    let signing_state = safety(&vd);
+    // The baseline is read after the kill, and the kill can land in the middle of a signing commit; see `assert_no_signing` for the exact model.
+    let mut signing_state = safety_sig(&vd);
 
     // ---- crash 1: the process dies right after the evidence was written and before ANY application state exists
     let o = net.stage_raw(VICTIM, 0, 1, Some("after-evidence"));
@@ -302,8 +357,9 @@ fn live_v3_a_crash_between_the_staging_writes_never_lets_the_node_sign_on_a_half
     assert!(!st.success());
     assert!(net.log_tail(VICTIM).contains("below the seeded checkpoint"), "refused for the right reason: {}", net.log_tail(VICTIM));
     assert!(net.status(VICTIM).is_none(), "it never got as far as reporting a status, let alone signing");
-    let now = safety(&vd);
-    assert!(now == signing_state, "the signing-safety state is byte-for-byte unchanged: the refused node signed nothing; differing safety files: {:?}, counter value/digest changed: {}", diff_names(&now.0, &signing_state.0), now.1 != signing_state.1);
+    let now = safety_sig(&vd);
+    assert_no_signing("after the first refused start", &signing_state, &now);
+    signing_state = now; // from here the state is settled: any change at all would be a signature
 
     // ---- crash 2: the process dies after the application state was written to its temporary file and before it was renamed into place
     let o = net.stage_raw(VICTIM, 0, 1, Some("after-app-tmp"));
@@ -314,7 +370,8 @@ fn live_v3_a_crash_between_the_staging_writes_never_lets_the_node_sign_on_a_half
     let st = net.wait_exit(VICTIM, 60).expect("must refuse to run");
     assert!(!st.success());
     assert!(net.log_tail(VICTIM).contains("below the seeded checkpoint"), "{}", net.log_tail(VICTIM));
-    assert!(safety(&vd) == signing_state, "still nothing signed (safety files and counter value/digest unchanged)");
+    let now = safety_sig(&vd);
+    assert_no_signing("after the second refused start", &signing_state, &now);
 
     // ---- crash 3: the process dies right after the rename: a COMPLETE generation (evidence + matching application state) - the node recovers from it
     let o = net.stage_raw(VICTIM, 0, 1, Some("after-app-rename"));
