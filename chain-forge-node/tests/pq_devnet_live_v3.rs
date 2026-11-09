@@ -186,23 +186,26 @@ fn safety_sig(vd: &Path) -> SafetySig {
 /// The only thing opening the store may legitimately do is finish a commit that a kill interrupted - the record is durable but the counter has not advanced
 /// (`record_counter == counter_value + 1`; "nothing from this record was ever returned") - and then the counter must be EXACTLY at that record's digest, one higher.
 /// Otherwise the counter must be exactly where it was.
-fn assert_no_signing(label: &str, before: &SafetySig, after: &SafetySig) {
-    assert!(before.files == after.files, "{label}: the signing-safety files changed (a new signature?): {:?}", diff_names(&before.files, &after.files));
+fn check_no_signing(before: &SafetySig, after: &SafetySig) -> Result<(), String> {
+    if before.files != after.files { return Err(format!("the signing-safety files changed (a new signature?): {:?}", diff_names(&before.files, &after.files))); }
     let interrupted = before.record_counter == before.counter_value + 1;
     let want = if interrupted { (before.counter_value + 1, before.record_digest) } else { (before.counter_value, before.counter_digest) };
-    assert!((after.counter_value, after.counter_digest) == want,
-        "{label}: the counter is at {} but the exact model wants {} (an interrupted commit was {}pending before: record counter {}, counter {})",
-        after.counter_value, want.0, if interrupted { "" } else { "NOT " }, before.record_counter, before.counter_value);
+    if (after.counter_value, after.counter_digest) != want {
+        return Err(format!("the counter is at {} but the exact model wants {} (an interrupted commit was {}pending before: record counter {}, counter {})",
+            after.counter_value, want.0, if interrupted { "" } else { "NOT " }, before.record_counter, before.counter_value));
+    }
+    Ok(())
 }
+fn assert_no_signing(label: &str, before: &SafetySig, after: &SafetySig) { if let Err(e) = check_no_signing(before, after) { panic!("{label}: {e}"); } }
 
 #[test]
 fn the_no_signing_model_accepts_the_completion_of_an_interrupted_commit_and_nothing_else() {
     let sig = |files: &[(&str, &[u8])], cv: u64, cd: u8, rc: u64, rd: u8| SafetySig { files: files.iter().map(|(k, v)| (k.to_string(), v.to_vec())).collect(), counter_value: cv, counter_digest: [cd; 32], record_counter: rc, record_digest: [rd; 32] };
     let quiet = sig(&[("state", b"a")], 7, 1, 7, 1);
-    assert_no_signing("unchanged", &quiet, &quiet.clone());
+    assert_eq!(check_no_signing(&quiet, &quiet.clone()), Ok(()));
     // a kill landed between "record durable" and "counter advanced": opening finishes it - exactly one step, to the record's digest
     let window = sig(&[("state", b"a")], 7, 1, 8, 2);
-    assert_no_signing("interrupted commit completed", &window, &sig(&[("state", b"a")], 8, 2, 8, 2));
+    assert_eq!(check_no_signing(&window, &sig(&[("state", b"a")], 8, 2, 8, 2)), Ok(()), "an interrupted commit completed by opening the store is accepted");
     // (what, before, after): each of these must be REJECTED
     let bad = [
         ("a new signature rewrote the record", quiet.clone(), sig(&[("state", b"b")], 8, 3, 8, 3)),
@@ -212,7 +215,7 @@ fn the_no_signing_model_accepts_the_completion_of_an_interrupted_commit_and_noth
         ("an interrupted commit was left pending", window.clone(), window.clone()),
     ];
     for (what, before, after) in bad {
-        assert!(std::panic::catch_unwind(|| assert_no_signing(what, &before, &after)).is_err(), "the model must reject: {what}");
+        assert!(check_no_signing(&before, &after).is_err(), "the model must reject: {what}");
     }
 }
 
