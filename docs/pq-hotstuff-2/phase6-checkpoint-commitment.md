@@ -80,3 +80,11 @@ Scope: reference binding, R6 and repeats, root-log recovery and execution lag, p
 - The root log has integrity checksums, not authentication, and sits in the same trust domain as the safety store. A seeded node has no roots below its checkpoint: it must record the verified checkpoint root and rely on `final_refs` for older repeats, and the `Recovering` gate (not implemented here) must hold signing until that state exists.
 - The deferred set is in memory only; a restart drops it, which costs a vote, not safety.
 - Leaders are chosen by count, not power, so there is still no lower bound on checkpoint frequency.
+
+## Windows results for the review fixes (supplied by the owner; MINGW64, `C:\Dev\qattice-main-wt`) — recorded separately
+`git rev-parse HEAD` printed **`aaad7b2268d0ffa17e29bee8ff276b22b6e33cd5`** after `git pull --ff-only` (an earlier paste at `73e4a69`, which had not yet been fast-forwarded, was not counted). Release mode:
+| Run | Result | Time |
+|---|---|---|
+| real ML-DSA-65 `pq_hotstuff_engine_fips204`, default seeds | 140 passed, 0 failed, 2 ignored | 213.79 s |
+| doubles `pq_hotstuff_engine`, default seeds | 140 passed, 0 failed, 2 ignored | 507.66 s |
+This validates the targeted tests at `aaad7b2` only. Profile v3 remains off and unwired, so the live devnet test does not exercise it; a live profile-v3 recovery test is still required before the path is enabled.
