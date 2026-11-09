@@ -1,0 +1,42 @@
+# PQ-HotStuff-2 — live profile-v3 recovery over TCP and separate processes (devnet only)
+
+**Status: DRAFT, stacked on #144. DEVNET ONLY.** Profile v3 is **off by default** (a v3 genesis exists only if `assemble` is given `--checkpoint-interval`). **Network snapshot installation is disabled; pruning is not implemented.** Dynamic membership is disabled (PO-4), payloads are explicitly devnet-interim (U5), Tendermint is unchanged, production keys and counter stay gated (#109). The existing v2 devnet files, the v2 live test and the `tests/devnet` fixtures are unchanged. **Not Windows-confirmed.**
+
+## Labels that must not be dropped
+* **Interim-state recovery, not Qattice application recovery.** The application is the devnet-interim hash chain of opaque payloads. Transactions, accounts, balances, a snapshot format and a canonical state root do not exist yet (blocked on U5).
+* **Operator-staged, offline snapshots, not automated network installation.** `stage-snapshot` is run by hand on a stopped node from a donor's files. Nothing sends, requests or installs a snapshot over the network.
+* **Process death, not power loss.** Crashes are SIGKILL/TerminateProcess and an injected `exit` between staging writes. fsync reordering and power-loss behaviour are not tested.
+
+## What was added (all behind the existing `pq-devnet` feature)
+* `DevnetConfig.checkpoint` (optional; a v2 config serializes without it, so its bytes and genesis hash are unchanged). Profile v3 and checkpoint parameters must come together; anything else is refused. The whole file is hashed into the genesis hash, so the parameters are bound to it.
+* `pq-devnet-node assemble --checkpoint-interval K --checkpoint-max-age A [--checkpoint-margin M]`.
+* `pq-devnet-node stage-snapshot --config F --donor DIR --dir DIR [--back N]` (offline). It reads an **unseeded** donor's block store, authenticates the `N`-th newest checkpoint reference against the full header chain, replays the donor's finalized payloads through the interim application, requires the resulting state digest to equal the attested root, and then writes. Refuses a target held by a running node (the data-directory lock). **Order: staleness is checked before anything is created or written; the application state is built in a scratch directory outside the target; then the evidence is written, then the application state (write, sync, rename, sync the directory).** A crash after the evidence leaves new evidence over an older executor, which the node refuses to start with; a crash after the rename leaves a complete generation. Redoing a staging is allowed (the same checkpoint with fresher evidence replaces the record atomically; a different block at the same height is still a conflict).
+* `run --exec-log FILE` (heights applied, appended after the effects are durable), extra status fields (`recovering`, `base`, safety floors), and a **runtime monitor**: the node stops itself if the signing counter moves while `Recovering`, or if it SENDS a vote, timeout or proposal it authored while `Recovering` (this catches re-sends, which commit no new signature).
+* A test-only crash hook in the staging tool (`PQDEV_TEST_STAGE_CRASH`, devnet binary only).
+
+## The live tests (`tests/pq_devnet_live_v3.rs`)
+Four OS processes, real FIPS 204 ML-DSA-65 keys generated on the machine, a fresh v3 genesis, local TCP, the real signing-safety store with the non-production file counter.
+1. **`live_v3_four_processes_snapshot_recovery_kill_restart_second_install_and_agreement_without_duplicate_execution`.** The victim loses its blocks and application state (its signing-safety state survives) → install A staged → started; the first status shows the base rebuilt from the re-authenticated evidence and floors ≥ their values before death → recovers and catches up by block sync → killed and restarted (same base, no rewind, committed history survives) → stopped; the network advances; install B is staged **strictly above everything the victim ever executed** → recovers → killed and restarted. Asserted at each step: committed block ids and execution roots agree across all four nodes; no node fatal; no node signed or sent anything signed while recovering; the execution log has no duplicates and starts exactly above the checkpoint. A config with other checkpoint parameters cannot authenticate the chain; a stale staging attempt is refused and the **entire target tree is byte-for-byte unchanged**.
+2. **`live_v3_a_crash_between_the_staging_writes_...`.** The staging tool is killed after the evidence write, after the temporary application-state write, and after the rename. In the first two the node **refuses to start** (`below the seeded checkpoint`), writes no status, and the signing-safety files and the counter's value and digest are unchanged (the counter file's session token is bumped by merely opening it, and is deliberately excluded); in the third it recovers from a consistent generation. A stale staging attempt then changes nothing.
+
+An earlier first version of the second install replaced the victim's state with an **older** checkpoint (the victim had kept running); that was caught in review of the timings and the scenario was restructured to the one above.
+
+## Evidence (Linux sandbox; NOT a milestone confirmation)
+Code commit `00e17a958af5c7a9013dad65c4384058a9b1083f`; later commits are documentation only (verified at the PR head by an empty `git diff` of the code directories).
+* **Stability, both live tests per run:** run 1 passed (150.27 s), run 2 passed (149.93 s), run 3 passed (149.45 s). A first attempt at run 3 was interrupted when the background job was terminated externally; it produced no result and is not counted. Three timing-based passes support reliability; they do not prove it.
+* **Final-commit regressions, all passing:** real ML-DSA-65 engine suite 167/167 and doubles engine suite 167/167 (2 ignored each); foundation 30; safety 76 + 11; wire 24; consensus lib 98 under three feature sets; core 74; p2p 21; node unit tests 5/5 (including a new test that v3 is off unless a consistent checkpoint block is present and that a v2 config serializes without one); the **v2** TCP devnet test 1/1 (unchanged; regression evidence only).
+* **Process-level mutation of the signing gates:** see `phase9-live-v3-mutation-record.md`. 6 mutants: 4 caught (vote gate, timeout gate, re-send-of-a-stored-vote gate, staging order), **2 survived** (proposal gate, re-send-of-a-stored-timeout gate) with reasons recorded there; all five signing gates are mutation-caught deterministically in-process (`phase7-mutation-record.md`).
+
+## Demonstrated vs still missing
+| Demonstrated | Still missing |
+|---|---|
+| Re-authenticated evidence and checkpoint-based restart (in-process, Windows-confirmed at `e610932`; over processes, Linux only) | Automated network snapshot installation |
+| Four real processes over TCP recovering from an operator-staged snapshot, a second install, and process kills | Windows confirmation of the process-level test; a Windows crash model beyond process death |
+| No duplicate execution in the tested scenarios, on the **devnet-interim** application | Real Qattice application snapshot integration (U5, snapshot format, canonical state root) |
+| A crash between staging writes either recovers a consistent generation or the node refuses to start and signs nothing | Power-loss / fsync-reordering testing |
+| Base-aware storage and explicit sync advice | Pruning and bounded evidence growth (evidence still starts at genesis) |
+
+## Known limits of this PR's own checks
+* The proposal gate and the re-send-of-a-stored-timeout gate are not exercised by the process-level test: a proposal is attempted only if the victim leads its post-install round (not controlled), and a stored timeout is re-sent only if the high QC matches the one it was signed on (not arrangeable over processes). Open improvement: report the leader slot in the status and re-stage until the victim leads.
+* The execution log can lose a line (never repeat one) if the process dies between the durable application step and the log append; the test allows at most the kills' worth of gaps and no duplicates.
+* The donor's files are read while its node runs; the tool retries when it sees a half-written chain.
