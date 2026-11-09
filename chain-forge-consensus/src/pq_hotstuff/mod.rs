@@ -34,3 +34,5 @@ pub mod driver;
 pub mod header;
 #[cfg(feature = "pq-hotstuff")]
 pub mod recovery;
+#[cfg(feature = "pq-hotstuff")]
+pub mod checkpoint;

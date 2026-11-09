@@ -40,6 +40,9 @@ pub struct DriverConfig {
     pub park_ttl: u64,
     /// How many recently executed blocks to remember for status reporting.
     pub recent: usize,
+    /// `None`: a finalized block is executed immediately, inline. `Some(n)`: finalized blocks are queued and at most `n` are executed per `tick` (`Some(0)` pauses
+    /// execution entirely). This models execution lag; the executor's own durable cursor still decides what is replayed after a restart.
+    pub exec_per_tick: Option<usize>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -99,6 +102,7 @@ pub fn validate_config(e: &EngineConfig, d: &DriverConfig) -> Result<MessageLimi
 pub fn classify_engine_error(e: EngineError, store_latched: bool) -> Result<(), DriverError> {
     match e {
         EngineError::ConflictingCommit => Err(DriverError::Safety("a conflicting block would be committed".into())),
+        EngineError::Halted(m) => Err(DriverError::Safety(format!("signing is halted by a safety/execution-consistency alarm: {m}"))),
         EngineError::Sign(_) if store_latched => Err(DriverError::Safety("the signing-safety store is latched; this validator will not sign".into())),
         _ => Ok(()),
     }
@@ -128,6 +132,8 @@ pub struct Driver<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: Consen
     parked: VecDeque<Parked>,
     recent: VecDeque<ExecCursor>,
     stats: Stats,
+    pending_exec: VecDeque<Committed>,
+    interval: Option<u64>,
 }
 
 impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, B: BlockFiles, X: Executor> Driver<S, C, G, V, B, X> {
@@ -135,6 +141,10 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
     pub fn start(dc: DriverConfig, mut engine: Engine<S, C, G, V>, mut store: BlockStore<B>, exec: X, payload: PayloadSource, now: u64) -> Result<(Self, Vec<Outbound>), DriverError> {
         let lim = validate_config(engine.config(), &dc)?;
         let loaded = store.load()?;
+        // checkpoint roots (profile v3) are loaded BEFORE recovery so that references in recovered blocks are judged against them; damaged or missing records are
+        // left out (a missing root only costs a vote or a deferral, never a guess)
+        let interval = engine.config().checkpoint.filter(|_| super::checkpoint::is_v3(&engine.config().protocol_profile)).map(|c| c.params.interval);
+        if let Some(k) = interval { for (h, r) in store.load_roots(k)?.roots { engine.record_root(h, r)?; } }
         engine.restore(loaded.blocks, &loaded.committed, loaded.high_qc, loaded.high_tc)?;
         // commit markers a crash lost are written again (the engine re-derived them from the certificates it recovered)
         for c in engine.committed_after(loaded.committed.len() as u64) { store.put_commit(c.height, &c.id)?; }
@@ -150,19 +160,27 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
         }
         let mut recent = VecDeque::new();
         if cur.height > 0 { recent.push_back(cur); }
+        // the root of the executor's own checkpoint is always derivable from its cursor, so a crash between executing a checkpoint block and logging its root loses nothing
+        if let Some(k) = interval {
+            engine.set_executed(cur.height);
+            if cur.height > 0 && cur.height % k == 0 { store.put_root(k, cur.height, &cur.state_digest)?; engine.record_root(cur.height, cur.state_digest)?; }
+        }
         let cfg = engine.config();
         let (profile, chain, set, me) = (cfg.protocol_profile.clone(), cfg.chain_id.clone(), cfg.set.clone(), cfg.my_index);
         let n = set.len();
         let mut d = Driver {
             pace: Pacemaker::new(dc.pace).map_err(|e| DriverError::Config(e.to_string()))?, sync: SyncClient::new(dc.sync_ttl, dc.sync_outstanding),
             round_started: now, last_round: engine.round(), last_hqc: engine.high_qc().round(), rr: me,
-            dc, lim, engine, store, exec, payload, profile, chain, set, me, n, now, parked: VecDeque::new(), recent, stats: Stats::default(),
+            dc, lim, engine, store, exec, payload, profile, chain, set, me, n, now, parked: VecDeque::new(), recent, stats: Stats::default(), pending_exec: VecDeque::new(), interval,
         };
         // the executor catches up from ITS durable cursor, exactly once
-        for c in d.engine.committed_after(cur.height) { d.execute(c)?; }
+        let mut replay_outs = vec![];
+        for c in d.engine.committed_after(cur.height) { replay_outs.extend(d.execute(c)?); }
+        let replay_sends = d.route(replay_outs)?;
         let mut outs = d.engine.resend_last_vote().unwrap_or_default();
         outs.extend(d.engine.resend_last_timeout().unwrap_or_default());
-        let first = d.route(outs)?;
+        let mut first = replay_sends;
+        first.extend(d.route(outs)?);
         Ok((d, first))
     }
 
@@ -179,28 +197,46 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
         Status { round: self.engine.round(), high_qc_round: self.engine.high_qc().round(), committed_height: h, committed_tip: tip, exec: self.exec.cursor(), stats: self.stats, recent: self.recent.iter().copied().collect() }
     }
 
-    fn execute(&mut self, c: Committed) -> Result<(), DriverError> {
+    /// Execute one finalized block. At a checkpoint height the new root is logged durably (after the executor made the state durable: a crash in between is
+    /// reconciled from the cursor at start) and handed to the engine, which may now vote for proposals whose vote it had deferred.
+    fn execute(&mut self, c: Committed) -> Result<Vec<Output>, DriverError> {
         let cur = self.exec.apply(&c)?;
         self.recent.push_back(cur);
         while self.recent.len() > self.dc.recent { self.recent.pop_front(); }
-        Ok(())
+        let Some(k) = self.interval else { return Ok(vec![]) };
+        if cur.height % k == 0 { self.store.put_root(k, cur.height, &cur.state_digest)?; self.engine.record_root(cur.height, cur.state_digest)?; }
+        Ok(self.engine.on_executed(cur.height)?)
     }
+
+    /// Change how finalized blocks are executed (see [`DriverConfig::exec_per_tick`]); switching to inline drains the queue first.
+    pub fn set_exec_budget(&mut self, budget: Option<usize>) -> Result<Vec<Outbound>, DriverError> {
+        self.dc.exec_per_tick = budget;
+        if budget.is_some() { return Ok(vec![]); }
+        let mut outs = vec![];
+        while let Some(c) = self.pending_exec.pop_front() { outs.extend(self.execute(c)?); }
+        self.route(outs)
+    }
+    /// Finalized blocks waiting for the executor.
+    pub fn exec_backlog(&self) -> usize { self.pending_exec.len() }
 
     /// Apply outputs in order. Durable requests first, then execution, then sends.
     fn route(&mut self, outs: Vec<Output>) -> Result<Vec<Outbound>, DriverError> {
         let mut out = vec![];
+        let mut follow_up: Vec<Output> = vec![];
         for o in outs {
             match o {
                 Output::PersistBlock(_) | Output::PersistCommit { .. } | Output::PersistHighQc(_) | Output::PersistHighTc(_) => {
                     let idc = IdCtx { protocol_profile: &self.profile, chain_id: &self.chain, set: &self.set };
                     self.store.apply(&o, &|b| block_id_of(b, &idc).ok())?;
                 }
-                Output::Commit(c) => self.execute(c)?,
+                Output::Commit(c) => { if self.dc.exec_per_tick.is_some() { self.pending_exec.push_back(c); } else { follow_up.extend(self.execute(c)?); } }
                 Output::Broadcast(m) => out.push(Outbound { to: None, bytes: net::encode(&NetMsg::Consensus(m)) }),
                 Output::Send { to, msg } => { if to != self.me && to < self.n { out.push(Outbound { to: Some(to), bytes: net::encode(&NetMsg::Consensus(msg)) }); } }
                 Output::EnteredRound { .. } => {}
             }
         }
+        // votes the engine had deferred until the executor caught up (and their persistence) come back as ordinary outputs
+        if !follow_up.is_empty() { out.extend(self.route(follow_up)?); }
         Ok(out)
     }
 
@@ -301,6 +337,11 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
         let (r, hq) = (self.engine.round(), self.engine.high_qc().round());
         if hq > self.last_hqc { self.last_hqc = hq; self.pace.on_progress(); }
         if r != self.last_round { self.last_round = r; self.round_started = now; }
+        if let Some(budget) = self.dc.exec_per_tick {
+            let mut outs = vec![];
+            for _ in 0..budget { let Some(c) = self.pending_exec.pop_front() else { break }; outs.extend(self.execute(c)?); }
+            out.extend(self.route(outs)?);
+        }
         out.extend(self.retry_parked()?);
         if self.engine.is_leader() && now.saturating_sub(self.round_started) >= self.dc.min_propose_gap {
             let p = (self.payload)(self.engine.round(), self.me);

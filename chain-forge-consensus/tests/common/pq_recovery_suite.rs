@@ -114,7 +114,7 @@ fn invalid_recovery_fields_are_rejected_and_hostile_lengths_allocate_nothing_lar
     let mut hostile: Vec<Vec<u8>> = vec![];
     hostile.push(hdr_resp(0, &u32::MAX.to_be_bytes()));
     hostile.push(hdr_resp(0, &[&64u32.to_be_bytes()[..], &u32::MAX.to_be_bytes()].concat()));
-    hostile.push(hdr_resp(0, &[&1u32.to_be_bytes()[..], &(rl().header_max().unwrap() as u32).to_be_bytes()].concat()));
+    hostile.push(hdr_resp(0, &[&1u32.to_be_bytes()[..], &(rl().header_max_v3().unwrap() as u32).to_be_bytes()].concat()));
     hostile.push(hdr_resp(0, &[&1u32.to_be_bytes()[..], &0u32.to_be_bytes()].concat()));
     hostile.push(man(1, 100, 64, 65_536, 0));
     hostile.push({ let mut b = rid.to_vec(); b.push(0); b.extend_from_slice(&[3u8; 32]); b.extend_from_slice(&0u32.to_be_bytes()); b.extend_from_slice(&262_144u32.to_be_bytes()); raw(12, &b) });
@@ -125,7 +125,7 @@ fn invalid_recovery_fields_are_rejected_and_hostile_lengths_allocate_nothing_lar
         assert!(alloc_probe::peak() < 64 * 1024, "decoding a {}-byte hostile message allocated {} bytes at once", h.len(), alloc_probe::peak());
     }
     // a header length just above the per-header maximum is refused as TOO LARGE (the bound, not a parse failure), even with all its bytes present
-    let hmax = lim.header_max().unwrap() as usize;
+    let hmax = lim.header_max_v3().unwrap() as usize;
     for over in [hmax + 1, hmax + 4_096] {
         let body = [&1u32.to_be_bytes()[..], &(over as u32).to_be_bytes(), &vec![0u8; over]].concat();
         assert!(matches!(rcodec::decode(&hdr_resp(0, &body), &lim), Err(CodecError::TooLarge { len, max }) if len == over as u64 && max == hmax as u64), "length {over}");
@@ -165,14 +165,15 @@ fn recovery_message_sizes_equal_the_formulas_for_the_largest_message_of_each_kin
         // the largest header: a TC-bearing header at the maximum certificate size (every validator signing), plus an additional QC in the response
         let qc = synthetic_qc(n, n);
         let tc = synthetic_tc(n, n, Cert::Qc(synthetic_qc(n, n)));
-        let h = PayloadFreeBlock { epoch: 0, round: 10, height: 5, parent_id: [2; 32], qc: Cert::Qc(qc.clone()), tc: Some(tc), payload_hash: [0; 32], proposer: 0, signature: vec![9u8; MLDSA65_SIGNATURE_LEN] };
+        let h = PayloadFreeBlock { checkpoint: None, epoch: 0, round: 10, height: 5, parent_id: [2; 32], qc: Cert::Qc(qc.clone()), tc: Some(tc), payload_hash: [0; 32], proposer: 0, signature: vec![9u8; MLDSA65_SIGNATURE_LEN] };
         assert_eq!(encode_header(&h).len() as u64, hdr_max, "n = {n}: header");
         let m = RecoveryMsg::HeaderResp { request_id: 1, after: [0; 32], body: HeaderBody::Ok { headers: vec![h], final_qc: Some(Cert::Qc(qc)), tip_height: 9 } };
         let e = rcodec::encode(&m).unwrap();
         let min = 12 + 8 + 1 + 32 + 4 + (4 + hdr_max) + 1 + (4 + qc_max) + 8;
         assert_eq!(e.len() as u64, min, "n = {n}: header response (one TC-bearing header + an extra QC) equals HDR_RESP_MIN = HDR_MAX + QC_MAX + 74");
         assert_eq!(min, hdr_max + qc_max + 74);
-        assert_eq!(lim.max_len(rcodec::KIND_HEADER_RESP), Some(min), "max_len agrees");
+        // the decoder's bound allows each header the 73-byte checkpoint extension a profile-v3 header may carry
+        assert_eq!(lim.max_len(rcodec::KIND_HEADER_RESP), Some(min + 73), "max_len agrees (plus the extension allowance)");
         assert_eq!(rcodec::decode(&e, &lim).unwrap(), m, "n = {n}: the largest legal response decodes");
         match n { 4 => assert_eq!(min, 57_056), 31 => assert_eq!(min, 415_304), 100 => assert_eq!(min, 1_330_832), _ => { assert_eq!(min, 13_272_480); assert!(min > net::MAX_MESSAGE_SIZE, "1,000 validators need more than 8 MiB"); } }
     }
@@ -222,7 +223,7 @@ fn snapshot_ids_are_content_addressed_and_every_manifest_constraint_is_enforced(
     assert!(bad(&|x| x.total_bytes = 0));
     assert!(bad(&|x| x.total_bytes = (256 << 20) + 1));
     assert_eq!(CheckpointRef::decode(&c.encode()).unwrap(), c);
-    assert!(CheckpointRef::decode(&c.encode()[..71]).is_err());
+    assert!(CheckpointRef::decode(&c.encode()[..71]).is_none());
 }
 
 // ---- C, B, O: bounded request handling

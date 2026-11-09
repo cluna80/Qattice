@@ -19,6 +19,7 @@ const K_BLOCK: u8 = b'B';
 const K_COMMIT: u8 = b'C';
 const K_HQC: u8 = b'Q';
 const K_HTC: u8 = b'T';
+const K_ROOT: u8 = b'O';
 
 /// A [`Storage`] that can also list its files (needed to find the blocks and commit markers on restart).
 pub trait BlockFiles: Storage {
@@ -37,6 +38,10 @@ pub enum StoreError {
     CommittedMarkerDamaged(u64),
     #[error("committed history has a gap: no marker for height {0}")]
     CommittedHistoryGap(u64),
+    #[error("a different checkpoint root is already stored for height {0}")]
+    RootConflict(u64),
+    #[error("a stored checkpoint root was written for interval {found}, this chain uses {expected}")]
+    RootIntervalMismatch { expected: u64, found: u64 },
 }
 impl From<StorageError> for StoreError { fn from(e: StorageError) -> Self { StoreError::Storage(e.0) } }
 
@@ -52,6 +57,16 @@ pub struct Loaded {
     pub damaged_blocks: usize,
     /// `high_qc` / `high_tc` files that were damaged and ignored.
     pub damaged_hints: usize,
+}
+
+/// What the checkpoint-root log holds (see [`BlockStore::load_roots`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RootLog {
+    pub roots: std::collections::BTreeMap<u64, [u8; 32]>,
+    /// Heights whose record is damaged or malformed (ignored, not guessed).
+    pub damaged: Vec<u64>,
+    /// Multiples of the interval missing between the first and the last stored height.
+    pub gaps: Vec<u64>,
 }
 
 pub struct BlockStore<S: BlockFiles> { s: S }
@@ -97,6 +112,45 @@ impl<S: BlockFiles> BlockStore<S> {
         body.extend_from_slice(id);
         self.put(&format!("cmt-{height:016x}"), K_COMMIT, &body)
     }
+    /// The durable checkpoint-root log: one sealed record per executed multiple of the interval, `root-<height>`, never pruned. Idempotent for an identical root;
+    /// a different root for a height already stored is refused (`RootConflict`); a damaged record is overwritten.
+    pub fn put_root(&mut self, interval: u64, height: u64, root: &[u8; 32]) -> Result<(), StoreError> {
+        let name = format!("root-{height:020}");
+        if let Some(bytes) = self.s.read(&name)? {
+            if let Some(b) = unseal(&bytes, K_ROOT) {
+                if b.len() == 48 && b[..8] == height.to_be_bytes() && b[16..] == root[..] { return Ok(()); }
+                if b.len() == 48 && b[..8] == height.to_be_bytes() { return Err(StoreError::RootConflict(height)); }
+            }
+        }
+        let mut body = height.to_be_bytes().to_vec();
+        body.extend_from_slice(&interval.to_be_bytes());
+        body.extend_from_slice(root);
+        self.put(&name, K_ROOT, &body)
+    }
+
+    /// Read the root log. Damaged records, records whose height is not a multiple of `interval`, and gaps between the first and the last stored height are REPORTED,
+    /// never repaired or guessed. A record written for another interval is an error.
+    pub fn load_roots(&self, interval: u64) -> Result<RootLog, StoreError> {
+        let mut log = RootLog::default();
+        for name in self.s.names()? {
+            let Some(h) = name.strip_prefix("root-") else { continue };
+            if name.ends_with(".tmp") { continue; }
+            let Ok(height) = h.parse::<u64>() else { continue };
+            let Some(bytes) = self.s.read(&name)? else { continue };
+            let Some(b) = unseal(&bytes, K_ROOT).filter(|b| b.len() == 48 && b[..8] == height.to_be_bytes()) else { log.damaged.push(height); continue };
+            let found = u64::from_be_bytes(b[8..16].try_into().unwrap());
+            if found != interval { return Err(StoreError::RootIntervalMismatch { expected: interval, found }); }
+            if interval == 0 || height % interval != 0 { log.damaged.push(height); continue; }
+            log.roots.insert(height, b[16..].try_into().unwrap());
+        }
+        log.damaged.sort();
+        if let (Some((&first, _)), Some((&last, _))) = (log.roots.iter().next(), log.roots.iter().next_back()) {
+            let mut h = first;
+            while h < last { h += interval; if !log.roots.contains_key(&h) { log.gaps.push(h); } }
+        }
+        Ok(log)
+    }
+
     pub fn put_high_qc(&mut self, c: &Cert) -> Result<(), StoreError> { self.put("hqc", K_HQC, &c.encode()) }
     pub fn put_high_tc(&mut self, t: &Tc) -> Result<(), StoreError> { self.put("htc", K_HTC, &t.encode()) }
 

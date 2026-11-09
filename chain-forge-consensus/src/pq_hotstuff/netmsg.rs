@@ -8,6 +8,7 @@
 //! the transport path refuses to start until the owner has set `PqLimits::max_message_bytes` at or above the derived minimum.
 use super::certs::{Block, Cert, Tc, ALG, MAX_CERT_VALIDATORS};
 use super::engine::{Msg, TimeoutMsg, VoteMsg};
+use super::checkpoint::CheckpointRef;
 use super::header::PayloadFreeBlock;
 use super::limits::{qc_max_bytes, tc_max_bytes, PqLimits};
 use super::sync::{SyncRequest, SyncResponse};
@@ -157,6 +158,7 @@ fn put_block(o: &mut Vec<u8>, b: &Block) {
     put_bytes(o, &b.payload);
     o.extend_from_slice(&(b.proposer as u32).to_be_bytes());
     put_bytes(o, &b.signature);
+    if let Some(r) = &b.checkpoint { o.push(1); o.extend_from_slice(&r.encode()); }
 }
 
 fn put_header(o: &mut Vec<u8>, h: &PayloadFreeBlock) {
@@ -169,6 +171,7 @@ fn put_header(o: &mut Vec<u8>, h: &PayloadFreeBlock) {
     o.extend_from_slice(&h.payload_hash);
     o.extend_from_slice(&(h.proposer as u32).to_be_bytes());
     put_bytes(o, &h.signature);
+    if let Some(r) = &h.checkpoint { o.push(1); o.extend_from_slice(&r.encode()); }
 }
 
 /// DRAFT canonical encoding of a payload-free header: the block layout with the length-prefixed payload replaced by its 32-byte hash. Not part of
@@ -188,8 +191,9 @@ pub fn decode_header(b: &[u8]) -> Result<PayloadFreeBlock, NetError> {
     let proposer = r.u32()? as usize;
     let signature = r.bytes()?.to_vec();
     if signature.len() != MLDSA65_SIGNATURE_LEN { return Err(NetError::Malformed("signature length")); }
+    let checkpoint = r.checkpoint_ext()?;
     if r.left() != 0 { return Err(NetError::Malformed("trailing bytes")); }
-    Ok(PayloadFreeBlock { epoch, round, height, parent_id, qc, tc, payload_hash, proposer, signature })
+    Ok(PayloadFreeBlock { epoch, round, height, parent_id, qc, tc, payload_hash, proposer, signature, checkpoint })
 }
 
 /// The canonical encoding of a block (used by the network envelope and by the block store).
@@ -245,6 +249,12 @@ impl<'a> Rd<'a> {
     fn h32(&mut self) -> Result<[u8; 32], NetError> { Ok(self.take(32)?.try_into().unwrap()) }
     /// A `u32` length followed by that many bytes; the length is checked against the remaining input before anything is taken.
     fn bytes(&mut self) -> Result<&'a [u8], NetError> { let n = self.u32()? as usize; self.take(n) }
+    /// The optional trailing checkpoint extension: nothing (the v2 encoding), or `0x01 || reference`. Anything else is malformed.
+    fn checkpoint_ext(&mut self) -> Result<Option<CheckpointRef>, NetError> {
+        if self.left() == 0 { return Ok(None); }
+        if self.u8()? != 1 { return Err(NetError::Malformed("checkpoint extension flag")); }
+        CheckpointRef::decode(self.take(72)?).map(Some).ok_or(NetError::Malformed("checkpoint reference"))
+    }
     fn block(&mut self) -> Result<Block, NetError> {
         let (epoch, round, height, parent_id) = (self.u64()?, self.u64()?, self.u64()?, self.h32()?);
         let qc = Cert::decode(self.bytes()?).map_err(|_| NetError::Malformed("parent certificate"))?;
@@ -257,7 +267,8 @@ impl<'a> Rd<'a> {
         let proposer = self.u32()? as usize;
         let signature = self.bytes()?.to_vec();
         if signature.len() != MLDSA65_SIGNATURE_LEN { return Err(NetError::Malformed("signature length")); }
-        Ok(Block { epoch, round, height, parent_id, qc, tc, payload, proposer, signature })
+        let checkpoint = self.checkpoint_ext()?;
+        Ok(Block { epoch, round, height, parent_id, qc, tc, payload, proposer, signature, checkpoint })
     }
 }
 
