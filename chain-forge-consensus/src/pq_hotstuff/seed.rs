@@ -70,6 +70,8 @@ pub enum SeedError {
     HighQcNotOnChain,
     #[error("parameters: {0}")]
     Params(String),
+    #[error("seed evidence is malformed: {0}")]
+    Evidence(&'static str),
     #[error("the install record does not match the authenticated checkpoint: {0}")]
     RecordMismatch(&'static str),
 }
@@ -120,4 +122,78 @@ pub fn check_install_record(rec: &super::recovery::records::InstallRecord, seed:
         return Err(SeedError::RecordMismatch("checkpoint reference"));
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------
+// Persisted seed evidence. Stored by the block store, RE-AUTHENTICATED at every start by `Engine::authenticate_evidence` against the node's own genesis, profile,
+// validator set and checkpoint parameters. The checksum below detects damage only; it authenticates nothing.
+// ---------------------------------------------------------------------------------------------------------------------------------------
+use super::netmsg::{decode_header, encode_header};
+use sha3::{Digest, Sha3_256};
+
+const EV_TAG: &[u8] = b"CFH1|seed-evidence|";
+const EV_VERSION: u16 = 1;
+/// Upper bound on the headers one piece of evidence may carry (decode refuses more; evidence from genesis grows with the chain until anchored evidence exists).
+pub const MAX_EVIDENCE_HEADERS: usize = 1 << 20;
+
+/// Everything `authenticate_checkpoint` consumed, so that a restart can authenticate the same checkpoint again from durable data. Evidence starts at genesis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeedEvidence {
+    pub headers: Vec<PayloadFreeBlock>,
+    pub final_qc: Option<Cert>,
+    pub cref: CheckpointRef,
+    pub high_qc: Cert,
+    pub high_tc: Option<Tc>,
+}
+
+fn put_blob(o: &mut Vec<u8>, b: &[u8]) { o.extend_from_slice(&(b.len() as u32).to_be_bytes()); o.extend_from_slice(b); }
+
+impl SeedEvidence {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut o = EV_TAG.to_vec();
+        o.extend_from_slice(&EV_VERSION.to_be_bytes());
+        o.extend_from_slice(&self.cref.height.to_be_bytes());
+        o.extend_from_slice(&self.cref.block_id);
+        o.extend_from_slice(&self.cref.state_root);
+        o.extend_from_slice(&(self.headers.len() as u32).to_be_bytes());
+        for h in &self.headers { put_blob(&mut o, &encode_header(h)); }
+        match &self.final_qc { Some(c) => { o.push(1); put_blob(&mut o, &c.encode()); } None => o.push(0) }
+        put_blob(&mut o, &self.high_qc.encode());
+        match &self.high_tc { Some(t) => { o.push(1); put_blob(&mut o, &t.encode()); } None => o.push(0) }
+        let sum = Sha3_256::digest(&o);
+        o.extend_from_slice(&sum);
+        o
+    }
+
+    /// Strict: wrong tag, version, checksum, length, trailing bytes or more than `max_headers` headers is an error. Allocation is bounded by the input length.
+    pub fn decode(b: &[u8], max_headers: usize) -> Result<Self, SeedError> {
+        let bad = SeedError::Evidence;
+        if b.len() < EV_TAG.len() + 2 + 72 + 4 + 32 { return Err(bad("too short")); }
+        let (body, sum) = b.split_at(b.len() - 32);
+        if Sha3_256::digest(body)[..] != *sum { return Err(bad("checksum")); }
+        let mut r = Cur { b: body, p: 0 };
+        if r.take(EV_TAG.len())? != EV_TAG { return Err(bad("tag")); }
+        if u16::from_be_bytes(r.take(2)?.try_into().unwrap()) != EV_VERSION { return Err(bad("version")); }
+        let height = u64::from_be_bytes(r.take(8)?.try_into().unwrap());
+        let cref = CheckpointRef { height, block_id: r.take(32)?.try_into().unwrap(), state_root: r.take(32)?.try_into().unwrap() };
+        let n = u32::from_be_bytes(r.take(4)?.try_into().unwrap()) as usize;
+        if n > max_headers.min(MAX_EVIDENCE_HEADERS) { return Err(bad("too many headers")); }
+        let mut headers = Vec::with_capacity(n.min(body.len() / 64));
+        for _ in 0..n { let blob = r.blob()?; headers.push(decode_header(blob).map_err(|_| bad("header"))?); }
+        let final_qc = match r.take(1)?[0] { 0 => None, 1 => Some(Cert::decode(r.blob()?).map_err(|_| bad("final certificate"))?), _ => return Err(bad("flag")) };
+        let high_qc = Cert::decode(r.blob()?).map_err(|_| bad("high certificate"))?;
+        let high_tc = match r.take(1)?[0] { 0 => None, 1 => Some(Tc::decode(r.blob()?).map_err(|_| bad("timeout certificate"))?), _ => return Err(bad("flag")) };
+        if r.p != body.len() { return Err(bad("trailing bytes")); }
+        Ok(SeedEvidence { headers, final_qc, cref, high_qc, high_tc })
+    }
+}
+
+struct Cur<'a> { b: &'a [u8], p: usize }
+impl<'a> Cur<'a> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8], SeedError> {
+        let end = self.p.checked_add(n).ok_or(SeedError::Evidence("length"))?;
+        let s = self.b.get(self.p..end).ok_or(SeedError::Evidence("truncated"))?;
+        self.p = end; Ok(s)
+    }
+    fn blob(&mut self) -> Result<&'a [u8], SeedError> { let n = u32::from_be_bytes(self.take(4)?.try_into().unwrap()) as usize; self.take(n) }
 }

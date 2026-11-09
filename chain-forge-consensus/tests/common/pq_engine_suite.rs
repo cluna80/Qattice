@@ -1423,6 +1423,7 @@ impl Sim {
                     if let Some(r) = resp { self.send(to, p.from, NetMsg::SyncResponse(r)); }
                 }
                 NetMsg::SyncResponse(resp) => self.apply_sync(to, p.from, resp),
+                NetMsg::SyncBelowBase(_) => {} // advice only; this simulation has no seeded nodes
                 NetMsg::Consensus(m) => {
                     if self.roles[to] == Role::Equivocator { self.byz_extras(to, &m); }
                     let r = self.nodes[to].as_mut().unwrap().on_message(m);

@@ -23,6 +23,8 @@ use super::netmsg::{self as net, MessageLimits, NetLimitError, NetMsg};
 use super::pacemaker::{Pacemaker, PacemakerConfig, PacemakerError};
 use super::safety::{ConsensusSigner, ConsensusVerifier, MonotonicCounter, Storage};
 use super::sync::{check_response, SyncClient, SyncRequest, SyncResponse};
+use super::engine::ServeSync;
+use super::seed::{SeedEvidence, MAX_EVIDENCE_HEADERS};
 use super::types::EpochSet;
 
 #[derive(Debug, Clone)]
@@ -61,6 +63,13 @@ pub enum DriverError {
     Diverged { height: u64 },
     #[error("SAFETY: {0}")]
     Safety(String),
+    /// Persisted seed evidence is missing its parts, damaged, for another chain/profile/validator set/parameters, or does not authenticate. The node does not run.
+    #[error("seed evidence refused: {0}")]
+    SeedEvidence(String),
+    #[error("the executor is at height {exec}, below the seeded checkpoint at {base}: the application state must be installed at the checkpoint first; refusing to run")]
+    ExecutorBehindBase { exec: u64, base: u64 },
+    #[error("the executor and the seeded checkpoint disagree: {0}; refusing to run")]
+    BaseMismatch(String),
 }
 
 /// Something to send: to one validator, or (`to == None`) to all the others.
@@ -68,7 +77,7 @@ pub enum DriverError {
 pub struct Outbound { pub to: Option<usize>, pub bytes: Vec<u8> }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Stats { pub malformed: u64, pub bad_sync: u64, pub sync_requests: u64, pub unsolicited_sync: u64, pub parked_dropped: u64 }
+pub struct Stats { pub malformed: u64, pub bad_sync: u64, pub sync_requests: u64, pub unsolicited_sync: u64, pub parked_dropped: u64, pub below_base_served: u64, pub below_base_advice: u64 }
 
 #[derive(Debug, Clone)]
 pub struct Status {
@@ -141,18 +150,34 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
     pub fn start(dc: DriverConfig, mut engine: Engine<S, C, G, V>, mut store: BlockStore<B>, exec: X, payload: PayloadSource, now: u64) -> Result<(Self, Vec<Outbound>), DriverError> {
         let lim = validate_config(engine.config(), &dc)?;
         let loaded = store.load()?;
+        // A stored seed (checkpoint-start) is RE-AUTHENTICATED from its evidence against this node's own genesis, profile, validator set and parameters before anything
+        // else is restored; damaged, mismatched or unauthentic evidence stops the node (it never runs unseeded on top of history it does not hold).
+        if let Some((h, id, bytes)) = store.load_seed_evidence()? {
+            let ev = SeedEvidence::decode(&bytes, MAX_EVIDENCE_HEADERS).map_err(|e| DriverError::SeedEvidence(e.to_string()))?;
+            let seed = engine.authenticate_evidence(&ev).map_err(|e| DriverError::SeedEvidence(e.to_string()))?;
+            if seed.base().height != h || seed.base().id != id || loaded.seeded_height != h { return Err(DriverError::SeedEvidence("the stored evidence does not describe the checkpoint its name and record claim".into())); }
+            engine.seed(seed.clone()).map_err(|e| DriverError::SeedEvidence(e.to_string()))?;
+        } else if loaded.seeded_height != 0 {
+            return Err(DriverError::SeedEvidence("the seed evidence is missing".into()));
+        }
         // checkpoint roots (profile v3) are loaded BEFORE recovery so that references in recovered blocks are judged against them; damaged or missing records are
         // left out (a missing root only costs a vote or a deferral, never a guess)
         let interval = engine.config().checkpoint.filter(|_| super::checkpoint::is_v3(&engine.config().protocol_profile)).map(|c| c.params.interval);
         if let Some(k) = interval { for (h, r) in store.load_roots(k)?.roots { engine.record_root(h, r)?; } }
         engine.restore(loaded.blocks, &loaded.committed, loaded.high_qc, loaded.high_tc)?;
         // commit markers a crash lost are written again (the engine re-derived them from the certificates it recovered)
-        for c in engine.committed_after(loaded.committed.len() as u64) { store.put_commit(c.height, &c.id)?; }
+        for c in engine.committed_after(loaded.seeded_height + loaded.committed.len() as u64) { store.put_commit(c.height, &c.id)?; }
 
         let cur = exec.cursor();
         let (_, tip) = engine.committed_tip();
         if cur.height > tip { return Err(DriverError::ExecutorAhead { exec: cur.height, committed: tip }); }
-        if cur.height > 0 {
+        let seeded = engine.base().map(|b| (b.height, b.id)).zip(engine.base_ref().copied());
+        if let Some(((bh, bid), bref)) = seeded {
+            // the executor must hold the state at the checkpoint (or beyond it, on the committed chain); it cannot be caught up from history this node does not have
+            if cur.height < bh { return Err(DriverError::ExecutorBehindBase { exec: cur.height, base: bh }); }
+            if cur.height == bh && (cur.block_id != bid || cur.state_digest != bref.state_root) { return Err(DriverError::BaseMismatch("the executor's cursor at the checkpoint height is not the authenticated checkpoint (block or state root)".into())); }
+        }
+        if cur.height > 0 && seeded.map_or(true, |((bh, _), _)| cur.height > bh) {
             match engine.committed_after(cur.height - 1).first() {
                 Some(c) if c.height == cur.height && c.id == cur.block_id => {}
                 _ => return Err(DriverError::Diverged { height: cur.height }),
@@ -161,6 +186,11 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
         let mut recent = VecDeque::new();
         if cur.height > 0 { recent.push_back(cur); }
         // the root of the executor's own checkpoint is always derivable from its cursor, so a crash between executing a checkpoint block and logging its root loses nothing
+        if let (Some(k), Some((_, bref))) = (interval, seeded.map(|(b, r)| (b, r))) {
+            // the authenticated root of the checkpoint goes in the root log like an executed one; a different root already there refuses the start
+            store.put_root(k, bref.height, &bref.state_root).map_err(|e| DriverError::BaseMismatch(e.to_string()))?;
+            engine.record_root(bref.height, bref.state_root).map_err(|e| DriverError::BaseMismatch(e.to_string()))?;
+        }
         if let Some(k) = interval {
             engine.set_executed(cur.height);
             if cur.height > 0 && cur.height % k == 0 { store.put_root(k, cur.height, &cur.state_digest)?; engine.record_root(cur.height, cur.state_digest)?; }
@@ -181,8 +211,12 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
         outs.extend(d.engine.resend_last_timeout().unwrap_or_default());
         let mut first = replay_sends;
         first.extend(d.route(outs)?);
+        d.try_complete_recovery();
         Ok((d, first))
     }
+
+    /// Leave `Recovering` as soon as the engine says every condition holds (it never signs before that).
+    fn try_complete_recovery(&mut self) { if self.engine.is_recovering() { let _ = self.engine.complete_recovery(); } }
 
     pub fn engine(&self) -> &Engine<S, C, G, V> { &self.engine }
     /// Stop and give back the durable pieces (a process restart in tests; a clean shutdown in a node).
@@ -264,11 +298,17 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
             NetMsg::SyncRequest(req) => {
                 let mut out = vec![];
                 if from != self.me && from < self.n {
-                    if let Some(r) = self.engine.serve_sync(&req, self.dc.max_sync_blocks) { out.push(Outbound { to: Some(from), bytes: net::encode(&NetMsg::SyncResponse(r)) }); }
+                    match self.engine.serve_sync_ex(&req, self.dc.max_sync_blocks) {
+                        ServeSync::Blocks(r) => out.push(Outbound { to: Some(from), bytes: net::encode(&NetMsg::SyncResponse(r)) }),
+                        ServeSync::BelowBase(b) => { self.stats.below_base_served += 1; out.push(Outbound { to: Some(from), bytes: net::encode(&NetMsg::SyncBelowBase(b)) }); }
+                        ServeSync::Unknown => {}
+                    }
                 }
                 Ok(out)
             }
-            NetMsg::SyncResponse(resp) => self.apply_sync(from, resp),
+            NetMsg::SyncResponse(resp) => { let o = self.apply_sync(from, resp)?; self.try_complete_recovery(); Ok(o) }
+            // advice only: it proves nothing and changes nothing but a counter; recovery comes from authenticated evidence, never from this message
+            NetMsg::SyncBelowBase(_) => { self.stats.below_base_advice += 1; Ok(vec![]) }
             NetMsg::Consensus(m) => self.deliver(from, m),
         }
     }
@@ -333,6 +373,7 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
     /// Advance timers: retry parked messages, propose if this node leads the round, and time the round out with exponential backoff.
     pub fn tick(&mut self, now: u64) -> Result<Vec<Outbound>, DriverError> {
         self.now = now;
+        self.try_complete_recovery();
         let mut out = vec![];
         let (r, hq) = (self.engine.round(), self.engine.high_qc().round());
         if hq > self.last_hqc { self.last_hqc = hq; self.pace.on_progress(); }
