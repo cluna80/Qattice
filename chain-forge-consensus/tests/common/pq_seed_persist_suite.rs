@@ -446,7 +446,7 @@ fn a_seeded_node_installed_far_behind_catches_up_while_the_network_keeps_moving(
     let gap = net.height(0) - a.height;
     let mut trace = vec![];
     let mut caught_up = false;
-    for chunk in 0..12 {
+    for chunk in 0..6 { // 3,000 ticks: ample (the fixed code needs a few hundred); the unfixed code made no progress at all in 6,000
         caught_up = net.run_until(500, |n| n.nodes[3].as_ref().map_or(false, |d| !d.engine().is_recovering()) && n.height(3) + 3 >= n.height(0));
         let d = net.nodes[3].as_ref().unwrap(); let e = d.engine();
         trace.push(format!("t{}: committed={} held={} hq={} round={} recovering={} sync_req={} queue={} net_h={}", (chunk + 1) * 500, e.committed_tip().1, e.known_blocks().len(), e.high_qc().round(), e.round(), e.is_recovering(), d.stats().sync_requests, net.q.len(), net.height(0)));

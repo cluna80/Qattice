@@ -359,16 +359,19 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
         let idc = IdCtx { protocol_profile: &self.profile, chain_id: &self.chain, set: &self.set };
         if check_response(&req, &resp, &idc, self.dc.max_sync_blocks).is_err() { self.stats.bad_sync += 1; return Ok(vec![]); }
         let want = resp.want;
+        // The request was ANSWERED with a structurally valid chain: free its slot NOW, whether or not the blocks can be applied yet. A window whose oldest block's parent is still
+        // unknown (every non-bottom window of a climb towards a base or a gap) used to keep its slot until the TTL, while each live proposal took a new slot for its own parent;
+        // with the table near full the next hop of the climb found no slot and the climb starved (observed: a node 40 blocks behind its base never stored a single block in
+        // 6,000 ticks and 2,368 requests).
+        self.sync.complete(&want);
         let mut out = vec![];
-        let mut complete = true;
         for b in resp.blocks {
             match self.engine.on_sync_block(b) {
                 Ok(outs) => out.extend(self.route(outs)?),
-                Err(EngineError::MissingParent(p)) => { if let Some(o) = self.request_sync(p, from) { out.push(o); } complete = false; break; }
-                Err(e) => { self.stats.bad_sync += 1; self.soft(e)?; complete = false; break; }
+                Err(EngineError::MissingParent(p)) => { if let Some(o) = self.request_sync(p, from) { out.push(o); } break; }
+                Err(e) => { self.stats.bad_sync += 1; self.soft(e)?; break; }
             }
         }
-        if complete { self.sync.complete(&want); }
         out.extend(self.retry_parked()?);
         Ok(out)
     }
