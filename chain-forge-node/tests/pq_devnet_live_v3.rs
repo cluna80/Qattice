@@ -70,6 +70,8 @@ impl Net {
     fn wait(&mut self, what: &str, secs: u64, cond: impl Fn(&Net) -> bool) {
         let t = Instant::now();
         while t.elapsed() < Duration::from_secs(secs) {
+            // a node that exits while we are waiting for progress is a failure now, not after the timeout
+            for i in 0..N { if let Some(k) = self.kids[i].as_mut() { if let Ok(Some(st)) = k.try_wait() { panic!("node {i} exited ({st}) while waiting for: {what}; {}", self.log_tail(i)); } } }
             if cond(self) { println!("  [{:>5.1}s] {what}: heights {:?}", t.elapsed().as_secs_f32(), self.heights()); return; }
             std::thread::sleep(Duration::from_millis(200));
         }
@@ -88,6 +90,7 @@ impl Net {
             let s = self.status(i).expect("status");
             assert!(s["fatal"].is_null(), "{label}: node {i} reported a fatal error: {}", s["fatal"]);
             assert_eq!(s["signed_while_recovering"], Value::Bool(false), "{label}: node {i} signed while recovering");
+            assert_eq!(s["sent_signed_while_recovering"], Value::Bool(false), "{label}: node {i} sent a message it signed (new or a re-send) while recovering");
             for c in s["recent"].as_array().unwrap() {
                 let (h, id, dg) = (u(&c["height"]), c["block_id"].as_str().unwrap().to_string(), c["state_digest"].as_str().unwrap().to_string());
                 if let Some(prev) = by_h.insert(h, (id.clone(), dg.clone())) { assert_eq!(prev, (id, dg), "{label}: DISAGREEMENT at height {h}"); compared += 1; }
@@ -100,6 +103,21 @@ impl Net {
     /// Executed heights recorded by node `i` in `file`, in order.
     fn exec_log(&self, i: usize, file: &str) -> Vec<u64> {
         std::fs::read_to_string(self.dirs[i].join(file)).map(|t| t.lines().filter_map(|l| l.trim().parse().ok()).collect()).unwrap_or_default()
+    }
+    /// One raw staging attempt, optionally with the TEST-ONLY crash hook set (the tool exits at that point with code 86).
+    fn stage_raw(&self, target: usize, donor: usize, back: usize, crash: Option<&str>) -> std::process::Output {
+        let mut c = Command::new(BIN);
+        c.args(["stage-snapshot", "--config", self.cfg.to_str().unwrap(), "--donor", self.dirs[donor].to_str().unwrap(), "--dir", self.dirs[target].to_str().unwrap(), "--back", &back.to_string()]);
+        if let Some(p) = crash { c.env("PQDEV_TEST_STAGE_CRASH", p); }
+        c.output().unwrap()
+    }
+    fn wait_exit(&mut self, i: usize, secs: u64) -> Option<std::process::ExitStatus> {
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_secs(secs) {
+            if let Some(k) = self.kids[i].as_mut() { if let Ok(Some(st)) = k.try_wait() { self.kids[i] = None; return Some(st); } }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        None
     }
     /// Operator-staged OFFLINE snapshot from `donor` into the (stopped) `target`, retried while the donor's files are mid-write. Returns (height, block id hex, root hex).
     fn stage(&self, target: usize, donor: usize, back: usize) -> Result<(u64, String, String), String> {
@@ -117,6 +135,23 @@ impl Net {
         }
         Err(last)
     }
+}
+
+/// Every file under `dir` (relative path -> bytes). Used to show that a refused operation changed NOTHING.
+fn tree(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    fn walk(base: &Path, d: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+        for e in std::fs::read_dir(d).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() { walk(base, &p, out); } else { out.insert(p.strip_prefix(base).unwrap().to_string_lossy().replace('\\', "/"), std::fs::read(&p).unwrap()); }
+        }
+    }
+    let mut m = Default::default(); walk(dir, dir, &mut m); m
+}
+
+/// Names of the files that differ between two `tree` snapshots (added, removed or changed).
+fn diff_names(a: &std::collections::BTreeMap<String, Vec<u8>>, b: &std::collections::BTreeMap<String, Vec<u8>>) -> Vec<String> {
+    let mut v: Vec<String> = a.keys().chain(b.keys()).filter(|k| a.get(*k) != b.get(*k)).cloned().collect();
+    v.sort(); v.dedup(); v
 }
 
 /// No duplicates, strictly increasing; at most `max_gaps` missing heights (a kill between the durable application step and the log append can lose one line, never repeat one).
@@ -203,9 +238,11 @@ fn live_v3_four_processes_snapshot_recovery_kill_restart_second_install_and_agre
     assert!(b_h > a_h + 8, "the second checkpoint ({b_h}) is well above the first ({a_h})");
     assert_ne!(std::fs::read(vd.join("app").join("app-state")).unwrap(), app_before, "staging B replaced the application state");
     let app_b = std::fs::read(vd.join("app").join("app-state")).unwrap();
+    let whole = tree(&vd);
     let stale = net.stage(VICTIM, 0, 3);
     assert!(matches!(&stale, Err(m) if m.contains("stale")), "an older checkpoint is refused: {stale:?}");
     assert_eq!(std::fs::read(vd.join("app").join("app-state")).unwrap(), app_b, "and the stale attempt did not touch the application state");
+    assert!(tree(&vd) == whole, "a refused stale staging left the ENTIRE target (evidence, blocks, application state, safety state, logs) byte-for-byte unchanged");
     let pre_b = net.floors(VICTIM);
     net.start(VICTIM);
     net.wait("the victim's first status from the new process", 60, |n| n.status(VICTIM).is_some());
@@ -236,4 +273,72 @@ fn live_v3_four_processes_snapshot_recovery_kill_restart_second_install_and_agre
     let want = at(0).expect("height reported by node 0");
     for i in 0..N { assert_eq!(at(i).as_ref(), Some(&want), "node {i} at height {common}"); }
     println!("final heights {:?}; all four agree at height {common}", net.heights());
+}
+
+
+#[test]
+fn live_v3_a_crash_between_the_staging_writes_never_lets_the_node_sign_on_a_half_staged_snapshot_and_a_stale_staging_changes_nothing() {
+    let mut net = Net::new("c");
+    for i in 0..N { net.start(i); }
+    net.wait("all four execute height 48", 240, |n| n.heights().iter().all(|h| *h >= 48));
+    net.crash(VICTIM);
+    let vd = net.dirs[VICTIM].clone();
+    std::fs::remove_dir_all(vd.join("blocks")).unwrap();
+    std::fs::remove_dir_all(vd.join("app")).unwrap();
+    std::fs::rename(vd.join("exec.log"), vd.join("exec.log.epoch0")).unwrap();
+    net.wait("the three others keep finalizing", 120, |n| (0..3).all(|i| n.height(i) >= 56));
+    // the signing-safety files, and the monotonic counter's VALUE and DIGEST (bytes 76..116 of the counter file; they change only when a signature is committed). The file's
+    // session token (bytes 116..124) is bumped by merely OPENING the counter, which a refused start does, so it is deliberately not part of "nothing was signed".
+    let safety = |vd: &Path| -> (std::collections::BTreeMap<String, Vec<u8>>, Vec<u8>) { (tree(&vd.join("safety")), std::fs::read(vd.join("counter")).unwrap()[76..116].to_vec()) };
+    let signing_state = safety(&vd);
+
+    // ---- crash 1: the process dies right after the evidence was written and before ANY application state exists
+    let o = net.stage_raw(VICTIM, 0, 1, Some("after-evidence"));
+    assert_eq!(o.status.code(), Some(86), "the staging tool died at the injected point: {}", String::from_utf8_lossy(&o.stderr));
+    assert!(tree(&vd).keys().any(|k| k.starts_with("blocks/seed-")), "the evidence is on disk");
+    assert!(!tree(&vd).keys().any(|k| k == "app/app-state"), "and no application state is");
+    net.start(VICTIM);
+    let st = net.wait_exit(VICTIM, 60).expect("a node over half-staged state must refuse to run, not keep running");
+    assert!(!st.success());
+    assert!(net.log_tail(VICTIM).contains("below the seeded checkpoint"), "refused for the right reason: {}", net.log_tail(VICTIM));
+    assert!(net.status(VICTIM).is_none(), "it never got as far as reporting a status, let alone signing");
+    let now = safety(&vd);
+    assert!(now == signing_state, "the signing-safety state is byte-for-byte unchanged: the refused node signed nothing; differing safety files: {:?}, counter value/digest changed: {}", diff_names(&now.0, &signing_state.0), now.1 != signing_state.1);
+
+    // ---- crash 2: the process dies after the application state was written to its temporary file and before it was renamed into place
+    let o = net.stage_raw(VICTIM, 0, 1, Some("after-app-tmp"));
+    assert_eq!(o.status.code(), Some(86), "{}", String::from_utf8_lossy(&o.stderr));
+    let t = tree(&vd);
+    assert!(t.contains_key("app/app-state.tmp") && !t.contains_key("app/app-state"), "the state is staged but not in place");
+    net.start(VICTIM);
+    let st = net.wait_exit(VICTIM, 60).expect("must refuse to run");
+    assert!(!st.success());
+    assert!(net.log_tail(VICTIM).contains("below the seeded checkpoint"), "{}", net.log_tail(VICTIM));
+    assert!(safety(&vd) == signing_state, "still nothing signed (safety files and counter value/digest unchanged)");
+
+    // ---- crash 3: the process dies right after the rename: a COMPLETE generation (evidence + matching application state) - the node recovers from it
+    let o = net.stage_raw(VICTIM, 0, 1, Some("after-app-rename"));
+    assert_eq!(o.status.code(), Some(86), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(tree(&vd).contains_key("app/app-state"), "the application state is in place");
+    net.start(VICTIM);
+    net.wait("the victim's first status", 60, |n| n.status(VICTIM).is_some());
+    let first = net.status(VICTIM).unwrap();
+    let base = u(&first["base"]["height"]);
+    assert!(base > 8 && base % K == 0 && u(&first["exec"]["height"]) == base, "a consistent generation: base {base}, executor at the base");
+    let f = (u(&first["safety"]["hvr"]), u(&first["safety"]["hqr"]), u(&first["safety"]["counter"]));
+    assert!(f.0 > 0 && f.1 > 0 && f.2 > 0, "the floors the node had before are still there: {f:?}");
+    net.wait("the victim recovers and catches up", 240, |n| n.status(VICTIM).map_or(false, |s| s["recovering"] == Value::Bool(false) && u(&s["exec"]["height"]) >= base + 10 && u(&s["exec"]["height"]) + 3 >= n.height(0)));
+    net.assert_agreement("after the crash-injected staging");
+    check_log("after the crash-injected staging", &net.exec_log(VICTIM, "exec.log"), base + 1, 0);
+
+    // ---- a stale staging attempt (an older checkpoint) is refused and changes NOTHING in the target
+    net.crash(VICTIM);
+    let whole = tree(&vd);
+    let o = net.stage_raw(VICTIM, 0, 3, None);
+    assert!(!o.status.success() && String::from_utf8_lossy(&o.stderr).contains("stale"), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(tree(&vd) == whole, "the stale attempt left the entire target unchanged (no file added, removed or rewritten, no scratch directory left behind)");
+    net.start(VICTIM);
+    net.wait("the victim restarts normally afterwards", 240, |n| n.status(VICTIM).map_or(false, |s| s["recovering"] == Value::Bool(false) && u(&s["exec"]["height"]) + 3 >= n.height(0)));
+    net.assert_agreement("end");
+    for i in 0..N { assert!(net.alive(i), "node {i} stopped: {}", net.log_tail(i)); }
 }

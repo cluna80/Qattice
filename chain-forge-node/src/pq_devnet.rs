@@ -406,6 +406,27 @@ mod tests {
         c4.shutdown(std::net::Shutdown::Both).ok();
         assert!(t.recv(Duration::from_millis(400)).is_none());
     }
+
+    fn cfg(profile: &str, checkpoint: Option<DevnetCheckpoint>) -> DevnetConfig {
+        DevnetConfig { label: DEVNET_LABEL.into(), chain_id: "c".into(), protocol_profile: profile.into(), validators: vec![], max_block_payload_bytes: 1, max_message_bytes: 1, max_sync_blocks: 1,
+            pacemaker_base_ms: 1, pacemaker_max_ms: 2, min_propose_gap_ms: 0, checkpoint }
+    }
+    fn ck(interval: u64, max_age: u64) -> DevnetCheckpoint { DevnetCheckpoint { interval, max_age, margin: 2, omit_rotations: 1, alarm_age_intervals: 8 } }
+
+    #[test]
+    fn profile_v3_is_off_unless_a_consistent_checkpoint_block_is_present_and_a_v2_config_serializes_without_one() {
+        let v2 = "qattice-pq-hotstuff-2-v2";
+        assert_eq!(cfg(v2, None).checkpoint_config(), Ok(None), "v2 without a checkpoint block is the unchanged devnet");
+        assert!(cfg(v2, Some(ck(4, 24))).checkpoint_config().is_err(), "checkpoint parameters need the v3 profile: no silent v2 with parameters");
+        assert!(cfg(chain_forge_consensus::pq_hotstuff::checkpoint::PROFILE_V3, None).checkpoint_config().is_err(), "the v3 profile needs checkpoint parameters: no silent v3 without them");
+        let ok = cfg(chain_forge_consensus::pq_hotstuff::checkpoint::PROFILE_V3, Some(ck(4, 24))).checkpoint_config().unwrap().unwrap();
+        assert_eq!((ok.params.interval, ok.params.max_age), (4, 24));
+        for bad in [ck(0, 8), ck(4, 3), ck(1 << 41, 1 << 42), ck(4, (1 << 50) + 1)] { assert!(cfg(chain_forge_consensus::pq_hotstuff::checkpoint::PROFILE_V3, Some(bad)).checkpoint_config().is_err()); }
+        assert!(!serde_json::to_string(&cfg(v2, None)).unwrap().contains("checkpoint"), "a v2 config has no checkpoint key, so its bytes (and genesis hash) are what they always were");
+        let back: DevnetConfig = serde_json::from_str(&serde_json::to_string(&cfg(v2, None)).unwrap()).unwrap();
+        assert!(back.checkpoint.is_none(), "and an old file without the key still parses");
+    }
+
 }
 
 // ------------------------------------------------------------------------------------------------------------------ execution log (test aid)
@@ -426,6 +447,10 @@ impl<X: Executor> Executor for LoggedApp<X> {
 }
 
 // ------------------------------------------------------------------------------------------------------------------ operator-staged snapshot (offline)
+/// TEST-ONLY crash injection for the DEVNET-ONLY staging tool: if the environment variable `PQDEV_TEST_STAGE_CRASH` names this point, the process exits at once (no
+/// cleanup), as a crash between two of the staging writes would. Never set outside tests.
+fn crash_point(name: &str) { if std::env::var("PQDEV_TEST_STAGE_CRASH").map_or(false, |v| v == name) { std::process::exit(86); } }
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Staged { pub reference: CheckpointRef, pub evidence_bytes: usize }
 
@@ -456,31 +481,45 @@ pub fn stage_snapshot(cfg: &DevnetConfig, genesis_hash: [u8; 32], donor: &Path, 
         if authenticate_checkpoint(&params, &Fips204Verifier, Start::Genesis, &headers, Some(&hq), headers.len(), r, &hq, None).is_ok() { ok.push(*r); if ok.len() > back { break; } }
     }
     let cref = *ok.get(back).ok_or_else(|| format!("only {} authenticating checkpoints on the donor's chain", ok.len()))?;
+    // STALENESS FIRST, before anything at all is created or written in the target: an install only moves forward
+    let blocks_dir = target.join("blocks");
+    if blocks_dir.is_dir() {
+        let bs = BlockStore::new(FsStorage::new(&blocks_dir).map_err(|e| e.0)?);
+        if let Some((have, _, _)) = bs.load_seed_evidence().map_err(|e| e.to_string())? {
+            if have > cref.height { return Err(format!("stale: the target already holds a checkpoint at height {have}, above {}; installs only move forward; nothing was changed", cref.height)); }
+        }
+    }
     let ev = SeedEvidence { headers, final_qc: Some(hq.clone()), cref, high_qc: hq, high_tc: None };
-    // the application state at the checkpoint: the donor's finalized payloads 1..=H through the interim application
-    let stage = target.join(format!("app.stage-{}", std::process::id()));
+    // the application state at the checkpoint: the donor's finalized payloads 1..=H through the interim application, built in a scratch directory OUTSIDE the target
+    let stage = std::env::temp_dir().join(format!("pqdev-stage-{}-{}", std::process::id(), cref.height));
     let _ = std::fs::remove_dir_all(&stage);
     std::fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
-    let mut app = InterimApp::open(FsStorage::new(&stage).map_err(|e| e.0)?, genesis_hash).map_err(|e| e.to_string())?;
-    for b in chain.iter().filter(|b| b.height <= cref.height) {
-        let id = block_id_of(b, &idc).map_err(|e| e.to_string())?;
-        app.apply(&Committed { id, round: b.round, height: b.height, payload: b.payload.clone() }).map_err(|e| e.to_string())?;
-    }
-    let cur = app.cursor();
-    if cur.height != cref.height || cur.block_id != cref.block_id || cur.state_digest != cref.state_root { return Err("the replayed application state is not the attested checkpoint (height, block or root differ)".into()); }
-    let bytes = app.storage().read("app-state").map_err(|e| e.0)?.ok_or("no application state was written")?;
-    drop(app);
-    // nothing in the target is touched until the install is known to move forward: a stale staging attempt fails here, before the application state is replaced
-    for sub in ["blocks", "app"] { std::fs::create_dir_all(target.join(sub)).map_err(|e| e.to_string())?; }
-    let mut bs = BlockStore::new(FsStorage::new(target.join("blocks")).map_err(|e| e.0)?);
-    if let Some((have, _, _)) = bs.load_seed_evidence().map_err(|e| e.to_string())? {
-        if have > cref.height { let _ = std::fs::remove_dir_all(&stage); return Err(format!("stale: the target already holds a checkpoint at height {have}, above {}; installs only move forward", cref.height)); }
-    }
-    let enc = ev.encode();
-    // evidence first, then the application state: a crash between them leaves new evidence over an older executor, which the node refuses to start with (fail closed)
-    bs.put_seed_evidence(cref.height, &cref.block_id, &enc).map_err(|e| e.to_string())?;
-    let mut dst = FsStorage::new(target.join("app")).map_err(|e| e.0)?;
-    dst.write_tmp("app-state.tmp", &bytes).and_then(|_| dst.sync_file("app-state.tmp")).and_then(|_| dst.rename("app-state.tmp", "app-state")).and_then(|_| dst.sync_dir()).map_err(|e| e.0)?;
+    let built = (|| -> Result<Vec<u8>, String> {
+        let mut app = InterimApp::open(FsStorage::new(&stage).map_err(|e| e.0)?, genesis_hash).map_err(|e| e.to_string())?;
+        for b in chain.iter().filter(|b| b.height <= cref.height) {
+            let id = block_id_of(b, &idc).map_err(|e| e.to_string())?;
+            app.apply(&Committed { id, round: b.round, height: b.height, payload: b.payload.clone() }).map_err(|e| e.to_string())?;
+        }
+        let cur = app.cursor();
+        if cur.height != cref.height || cur.block_id != cref.block_id || cur.state_digest != cref.state_root { return Err("the replayed application state is not the attested checkpoint (height, block or root differ)".into()); }
+        app.storage().read("app-state").map_err(|e| e.0)?.ok_or_else(|| "no application state was written".to_string())
+    })();
     let _ = std::fs::remove_dir_all(&stage);
+    let bytes = built?;
+    // WRITE PHASE. Order: evidence, then the application state (write, sync, rename, sync the directory). A crash after the evidence leaves new evidence over an OLDER
+    // executor, which the node refuses to start with (ExecutorBehindBase) - it never signs; redoing the staging completes it. A crash after the rename leaves a complete
+    // generation. (The crash model is process death; a power-loss/fsync-reordering model is not tested.)
+    for sub in ["blocks", "app"] { std::fs::create_dir_all(target.join(sub)).map_err(|e| e.to_string())?; }
+    let mut bs = BlockStore::new(FsStorage::new(&blocks_dir).map_err(|e| e.0)?);
+    let enc = ev.encode();
+    bs.put_seed_evidence(cref.height, &cref.block_id, &enc).map_err(|e| e.to_string())?;
+    crash_point("after-evidence");
+    let mut dst = FsStorage::new(target.join("app")).map_err(|e| e.0)?;
+    dst.write_tmp("app-state.tmp", &bytes).and_then(|_| dst.sync_file("app-state.tmp")).map_err(|e| e.0)?;
+    crash_point("after-app-tmp");
+    dst.rename("app-state.tmp", "app-state").map_err(|e| e.0)?;
+    crash_point("after-app-rename");
+    dst.sync_dir().map_err(|e| e.0)?;
     Ok(Staged { reference: cref, evidence_bytes: enc.len() })
+
 }

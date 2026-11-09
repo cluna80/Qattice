@@ -86,8 +86,10 @@ fn the_block_store_keeps_seed_evidence_forward_only_never_falls_back_and_tolerat
     assert_eq!(bs.load_seed_evidence().unwrap(), None);
     bs.put_seed_evidence(8, &[1; 32], b"eight").unwrap();
     bs.put_seed_evidence(8, &[1; 32], b"eight").unwrap(); // idempotent
-    assert_eq!(bs.put_seed_evidence(8, &[1; 32], b"other"), Err(StoreError::SeedEvidenceConflict(8)));
-    assert_eq!(bs.put_seed_evidence(8, &[2; 32], b"eight"), Err(StoreError::SeedEvidenceConflict(8)), "the block id is part of the record");
+    assert_eq!(bs.put_seed_evidence(8, &[2; 32], b"eight"), Err(StoreError::SeedEvidenceConflict(8)), "a DIFFERENT block at the same height is a conflict");
+    bs.put_seed_evidence(8, &[1; 32], b"eight, fresher").unwrap(); // the same checkpoint with fresher evidence replaces it (a staging that crashed half way can be redone)
+    assert_eq!(bs.load_seed_evidence().unwrap(), Some((8, [1; 32], b"eight, fresher".to_vec())));
+    bs.put_seed_evidence(8, &[1; 32], b"eight").unwrap();
     bs.put_seed_evidence(16, &[2; 32], b"sixteen").unwrap();
     assert_eq!(bs.put_seed_evidence(8, &[1; 32], b"eight"), Err(StoreError::StaleSeedEvidence { have: 16, got: 8 }), "installs only move forward");
     assert_eq!(bs.load_seed_evidence().unwrap(), Some((16, [2; 32], b"sixteen".to_vec())));
