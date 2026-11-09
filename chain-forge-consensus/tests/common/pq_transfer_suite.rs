@@ -361,3 +361,12 @@ fn nothing_newer_than_the_local_state_means_no_manifest_is_ever_requested_and_no
     assert!(!r.sent.iter().any(|(_, m)| matches!(m, RecoveryMsg::ManifestReq { .. } | RecoveryMsg::ChunkReq { .. })), "no manifest or chunk is requested for a checkpoint that is not forward");
     assert_eq!(r.req.stats.peers_suppressed, 0);
 }
+
+#[test]
+fn an_honest_transfer_is_driven_by_messages_alone_a_released_slot_is_reused_at_once_without_a_timer() {
+    let d = donor();
+    let mut lim = tlim(); lim.max_outstanding = 2; lim.per_peer_outstanding = 1;
+    let mut r = rig_with(&d, &[Mode::Honest, Mode::Honest], lim, false);
+    let first = r.req.start(r.now); r.settle(first); // NO on_tick afterwards
+    assert!(r.done().is_some(), "stalled without a timer: {:?} {:?} outstanding {}", r.req.phase(), r.req.stats, r.req.outstanding());
+}
