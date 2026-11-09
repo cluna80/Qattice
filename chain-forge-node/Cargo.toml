@@ -113,6 +113,11 @@ path = "tests/pq_devnet_live.rs"
 required-features = ["pq-devnet"]
 
 [[test]]
+name = "pq_devnet_live_v3"
+path = "tests/pq_devnet_live_v3.rs"
+required-features = ["pq-devnet"]
+
+[[test]]
 name = "adversarial_gossip"
 path = "tests/adversarial_gossip.rs"
 

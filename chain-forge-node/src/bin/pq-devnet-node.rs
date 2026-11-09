@@ -3,7 +3,9 @@
 //!
 //!   pq-devnet-node keygen   --dir DIR
 //!   pq-devnet-node assemble --out FILE --chain-id ID (--base-port PORT | --ports P0,P1,P2,P3) --dirs DIR0,DIR1,DIR2,DIR3
-//!   pq-devnet-node run      --config FILE --dir DIR [--tick-ms 20]
+//!   pq-devnet-node run      --config FILE --dir DIR [--tick-ms 20] [--exec-log FILE]
+//!   (profile v3, OFF by default) assemble ... --checkpoint-interval K --checkpoint-max-age A [--checkpoint-margin M]
+//!   (profile v3, operator-staged, OFFLINE; NOT network installation) pq-devnet-node stage-snapshot --config FILE --donor DIR --dir DIR [--back N]
 //!
 //! `run` writes `DIR/status.json` every 250 ms and re-reads `DIR/partition.txt` (peer indices to cut off) every 200 ms.
 use std::path::{Path, PathBuf};
@@ -15,6 +17,7 @@ use chain_forge_consensus::pq_hotstuff::engine::Engine;
 use chain_forge_consensus::pq_hotstuff::exec::InterimApp;
 use chain_forge_consensus::pq_hotstuff::safety::{Expected, Fips204Verifier, FreshInit, FsStorage, ParticipationEvidence, SafetyStore, Storage, MARKER_FILE, STATE_FILE};
 use chain_forge_node::pq_devnet::*;
+use chain_forge_consensus::pq_hotstuff::checkpoint::PROFILE_V3;
 
 fn flag(args: &[String], name: &str) -> Option<String> { args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned() }
 fn need(args: &[String], name: &str) -> Result<String, String> { flag(args, name).ok_or_else(|| format!("missing {name}")) }
@@ -25,6 +28,7 @@ fn main() {
         Some("keygen") => need(&args, "--dir").and_then(|d| keygen(Path::new(&d)).map(|pk| println!("public key written to {d}/{PUB_FILE} ({} bytes); the seed stays in {d}/{SEED_FILE} and is never printed", pk.len()))),
         Some("assemble") => assemble(&args),
         Some("run") => run(&args),
+        Some("stage-snapshot") => stage(&args),
         _ => Err("usage: pq-devnet-node keygen|assemble|run (see the file header)".into()),
     };
     if let Err(e) = r { eprintln!("pq-devnet-node: {e}"); std::process::exit(2); }
@@ -44,22 +48,38 @@ fn assemble(args: &[String]) -> Result<(), String> {
         let pk = std::fs::read_to_string(Path::new(d).join(PUB_FILE)).map_err(|e| format!("{d}: {e}"))?;
         validators.push(DevnetValidator { address: format!("pqdev-{i}"), public_key: pk.trim().to_string(), power: 1, endpoint: format!("127.0.0.1:{}", ports[i]) });
     }
-    let cfg = DevnetConfig {
-        label: DEVNET_LABEL.into(), chain_id, protocol_profile: "qattice-pq-hotstuff-2-v2".into(), validators,
-        max_block_payload_bytes: 65_536, max_message_bytes: chain_forge_consensus::pq_hotstuff::netmsg::MAX_MESSAGE_SIZE, max_sync_blocks: 8,
-        pacemaker_base_ms: 1500, pacemaker_max_ms: 12_000, min_propose_gap_ms: 150,
+    // profile v3 is OFF unless a checkpoint interval is given; without it this writes exactly the v2 config it always wrote
+    let checkpoint = match flag(args, "--checkpoint-interval") {
+        None => None,
+        Some(k) => Some(DevnetCheckpoint {
+            interval: k.parse().map_err(|_| "bad --checkpoint-interval")?,
+            max_age: need(args, "--checkpoint-max-age")?.parse().map_err(|_| "bad --checkpoint-max-age")?,
+            margin: flag(args, "--checkpoint-margin").map(|v| v.parse().map_err(|_| "bad --checkpoint-margin")).transpose()?.unwrap_or(2),
+            omit_rotations: 1, alarm_age_intervals: 8,
+        }),
     };
+    let cfg = DevnetConfig {
+        label: DEVNET_LABEL.into(), chain_id, protocol_profile: if checkpoint.is_some() { PROFILE_V3.into() } else { "qattice-pq-hotstuff-2-v2".into() }, validators,
+        max_block_payload_bytes: 65_536, max_message_bytes: chain_forge_consensus::pq_hotstuff::netmsg::MAX_MESSAGE_SIZE, max_sync_blocks: 8,
+        pacemaker_base_ms: 1500, pacemaker_max_ms: 12_000, min_propose_gap_ms: 150, checkpoint,
+    };
+    cfg.checkpoint_config()?; // refuse an inconsistent file before writing it
     std::fs::write(&out, serde_json::to_vec_pretty(&cfg).unwrap()).map_err(|e| e.to_string())?;
     println!("wrote {out} (genesis hash = SHA3-256 of this file; give every node the identical file)");
     Ok(())
 }
 
-fn status_json(d: &Driver<FsStorage, DevnetFileCounter, chain_forge_consensus::pq_hotstuff::safety::Fips204Signer, Fips204Verifier, FsStorage, InterimApp<FsStorage>>, index: usize, fatal: Option<String>) -> String {
+type Drv = Driver<FsStorage, DevnetFileCounter, chain_forge_consensus::pq_hotstuff::safety::Fips204Signer, Fips204Verifier, FsStorage, LoggedApp<InterimApp<FsStorage>>>;
+
+fn status_json(d: &Drv, index: usize, fatal: Option<String>, violation: bool) -> String {
     let s = d.status();
     let cur = |c: &chain_forge_consensus::pq_hotstuff::exec::ExecCursor| serde_json::json!({"height": c.height, "block_id": hex::encode(c.block_id), "state_digest": hex::encode(c.state_digest)});
     serde_json::json!({
         "index": index, "label": DEVNET_LABEL, "round": s.round, "high_qc_round": s.high_qc_round, "committed_height": s.committed_height,
         "committed_tip": hex::encode(s.committed_tip), "exec": cur(&s.exec), "recent": s.recent.iter().map(cur).collect::<Vec<_>>(),
+        "recovering": d.engine().is_recovering(), "base": d.engine().base().map(|b| serde_json::json!({"height": b.height, "id": hex::encode(b.id)})),
+        "safety": {"hvr": d.engine().store().record().hvr, "hqr": d.engine().store().record().hqr, "counter": d.engine().store().record().counter},
+        "signed_while_recovering": violation, "below_base_served": s.stats.below_base_served, "below_base_advice": s.stats.below_base_advice,
         "malformed": s.stats.malformed, "bad_sync": s.stats.bad_sync, "sync_requests": s.stats.sync_requests, "unsolicited_sync": s.stats.unsolicited_sync, "fatal": fatal,
     }).to_string()
 }
@@ -95,7 +115,7 @@ fn run(args: &[String]) -> Result<(), String> {
     };
     let engine = Engine::new(ecfg, store, signer, Fips204Verifier).map_err(|e| e.to_string())?;
     let blocks = BlockStore::new(FsStorage::new(dir.join("blocks")).map_err(|e| e.0)?);
-    let app = InterimApp::open(FsStorage::new(dir.join("app")).map_err(|e| e.0)?, genesis_hash).map_err(|e| e.to_string())?;
+    let app = LoggedApp::new(InterimApp::open(FsStorage::new(dir.join("app")).map_err(|e| e.0)?, genesis_hash).map_err(|e| e.to_string())?, flag(args, "--exec-log").map(PathBuf::from));
 
     let t0 = Instant::now();
     let now = || t0.elapsed().as_millis() as u64 + 1;
@@ -107,18 +127,39 @@ fn run(args: &[String]) -> Result<(), String> {
 
     let status_path = dir.join("status.json");
     let mut last_status = Instant::now() - Duration::from_secs(1);
+    // runtime monitor: while the engine is Recovering the signing counter must not move. A violation stops the node and is reported.
+    let mut violation = false;
+    let counter_of = |d: &Drv| d.engine().store().record().counter;
+    write_atomic(&status_path, &status_json(&drv, me, None, false)); // the state right after start, before any message or tick
     loop {
-        let fatal = |e: DriverError, drv: &_| -> String { let m = e.to_string(); write_atomic(&status_path, &status_json(drv, me, Some(m.clone()))); m };
+        let fatal = |e: DriverError, drv: &Drv| -> String { let m = e.to_string(); write_atomic(&status_path, &status_json(drv, me, Some(m.clone()), false)); m };
         if let Some((from, bytes)) = t.recv(Duration::from_millis(tick_ms)) {
             let mut next = Some((from, bytes));
             let mut n = 0;
             while let Some((f, b)) = next.take() {
+                let (was, c0) = (drv.engine().is_recovering(), counter_of(&drv));
                 match drv.on_bytes(f, &b, now()) { Ok(o) => dispatch(&t, o), Err(e) => return Err(fatal(e, &drv)) }
+                if was && drv.engine().is_recovering() && counter_of(&drv) != c0 { violation = true; }
                 n += 1;
                 if n < 64 { next = t.recv(Duration::from_millis(0)); }
             }
         }
+        let (was, c0) = (drv.engine().is_recovering(), counter_of(&drv));
         match drv.tick(now()) { Ok(o) => dispatch(&t, o), Err(e) => return Err(fatal(e, &drv)) }
-        if last_status.elapsed() >= Duration::from_millis(250) { write_atomic(&status_path, &status_json(&drv, me, None)); last_status = Instant::now(); }
+        if was && drv.engine().is_recovering() && counter_of(&drv) != c0 { violation = true; }
+        if violation { write_atomic(&status_path, &status_json(&drv, me, Some("SAFETY: the signing counter moved while recovering".into()), true)); return Err("SAFETY: the signing counter moved while recovering".into()); }
+        if last_status.elapsed() >= Duration::from_millis(250) { write_atomic(&status_path, &status_json(&drv, me, None, false)); last_status = Instant::now(); }
     }
+}
+
+/// Offline, operator-staged snapshot (profile v3). Refuses a target whose data directory is locked by a running node.
+fn stage(args: &[String]) -> Result<(), String> {
+    let target = PathBuf::from(need(args, "--dir")?);
+    let donor = PathBuf::from(need(args, "--donor")?);
+    let back: usize = flag(args, "--back").map(|v| v.parse().map_err(|_| "bad --back")).transpose()?.unwrap_or(1);
+    let (cfg, genesis_hash) = DevnetConfig::load(Path::new(&need(args, "--config")?))?;
+    let _lock = chain_forge_node::dirlock::DataDirLock::acquire(&target).map_err(|e| format!("the target is in use: {e}"))?;
+    let st = stage_snapshot(&cfg, genesis_hash, &donor, &target, back)?;
+    println!("{}", serde_json::json!({"staged": true, "height": st.reference.height, "block_id": hex::encode(st.reference.block_id), "state_root": hex::encode(st.reference.state_root), "evidence_bytes": st.evidence_bytes, "note": "operator-staged, offline; NOT network installation"}));
+    Ok(())
 }
