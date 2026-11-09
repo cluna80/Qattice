@@ -20,6 +20,7 @@ const K_COMMIT: u8 = b'C';
 const K_HQC: u8 = b'Q';
 const K_HTC: u8 = b'T';
 const K_ROOT: u8 = b'O';
+const K_SEED: u8 = b'S';
 
 /// A [`Storage`] that can also list its files (needed to find the blocks and commit markers on restart).
 pub trait BlockFiles: Storage {
@@ -32,6 +33,12 @@ impl BlockFiles for super::safety::FsStorage {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum StoreError {
+    #[error("seed evidence for height {got} is older than the stored evidence for height {have}: installs only move forward")]
+    StaleSeedEvidence { have: u64, got: u64 },
+    #[error("different seed evidence is already stored for height {0}")]
+    SeedEvidenceConflict(u64),
+    #[error("the seed evidence for height {0} is damaged; the node must not run without it")]
+    SeedEvidenceDamaged(u64),
     #[error("storage: {0}")]
     Storage(String),
     #[error("a commit marker is damaged (height {0}); committed history cannot be trusted")]
@@ -48,6 +55,8 @@ impl From<StorageError> for StoreError { fn from(e: StorageError) -> Self { Stor
 /// Everything found on disk, ready for [`super::engine::Engine::restore`].
 #[derive(Debug, Clone, Default)]
 pub struct Loaded {
+    /// Height of the newest stored seed evidence (0 = none): commit markers at or below it belong to history this node no longer holds and are not required.
+    pub seeded_height: u64,
     pub blocks: Vec<Block>,
     /// Commit markers `(height, id)`, contiguous from height 1.
     pub committed: Vec<(u64, BlockId)>,
@@ -151,6 +160,40 @@ impl<S: BlockFiles> BlockStore<S> {
         Ok(log)
     }
 
+    fn seed_heights(&self) -> Result<Vec<u64>, StoreError> {
+        let mut v = vec![];
+        for name in self.s.names()? {
+            if name.ends_with(".tmp") { continue; }
+            if let Some(h) = name.strip_prefix("seed-").and_then(|h| h.parse::<u64>().ok()) { v.push(h); }
+        }
+        v.sort();
+        Ok(v)
+    }
+
+    /// Store the evidence for a checkpoint at `height` (block `id`). Forward only: older than what is stored is refused, the same bytes again is a no-op, and different
+    /// bytes at the same height are a conflict. Call this BEFORE seeding the engine: a crash in between is repaired by the next start, which re-authenticates it.
+    pub fn put_seed_evidence(&mut self, height: u64, id: &BlockId, evidence: &[u8]) -> Result<(), StoreError> {
+        if let Some(&have) = self.seed_heights()?.last() {
+            if have > height { return Err(StoreError::StaleSeedEvidence { have, got: height }); }
+        }
+        let name = format!("seed-{height:020}");
+        let mut body = id.to_vec();
+        body.extend_from_slice(evidence);
+        if let Some(bytes) = self.s.read(&name)? {
+            return match unseal(&bytes, K_SEED) { Some(b) if b == &body[..] => Ok(()), _ => Err(StoreError::SeedEvidenceConflict(height)) };
+        }
+        self.put(&name, K_SEED, &body)
+    }
+
+    /// The newest stored seed evidence `(height, block id, bytes)`. A damaged newest record is an error: an older one is NOT substituted (that would be a silent rewind).
+    pub fn load_seed_evidence(&self) -> Result<Option<(u64, BlockId, Vec<u8>)>, StoreError> {
+        let Some(&h) = self.seed_heights()?.last() else { return Ok(None) };
+        let name = format!("seed-{h:020}");
+        let bytes = self.s.read(&name)?.ok_or(StoreError::SeedEvidenceDamaged(h))?;
+        let b = unseal(&bytes, K_SEED).filter(|b| b.len() > 32).ok_or(StoreError::SeedEvidenceDamaged(h))?;
+        Ok(Some((h, b[..32].try_into().unwrap(), b[32..].to_vec())))
+    }
+
     pub fn put_high_qc(&mut self, c: &Cert) -> Result<(), StoreError> { self.put("hqc", K_HQC, &c.encode()) }
     pub fn put_high_tc(&mut self, t: &Tc) -> Result<(), StoreError> { self.put("htc", K_HTC, &t.encode()) }
 
@@ -190,8 +233,11 @@ impl<S: BlockFiles> BlockStore<S> {
             }
         }
         markers.sort_by_key(|m| m.0);
+        out.seeded_height = self.seed_heights()?.last().copied().unwrap_or(0);
+        // history at or below a seeded checkpoint is not held here: its markers are ignored, and the rest must run on from the checkpoint without a gap
+        markers.retain(|m| m.0 > out.seeded_height);
         for (i, (height, id)) in markers.iter().enumerate() {
-            let expected = i as u64 + 1;
+            let expected = out.seeded_height + i as u64 + 1;
             if *height != expected { return Err(StoreError::CommittedHistoryGap(expected)); }
             match id { Some(id) => out.committed.push((*height, *id)), None => return Err(StoreError::CommittedMarkerDamaged(*height)) }
         }

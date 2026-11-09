@@ -70,3 +70,4 @@ mod tree_doubles;
 include!("common/pq_recovery_suite.rs");
 include!("common/pq_checkpoint_suite.rs");
 include!("common/pq_seed_suite.rs");
+include!("common/pq_seed_persist_suite.rs");

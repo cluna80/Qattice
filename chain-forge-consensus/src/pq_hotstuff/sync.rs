@@ -9,6 +9,12 @@ use super::certs::{block_id_of, Block, BlockId, IdCtx};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncRequest { pub want: BlockId, pub max_blocks: u32 }
 
+/// The explicit answer to a sync request that reaches BELOW this node's seeded checkpoint: the blocks the requester asked for are not held here. ADVICE ONLY: it
+/// proves nothing and is never acted on; it tells the requester why no blocks come, and names the checkpoint the answering node is based on. `recovery_available` says
+/// whether this node can offer the authenticated recovery path (checkpoint evidence + state); it is `false` while network snapshot installation is disabled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BelowBase { pub want: BlockId, pub base_height: u64, pub base_id: BlockId, pub state_root: [u8; 32], pub recovery_available: bool }
+
 /// The requested block and its ancestors, OLDEST FIRST, parent-linked, ending at `want`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncResponse { pub want: BlockId, pub blocks: Vec<Block> }

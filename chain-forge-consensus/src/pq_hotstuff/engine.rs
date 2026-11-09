@@ -9,7 +9,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::certs::*;
-use super::seed::{Base, CheckpointSeed};
+use super::seed::{authenticate_checkpoint, Base, CheckpointSeed, SeedError, SeedEvidence};
+use super::header::{ChainParams, Start};
+use super::sync::BelowBase;
 use super::checkpoint::{check_reference, effective_genesis_hash, final_height_after, is_v3, Alarm, ChainRefState, CheckpointConfig, CheckpointRef, Evidence, RefContext, RootCheck};
 use super::leader::leader_index;
 use super::limits::PqLimits;
@@ -47,6 +49,9 @@ pub enum Output {
     PersistHighQc(Cert),
     PersistHighTc(Tc),
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServeSync { Blocks(SyncResponse), BelowBase(BelowBase), Unknown }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SeedOutcome { Seeded, AlreadyAtBase }
@@ -107,6 +112,8 @@ pub struct Engine<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: Consen
     genesis_id: BlockId,
     /// Set by [`Engine::seed`]: the authenticated checkpoint block that stands in for the tree below it.
     base: Option<Base>,
+    /// The authenticated reference of the base (set by `seed`); its state root is what a below-base answer names.
+    base_ref: Option<CheckpointRef>,
     /// While true the engine signs NOTHING (no proposal, vote or timeout, and no re-send of a stored one).
     recovering: bool,
     blocks: BTreeMap<BlockId, Stored>,
@@ -155,7 +162,7 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
         let genesis = GenesisCert { protocol_profile: cfg.protocol_profile.clone(), chain_id: cfg.chain_id.clone(), genesis_hash, valset_hash };
         let genesis_id = genesis.block_id();
         Ok(Self {
-            valset_hash, genesis_id, base: None, recovering: false, high_qc: Cert::Genesis(genesis.clone()), genesis, cfg, store, signer, verifier,
+            valset_hash, genesis_id, base: None, base_ref: None, recovering: false, high_qc: Cert::Genesis(genesis.clone()), genesis, cfg, store, signer, verifier,
             blocks: BTreeMap::new(), high_tc: None, round: 1, committed_tip: genesis_id, committed_height: 0,
             votes: BTreeMap::new(), voted: BTreeSet::new(), timeouts: BTreeMap::new(), proposed: 0,
             roots: BTreeMap::new(), executed_height: 0, deferred: BTreeSet::new(), final_refs: BTreeMap::new(), certified_refs: BTreeMap::new(), alarm: None, evidence: vec![], omit_until: 0, proposed_ref_round: None, proposed_ref_block: None, omit_streak: 0,
@@ -254,6 +261,8 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
         // rule 1: well formed
         if b.epoch != self.cfg.set.epoch() { return Err(EngineError::Invalid("epoch")); }
         if b.round == 0 { return Err(EngineError::Invalid("round 0")); }
+        // at or below the seeded checkpoint is final history this node deliberately does not hold: skipped, not an error, so that a sync window that straddles the base still delivers the blocks above it
+        if let Some(base) = &self.base { if b.height <= base.height { return Ok(None); } }
         if b.payload.len() as u64 > self.cfg.limits.max_block_payload_bytes { return Err(EngineError::Invalid("payload above the limit")); }
         if b.proposer != self.leader_of(b.round) { return Err(EngineError::Invalid("proposer is not the leader of the round")); }
         let id = block_id_of(&b, &self.idctx())?;
@@ -263,7 +272,6 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
             return Err(EngineError::Invalid("proposer signature"));
         }
         // parent certificate
-        if self.base.is_some() && matches!(b.qc, Cert::Genesis(_)) { return Err(EngineError::Invalid("does not extend the seeded checkpoint")); }
         verify_cert(&self.ctx(), &b.qc)?;
         if b.qc.block_id() != b.parent_id { return Err(EngineError::Invalid("parent_id differs from the certificate's block")); }
         let parent_height = match &b.qc {
@@ -493,6 +501,16 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
     // ------------------------------------------------------------------------------------------------------ sync and recovery
     /// Serve a block-sync request: the requested block and up to `max_blocks - 1` of its ancestors that this node knows, oldest first.
     /// `None` if the requested block is unknown.
+    /// Like [`Engine::serve_sync`], but a request that reaches the seeded base or below it gets an explicit [`ServeSync::BelowBase`] instead of silence.
+    pub fn serve_sync_ex(&self, req: &SyncRequest, max_blocks: usize) -> ServeSync {
+        if let (Some(b), Some(r)) = (self.base.as_ref(), self.base_ref.as_ref()) {
+            if req.want == b.id || b.ancestors.iter().any(|(_, id)| *id == req.want) {
+                return ServeSync::BelowBase(BelowBase { want: req.want, base_height: b.height, base_id: b.id, state_root: r.state_root, recovery_available: false });
+            }
+        }
+        match self.serve_sync(req, max_blocks) { Some(r) => ServeSync::Blocks(r), None => ServeSync::Unknown }
+    }
+
     pub fn serve_sync(&self, req: &SyncRequest, max_blocks: usize) -> Option<SyncResponse> {
         let cap = (req.max_blocks as usize).min(max_blocks).max(1);
         let mut chain = vec![];
@@ -633,6 +651,16 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
         if self.recovering { Err(EngineError::Recovering(self.recovery_missing().unwrap_or_else(|| "complete_recovery has not been called".into()))) } else { Ok(()) }
     }
 
+    /// Authenticate persisted or received evidence against THIS engine's own genesis, profile, chain id, validator set, leader seed and checkpoint parameters (never
+    /// against values carried in the evidence). The result is a seed only if the whole of [`authenticate_checkpoint`] holds.
+    pub fn authenticate_evidence(&self, ev: &SeedEvidence) -> Result<CheckpointSeed, SeedError> {
+        let p = ChainParams { protocol_profile: &self.cfg.protocol_profile, chain_id: &self.cfg.chain_id, set: &self.cfg.set, genesis_hash: self.cfg.genesis_hash, seed: self.cfg.seed, checkpoint: self.cfg.checkpoint.map(|c| c.params) };
+        authenticate_checkpoint(&p, &self.verifier, Start::Genesis, &ev.headers, ev.final_qc.as_ref(), ev.headers.len().max(1), &ev.cref, &ev.high_qc, ev.high_tc.as_ref())
+    }
+
+    /// The seeded checkpoint reference (height, block id, attested state root), if seeded.
+    pub fn base_ref(&self) -> Option<&CheckpointRef> { self.base_ref.as_ref() }
+
     pub fn is_recovering(&self) -> bool { self.recovering }
     pub fn base(&self) -> Option<&Base> { self.base.as_ref() }
 
@@ -660,7 +688,8 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
     ///
     /// Forward only and never a rewind: a checkpoint at a height below the committed tip is refused (a stale snapshot); the same checkpoint again is a no-op; a
     /// different block at the committed height is a conflict. Blocks that do not descend from the new base are dropped (they are below it or on another fork).
-    pub fn seed(&mut self, seed: CheckpointSeed) -> Result<SeedOutcome, EngineError> {
+    /// What [`Engine::seed`] would do, without doing it: `AlreadyAtBase`, `Seeded` (it would proceed), or the error it would return. Nothing changes.
+    pub fn seed_precheck(&self, seed: &CheckpointSeed) -> Result<SeedOutcome, EngineError> {
         let b = &seed.base;
         if self.committed_height > b.height { return Err(EngineError::Seed(format!("stale checkpoint: height {} is below the committed height {}", b.height, self.committed_height))); }
         if self.committed_height == b.height {
@@ -672,7 +701,14 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
             let at = seed.chain.iter().find(|p| p.height == self.committed_height).map(|p| p.id).or_else(|| b.ancestors.iter().find(|(h, _)| *h == self.committed_height).map(|(_, id)| *id));
             if let Some(id) = at { if id != self.committed_tip { return Err(EngineError::Seed("the committed history conflicts with the authenticated checkpoint".into())); } }
         }
+        Ok(SeedOutcome::Seeded)
+    }
+
+    pub fn seed(&mut self, seed: CheckpointSeed) -> Result<SeedOutcome, EngineError> {
+        if self.seed_precheck(&seed)? == SeedOutcome::AlreadyAtBase { return Ok(SeedOutcome::AlreadyAtBase); }
+        let b = &seed.base;
         self.base = Some(b.clone());
+        self.base_ref = Some(seed.cref);
         self.committed_tip = b.id;
         self.committed_height = b.height;
         // keep only blocks that descend from the base

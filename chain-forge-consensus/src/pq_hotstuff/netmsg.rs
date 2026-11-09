@@ -11,7 +11,7 @@ use super::engine::{Msg, TimeoutMsg, VoteMsg};
 use super::checkpoint::CheckpointRef;
 use super::header::PayloadFreeBlock;
 use super::limits::{qc_max_bytes, tc_max_bytes, PqLimits};
-use super::sync::{SyncRequest, SyncResponse};
+use super::sync::{SyncRequest, SyncResponse, BelowBase};
 use super::wire::{TimeoutMessage, VoteMessage, MAX_NAME_LEN, MLDSA65_SIGNATURE_LEN};
 
 pub const TAG_NET: &[u8] = b"CFH1|net|";
@@ -23,6 +23,9 @@ const K_TIMEOUT: u8 = 3;
 const K_TC: u8 = 4;
 const K_SYNC_REQ: u8 = 5;
 const K_SYNC_RESP: u8 = 6;
+const K_BELOW_BASE: u8 = 15; // 7..=12 are the (disabled) recovery codec's and 13..=14 are RESERVED by it; 15 is this advice-only answer, in the operational decoder only
+/// Exact size of a `BelowBase` message.
+const BELOW_BASE_LEN: u64 = (TAG_NET.len() + 2 + 1 + 32 + 8 + 32 + 32 + 1) as u64;
 /// Owner-locked transport limit for PQ-HotStuff-2 messages: exactly 8 MiB. It is applied through `PqLimits::max_message_bytes`;
 /// [`MessageLimits::derive`] still refuses to start when a chain's parameters need more (e.g. a 1,000-validator proposal carrying a TC
 /// is about 9.96 MB even with an empty payload), so the constant can never silently under-size a message.
@@ -46,7 +49,7 @@ pub fn read_bounded<R: std::io::Read>(r: &mut R, max: u64) -> Result<Vec<u8>, Ne
 pub const SYNC_BLOCKS_CEILING: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NetMsg { Consensus(Msg), SyncRequest(SyncRequest), SyncResponse(SyncResponse) }
+pub enum NetMsg { Consensus(Msg), SyncRequest(SyncRequest), SyncResponse(SyncResponse), SyncBelowBase(BelowBase) }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum NetError {
@@ -140,7 +143,7 @@ impl MessageLimits {
     }
 
     fn for_kind(&self, k: u8) -> Option<u64> {
-        Some(match k { K_PROPOSAL => self.proposal, K_VOTE => self.vote, K_TIMEOUT => self.timeout, K_TC => self.tc, K_SYNC_REQ => self.sync_request, K_SYNC_RESP => self.sync_response, _ => return None })
+        Some(match k { K_PROPOSAL => self.proposal, K_VOTE => self.vote, K_TIMEOUT => self.timeout, K_TC => self.tc, K_SYNC_REQ => self.sync_request, K_SYNC_RESP => self.sync_response, K_BELOW_BASE => BELOW_BASE_LEN, _ => return None })
     }
 }
 
@@ -226,6 +229,11 @@ pub fn encode(m: &NetMsg) -> Vec<u8> {
         }
         NetMsg::Consensus(Msg::Tc(t)) => { o.push(K_TC); o.extend_from_slice(&t.encode()); }
         NetMsg::SyncRequest(r) => { o.push(K_SYNC_REQ); o.extend_from_slice(&r.want); o.extend_from_slice(&r.max_blocks.to_be_bytes()); }
+        NetMsg::SyncBelowBase(r) => {
+            o.push(K_BELOW_BASE);
+            o.extend_from_slice(&r.want); o.extend_from_slice(&r.base_height.to_be_bytes()); o.extend_from_slice(&r.base_id); o.extend_from_slice(&r.state_root);
+            o.push(r.recovery_available as u8);
+        }
         NetMsg::SyncResponse(r) => {
             o.push(K_SYNC_RESP);
             o.extend_from_slice(&r.want);
@@ -312,6 +320,12 @@ pub fn decode(b: &[u8], lim: &MessageLimits) -> Result<NetMsg, NetError> {
             let mut blocks = Vec::with_capacity(count.min(lim.max_sync_blocks));
             for _ in 0..count { blocks.push(decode_block(r.bytes()?)?); }
             NetMsg::SyncResponse(SyncResponse { want, blocks })
+        }
+        K_BELOW_BASE => {
+            // exact length: longer is refused by the per-kind size limit above, shorter by the truncated read, trailing bytes by the check below
+            let (want, base_height, base_id, state_root) = (r.h32()?, u64::from_be_bytes(r.take(8)?.try_into().unwrap()), r.h32()?, r.h32()?);
+            let recovery_available = match r.u8()? { 0 => false, 1 => true, _ => return Err(NetError::Malformed("flag")) };
+            NetMsg::SyncBelowBase(BelowBase { want, base_height, base_id, state_root, recovery_available })
         }
         _ => unreachable!("for_kind accepted the kind"),
     };
