@@ -126,10 +126,11 @@ impl Net {
         None
     }
     /// Operator-staged OFFLINE snapshot from `donor` into the (stopped) `target`, retried while the donor's files are mid-write. Returns (height, block id hex, root hex).
-    fn stage(&self, target: usize, donor: usize, back: usize) -> Result<(u64, String, String), String> {
+    fn stage(&self, target: usize, donor: usize, back: usize) -> Result<(u64, String, String), String> { self.stage_lag(target, donor, back, 0) }
+    fn stage_lag(&self, target: usize, donor: usize, back: usize, lag: usize) -> Result<(u64, String, String), String> {
         let mut last = String::new();
         for _ in 0..20 {
-            let o = Command::new(BIN).args(["stage-snapshot", "--config", self.cfg.to_str().unwrap(), "--donor", self.dirs[donor].to_str().unwrap(), "--dir", self.dirs[target].to_str().unwrap(), "--back", &back.to_string()]).output().unwrap();
+            let o = Command::new(BIN).args(["stage-snapshot", "--config", self.cfg.to_str().unwrap(), "--donor", self.dirs[donor].to_str().unwrap(), "--dir", self.dirs[target].to_str().unwrap(), "--back", &back.to_string(), "--lag", &lag.to_string()]).output().unwrap();
             if o.status.success() {
                 let v: Value = serde_json::from_slice(&o.stdout).unwrap();
                 assert_eq!(v["staged"], Value::Bool(true));
@@ -398,9 +399,15 @@ fn live_v3_a_crash_between_the_staging_writes_never_lets_the_node_sign_on_a_half
     net.assert_agreement("after the crash-injected staging");
     check_log("after the crash-injected staging", &net.exec_log(VICTIM, "exec.log"), base + 1, 0);
 
-    // ---- a stale staging attempt (an older checkpoint) is refused and changes NOTHING in the target
+    // ---- a staging attempt that is NEWER than the installed evidence but BELOW what the target has already executed is refused (it would rewind the application state)
     net.crash(VICTIM);
+    let executed = net.exec_log(VICTIM, "exec.log").last().copied().unwrap();
     let whole = tree(&vd);
+    let o = net.stage_raw(VICTIM, 0, 0, None); // the newest authenticating checkpoint: above the installed one, below the executed height
+    let err = String::from_utf8_lossy(&o.stderr).to_string();
+    assert!(!o.status.success() && err.contains("stale") && err.contains("rewind"), "installing a snapshot below the executed height (executed {executed}) must be refused: {err}");
+    assert!(tree(&vd) == whole, "and that refusal changed nothing in the target");
+    // ---- a stale staging attempt (an older checkpoint) is refused and changes NOTHING in the target
     let o = net.stage_raw(VICTIM, 0, 3, None);
     assert!(!o.status.success() && String::from_utf8_lossy(&o.stderr).contains("stale"), "{}", String::from_utf8_lossy(&o.stderr));
     assert!(tree(&vd) == whole, "the stale attempt left the entire target unchanged (no file added, removed or rewritten, no scratch directory left behind)");
@@ -408,4 +415,55 @@ fn live_v3_a_crash_between_the_staging_writes_never_lets_the_node_sign_on_a_half
     net.wait("the victim restarts normally afterwards", 240, |n| n.status(VICTIM).map_or(false, |s| s["recovering"] == Value::Bool(false) && u(&s["exec"]["height"]) + 3 >= n.height(0)));
     net.assert_agreement("end");
     for i in 0..N { assert!(net.alive(i), "node {i} stopped: {}", net.log_tail(i)); }
+}
+
+/// CONTROLLED LEADER SCENARIO. The proposal gate is only reached if the recovering node is the LEADER of its post-install round, which an uncontrolled run leaves to chance
+/// (that is why the process-level mutant of the proposal gate survived). Here the victim is wiped, staged and started repeatedly - each time from a fresher snapshot - until
+/// its first status says it leads its round; the test then waits for the node itself to report that its engine was ASKED to propose while recovering and REFUSED (positive
+/// evidence that the gate was reached and held), and checks that nothing was signed or sent. A stored-timeout re-send is NOT reachable this way (it needs the high QC to
+/// equal the one the timeout was signed on) and remains covered in-process only.
+#[test]
+fn live_v3_a_recovering_node_that_leads_its_round_is_asked_to_propose_refuses_and_signs_nothing() {
+    let _serial = serial();
+    let mut net = Net::new("l");
+    for i in 0..N { net.start(i); }
+    net.wait("all four execute height 48", 240, |n| n.heights().iter().all(|h| *h >= 48));
+    net.crash(VICTIM);
+    let vd = net.dirs[VICTIM].clone();
+    std::fs::rename(vd.join("exec.log"), vd.join("exec.log.epoch0")).unwrap();
+    let mut led = None;
+    for attempt in 1..=24 {
+        // the operator wipes the victim's blocks and application state each time (its signing-safety state stays), then stages a fresh snapshot
+        for sub in ["blocks", "app"] { let _ = std::fs::remove_dir_all(vd.join(sub)); }
+        if vd.join("exec.log").exists() { std::fs::rename(vd.join("exec.log"), vd.join(format!("exec.log.attempt{attempt}"))).unwrap(); }
+        net.wait("the three others keep finalizing", 120, |n| (0..3).all(|i| n.height(i) >= 52 + attempt as u64));
+        // The post-install round is the staged evidence's high-QC round + 1, and the victim leads one residue of the four-way rotation. While the victim is DOWN no QC can form for
+        // the round just before its own slot (it would have to aggregate those votes), so the donors' recent chains never contain the one QC round that puts the victim on its
+        // slot (observed: 24 attempts, never the leader). The evidence must therefore reach back across the moment the victim went down (about 8 blocks), where every residue
+        // has a QC; ending it `lag` blocks before the donor's tip with an older valid QC does that, and consecutive lags then give consecutive rounds.
+        let lag = attempt + 7;
+        let staged = net.stage_lag(VICTIM, attempt % 3, 1, lag).expect("stage a snapshot");
+        println!("  attempt {attempt}: donor {} lag {lag}: staged checkpoint height {}", attempt % 3, staged.0);
+        net.start(VICTIM);
+        net.wait("the victim's first status", 60, |n| n.status(VICTIM).is_some());
+        let first = net.status(VICTIM).unwrap();
+        println!("  attempt {attempt}: is_leader={} round={} high_qc_round={} recovering={}", first["is_leader"], first["round"], first["high_qc_round"], first["recovering"]);
+        if first["is_leader"] == Value::Bool(true) && first["recovering"] == Value::Bool(true) { led = Some(attempt); break; }
+        net.crash(VICTIM);
+    }
+    let attempt = led.expect("the victim led its post-install round in at least one of 24 attempts (each is roughly a one-in-four chance)");
+    println!("  the victim led its post-install round on attempt {attempt}");
+    // the node reports that its engine was asked to propose while recovering and refused
+    net.wait("the gate is reached: the engine is asked to propose while recovering and refuses", 30, |n| {
+        n.status(VICTIM).map_or(false, |s| u(&s["propose_refused_while_recovering"]) >= 1 && s["recovering"] == Value::Bool(true))
+    });
+    let s = net.status(VICTIM).unwrap();
+    assert!(s["fatal"].is_null(), "the node did not stop: {}", s["fatal"]);
+    assert_eq!(s["signed_while_recovering"], Value::Bool(false));
+    assert_eq!(s["sent_signed_while_recovering"], Value::Bool(false));
+    println!("  proposal attempts refused while recovering: {}; timeout attempts refused: {}", u(&s["propose_refused_while_recovering"]), u(&s["timeout_refused_while_recovering"]));
+    // and it still recovers and agrees
+    net.wait("the victim recovers and catches up", 240, |n| n.status(VICTIM).map_or(false, |s| s["recovering"] == Value::Bool(false) && u(&s["exec"]["height"]) + 3 >= n.height(0)));
+    for i in 0..N { assert!(net.alive(i), "node {i} stopped: {}", net.log_tail(i)); }
+    net.assert_agreement("after the controlled-leader recovery");
 }

@@ -5,7 +5,7 @@
 //!   pq-devnet-node assemble --out FILE --chain-id ID (--base-port PORT | --ports P0,P1,P2,P3) --dirs DIR0,DIR1,DIR2,DIR3
 //!   pq-devnet-node run      --config FILE --dir DIR [--tick-ms 20] [--exec-log FILE]
 //!   (profile v3, OFF by default) assemble ... --checkpoint-interval K --checkpoint-max-age A [--checkpoint-margin M]
-//!   (profile v3, operator-staged, OFFLINE; NOT network installation) pq-devnet-node stage-snapshot --config FILE --donor DIR --dir DIR [--back N]
+//!   (profile v3, operator-staged, OFFLINE; NOT network installation) pq-devnet-node stage-snapshot --config FILE --donor DIR --dir DIR [--back N] [--lag K]
 //!
 //! `run` writes `DIR/status.json` every 250 ms and re-reads `DIR/partition.txt` (peer indices to cut off) every 200 ms.
 use std::path::{Path, PathBuf};
@@ -81,6 +81,7 @@ fn status_json(d: &Drv, index: usize, fatal: Option<String>, violation: bool, re
         "committed_tip": hex::encode(s.committed_tip), "exec": cur(&s.exec), "recent": s.recent.iter().map(cur).collect::<Vec<_>>(),
         "recovering": d.engine().is_recovering(), "base": d.engine().base().map(|b| serde_json::json!({"height": b.height, "id": hex::encode(b.id)})),
         "safety": {"hvr": d.engine().store().record().hvr, "hqr": d.engine().store().record().hqr, "counter": d.engine().store().record().counter},
+        "is_leader": d.engine().is_leader(), "propose_refused_while_recovering": s.stats.propose_refused_while_recovering, "timeout_refused_while_recovering": s.stats.timeout_refused_while_recovering,
         "signed_while_recovering": violation, "sent_signed_while_recovering": resent, "below_base_served": s.stats.below_base_served, "below_base_advice": s.stats.below_base_advice,
         "malformed": s.stats.malformed, "bad_sync": s.stats.bad_sync, "sync_requests": s.stats.sync_requests, "unsolicited_sync": s.stats.unsolicited_sync, "fatal": fatal,
     }).to_string()
@@ -177,7 +178,8 @@ fn stage(args: &[String]) -> Result<(), String> {
     let back: usize = flag(args, "--back").map(|v| v.parse().map_err(|_| "bad --back")).transpose()?.unwrap_or(1);
     let (cfg, genesis_hash) = DevnetConfig::load(Path::new(&need(args, "--config")?))?;
     let _lock = chain_forge_node::dirlock::DataDirLock::acquire(&target).map_err(|e| format!("the target is in use: {e}"))?;
-    let st = stage_snapshot(&cfg, genesis_hash, &donor, &target, back)?;
+    let lag: usize = flag(args, "--lag").map(|v| v.parse().map_err(|_| "bad --lag")).transpose()?.unwrap_or(0);
+    let st = stage_snapshot(&cfg, genesis_hash, &donor, &target, back, lag)?;
     println!("{}", serde_json::json!({"staged": true, "height": st.reference.height, "block_id": hex::encode(st.reference.block_id), "state_root": hex::encode(st.reference.state_root), "evidence_bytes": st.evidence_bytes, "note": "operator-staged, offline; NOT network installation"}));
     Ok(())
 }

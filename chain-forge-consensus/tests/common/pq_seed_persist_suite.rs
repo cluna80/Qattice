@@ -400,3 +400,30 @@ fn rewriting_an_existing_commit_marker_with_the_same_content_changes_nothing_but
     assert_eq!(l.committed, (1..=6u64).map(|h| (h, [h as u8; 32])).collect::<Vec<_>>());
     // NOT shown, and not claimed: that the extra writes cost nothing (each is a write, a sync and a rename), nor what a crash in the middle of one would leave
 }
+
+#[test]
+fn a_seeded_node_that_restarts_with_every_dependency_present_re_sends_its_stored_vote_byte_for_byte_like_any_restarted_node() {
+    let cc = cc3(4, 8);
+    let mut net = DNet::new_cp(4, &[], "T", Some(cc));
+    run_to(&mut net, 56);
+    // a validator whose stored vote goes to ANOTHER node, so that the re-send is a visible message
+    let i = (0..4).find(|i| { let d = net.nodes[*i].as_ref().unwrap(); d.engine().store().record().last_vote.as_ref().map_or(false, |v| d.engine().leader_of(v.round + 1) != *i) }).expect("a validator with a stored vote for another leader");
+    let (ev, a, chain, app) = {
+        let donor = net.nodes[(i + 1) % 4].as_ref().unwrap();
+        let (ev, a) = evidence_from(donor, 1);
+        (ev, a, drv_chain(donor), snapshot_app(donor, a.height + 3))
+    };
+    let mut bs = store_with(&ev);
+    for b in chain.iter().filter(|b| b.height > a.height) { bs.put_block(&id3(b), b).unwrap(); }
+    let (e, _old_bs, _x) = net.nodes[i].take().unwrap().into_parts();
+    let record = e.store().record().clone();
+    let stored = record.last_vote.clone().unwrap();
+    let (d, first) = start_node(restart_f(e, i, 4, &net.cc), bs, app, &Default::default(), "T", net.now).expect("start");
+    assert!(!d.engine().is_recovering(), "every dependency is present, so the restart completes recovery");
+    let lim = *d.limits();
+    let votes: Vec<VoteMsg> = first.iter().filter_map(|o| match net::decode(&o.bytes, &lim) { Ok(NetMsg::Consensus(Msg::Vote(v))) => Some(v), _ => None }).collect();
+    assert_eq!(votes.len(), 1, "the stored vote is re-sent at start, exactly as an unseeded restart does");
+    assert_eq!(votes[0].msg.encode().unwrap(), stored.message, "byte for byte");
+    assert_eq!(votes[0].signature, stored.envelope.signature);
+    assert_eq!(d.engine().store().record(), &record, "a re-send signs nothing: the whole safety record is unchanged");
+}

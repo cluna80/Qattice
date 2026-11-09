@@ -77,7 +77,9 @@ pub enum DriverError {
 pub struct Outbound { pub to: Option<usize>, pub bytes: Vec<u8> }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Stats { pub malformed: u64, pub bad_sync: u64, pub sync_requests: u64, pub unsolicited_sync: u64, pub parked_dropped: u64, pub below_base_served: u64, pub below_base_advice: u64 }
+pub struct Stats { pub malformed: u64, pub bad_sync: u64, pub sync_requests: u64, pub unsolicited_sync: u64, pub parked_dropped: u64, pub below_base_served: u64, pub below_base_advice: u64,
+    /// How many times the engine REFUSED to propose / time out because it was `Recovering` (the gate was reached and held; nothing was signed).
+    pub propose_refused_while_recovering: u64, pub timeout_refused_while_recovering: u64 }
 
 #[derive(Debug, Clone)]
 pub struct Status {
@@ -201,6 +203,10 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
             round_started: now, last_round: engine.round(), last_hqc: engine.high_qc().round(), rr: me,
             dc, lim, engine, store, exec, payload, profile, chain, set, me, n, now, parked: VecDeque::new(), recent, stats: Stats::default(), pending_exec: VecDeque::new(), interval,
         };
+        // Leave `Recovering` first if every dependency is already present (it signs nothing: it only checks that the high QC's block is known and that the round is not
+        // below the store's `hqr`): the re-sends below are gated while recovering, and a restarted node that is not recovering must re-send its stored vote and timeout
+        // exactly as an unseeded restart does.
+        d.try_complete_recovery();
         // the executor catches up from ITS durable cursor, exactly once
         let mut replay_outs = vec![];
         for c in d.engine.committed_after(cur.height) { replay_outs.extend(d.execute(c)?); }
@@ -209,7 +215,6 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
         outs.extend(d.engine.resend_last_timeout().unwrap_or_default());
         let mut first = replay_sends;
         first.extend(d.route(outs)?);
-        d.try_complete_recovery();
         Ok((d, first))
     }
 
@@ -384,11 +389,11 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
         out.extend(self.retry_parked()?);
         if self.engine.is_leader() && now.saturating_sub(self.round_started) >= self.dc.min_propose_gap {
             let p = (self.payload)(self.engine.round(), self.me);
-            match self.engine.propose(p) { Ok(outs) => out.extend(self.route(outs)?), Err(e) => self.soft(e)? }
+            match self.engine.propose(p) { Ok(outs) => out.extend(self.route(outs)?), Err(EngineError::Recovering(_)) => self.stats.propose_refused_while_recovering += 1, Err(e) => self.soft(e)? }
         }
         if now.saturating_sub(self.round_started) >= self.pace.timeout() {
             self.round_started = now;
-            match self.engine.local_timeout() { Ok(outs) => { self.pace.on_timeout(); out.extend(self.route(outs)?); } Err(e) => self.soft(e)? }
+            match self.engine.local_timeout() { Ok(outs) => { self.pace.on_timeout(); out.extend(self.route(outs)?); } Err(EngineError::Recovering(_)) => self.stats.timeout_refused_while_recovering += 1, Err(e) => self.soft(e)? }
         }
         Ok(out)
     }

@@ -459,7 +459,7 @@ pub struct Staged { pub reference: CheckpointRef, pub evidence_bytes: usize }
 /// application, checks that the resulting state digest IS the attested root, and writes (1) the evidence into the target's block store (forward only) and (2) the
 /// application state into the target's `app` directory. The target's signing-safety state and counter are never touched. The target node re-authenticates the evidence
 /// itself at start; nothing here is trusted by it.
-pub fn stage_snapshot(cfg: &DevnetConfig, genesis_hash: [u8; 32], donor: &Path, target: &Path, back: usize) -> Result<Staged, String> {
+pub fn stage_snapshot(cfg: &DevnetConfig, genesis_hash: [u8; 32], donor: &Path, target: &Path, back: usize, lag: usize) -> Result<Staged, String> {
     let ckpt = cfg.checkpoint_config()?.ok_or("staging needs a v3 config")?;
     let loaded = BlockStore::new(FsStorage::new(donor.join("blocks")).map_err(|e| e.0)?).load().map_err(|e| e.to_string())?;
     if loaded.seeded_height != 0 { return Err("the donor is itself seeded: it does not hold the history below its checkpoint".into()); }
@@ -472,6 +472,15 @@ pub fn stage_snapshot(cfg: &DevnetConfig, genesis_hash: [u8; 32], donor: &Path, 
     while let Some(b) = by_id.get(&cur) { chain.push((*b).clone()); cur = b.parent_id; }
     chain.reverse();
     if chain.first().map_or(true, |b| b.height != 1) { return Err("the donor's chain does not reach the genesis block (it is being written; retry)".into()); }
+    // `lag` > 0 ends the evidence that many blocks BEFORE the donor's tip, with the QC embedded in the next block as its high QC (a valid, older view): the node then has more
+    // blocks to fetch, and its post-install round is steered deterministically (used by the controlled-leader test). 0 = the donor's own tip and high QC.
+    let hq = if lag > 0 {
+        if chain.len() <= lag + 1 { return Err("lag is larger than the donor's chain".into()); }
+        let cut = chain.len() - lag;
+        let qc = chain[cut].qc.clone();
+        chain.truncate(cut);
+        qc
+    } else { hq };
     let headers: Vec<_> = chain.iter().map(Block::to_header).collect();
     let params = ChainParams { protocol_profile: &cfg.protocol_profile, chain_id: &cfg.chain_id, set: &set, genesis_hash, seed: 0, checkpoint: Some(ckpt.params) };
     let mut refs: Vec<CheckpointRef> = vec![];
@@ -488,6 +497,14 @@ pub fn stage_snapshot(cfg: &DevnetConfig, genesis_hash: [u8; 32], donor: &Path, 
         if let Some((have, _, _)) = bs.load_seed_evidence().map_err(|e| e.to_string())? {
             if have > cref.height { return Err(format!("stale: the target already holds a checkpoint at height {have}, above {}; installs only move forward; nothing was changed", cref.height)); }
         }
+    }
+    // ... and the same for the APPLICATION state: a snapshot BELOW what the target has already executed would rewind it (a real application would re-apply effects), and a
+    // different block or root at the same height is a divergence. Read-only; a damaged or foreign application state is refused, never overwritten silently.
+    let app_dir = target.join("app");
+    if app_dir.is_dir() {
+        let cur = InterimApp::open(FsStorage::new(&app_dir).map_err(|e| e.0)?, genesis_hash).map_err(|e| format!("the target's application state cannot be read ({e}); remove it explicitly if it is to be replaced; nothing was changed"))?.cursor();
+        if cur.height > cref.height { return Err(format!("stale: the target's application state is already at height {}, above the checkpoint at {}; installing an older snapshot would rewind it; nothing was changed", cur.height, cref.height)); }
+        if cur.height == cref.height && (cur.block_id != cref.block_id || cur.state_digest != cref.state_root) { return Err("the target's application state at the checkpoint height is a different block or state: it has diverged; nothing was changed".into()); }
     }
     let ev = SeedEvidence { headers, final_qc: Some(hq.clone()), cref, high_qc: hq, high_tc: None };
     // the application state at the checkpoint: the donor's finalized payloads 1..=H through the interim application, built in a scratch directory OUTSIDE the target
