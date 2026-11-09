@@ -195,6 +195,7 @@ impl<A: Authenticator, I: InstallSink, E: EvidenceSink> Requester<A, I, E> {
     }
     pub fn phase(&self) -> &Phase { &self.phase }
     pub fn outstanding(&self) -> usize { self.table.len() }
+    pub fn outstanding_for(&self, peer: usize) -> usize { self.table.entries_for(peer) }
     pub fn add_peer(&mut self, peer: usize) { self.peers.insert(peer); }
     pub fn remove_peer(&mut self, peer: usize) { self.peers.remove(&peer); }
     pub fn is_finished(&self) -> bool { matches!(self.phase, Phase::Done(_) | Phase::Failed(_)) }

@@ -118,6 +118,7 @@ impl Rig {
         while let Some(o) = q.pop_front() {
             guard += 1; assert!(guard < 3_000, "message storm: phase {:?} stats {:?} last {:?}", self.req.phase(), self.req.stats, self.sent.last());
             self.max_out = self.max_out.max(self.req.outstanding());
+            self.per_peer_max = self.per_peer_max.max(self.req.outstanding_for(o.peer));
             let bytes = rcodec::encode(&o.msg).expect("encode"); let m = rcodec::decode(&bytes, &rl()).expect("decode");
             self.sent.push((o.peer, m.clone()));
             let reply = match &mut self.peers[o.peer] { Node::BlackHole => None, Node::Serve(p) => p.handle(o.peer, &m, self.now) };
@@ -228,7 +229,7 @@ fn a_snapshot_that_does_not_measure_to_the_authenticated_root_is_discarded_unpub
     let mut r = rig(&d, &[Mode::WrongState, Mode::Honest]);
     r.run(10_000);
     assert!(r.done().is_some(), "{:?} {:?}", r.req.phase(), r.req.stats);
-    assert!(r.req.stats.snapshots_rejected >= 1, "the wrong state was measured and refused");
+    assert_eq!(r.req.stats.snapshots_rejected, 1, "the wrong state was measured and refused exactly once: its snapshot id is not trusted again");
     assert_eq!(r.saved.borrow().len(), 1, "evidence was persisted only for the install that measured correctly");
     // with no honest provider the lie never installs
     let mut r = rig(&d, &[Mode::WrongState]);
@@ -269,7 +270,7 @@ fn outstanding_requests_never_exceed_the_caps_and_every_slot_is_released_even_wi
         r.run(20_000);
         assert!(r.done().is_some(), "{modes:?}: {:?} {:?}", r.req.phase(), r.req.stats);
         assert!(r.max_out <= 2, "{modes:?}: {} outstanding", r.max_out);
-        let mut per: BTreeMap<usize, usize> = BTreeMap::new(); let _ = &mut per;
+        assert!(r.per_peer_max <= 1, "{modes:?}: {} outstanding to one peer", r.per_peer_max);
         assert_eq!(r.req.outstanding(), 0, "{modes:?}: slots left behind");
     }
 }
@@ -339,4 +340,24 @@ fn a_provider_degrades_oversized_answers_to_advice_never_sends_what_a_decoder_wo
     let mut busy = 0;
     for i in 0..5_000u64 { if let Some(RecoveryMsg::ChunkResp { body: ChunkBody::Busy { .. }, .. }) = p.handle(2, &RecoveryMsg::ChunkReq { request_id: i, snapshot_id: [0; 32], index: 0 }, 12) { busy += 1; } }
     assert!(busy > 0, "a flood is answered with BUSY");
+}
+
+#[test]
+fn nothing_newer_than_the_local_state_means_no_manifest_is_ever_requested_and_nobody_is_blamed() {
+    let d = donor();
+    let top = d.refs.last().unwrap().height;
+    let cc = cc3(4, 8);
+    let e = engine3(0, 4, &cc);
+    let gid = e.genesis_id();
+    let saved: Rc<TRefCell<Vec<SeedEvidence>>> = Default::default();
+    let mut fs = MemTreeFs::new(tfaults()); extras(&mut fs);
+    let mut inst: Inst = Installer::new(fs, interim(), GENESIS_HASH, rl(), Box::new(|_c: &Cert| Ok(()))).unwrap();
+    inst.start().unwrap();
+    let req = Requester::new(TAuth { e, set: set_n(4) }, inst, RecEv { saved: saved.clone(), fail: false }, gid, GENESIS_HASH, rl(), tlim(), top).unwrap();
+    let mut r = Rig { req, peers: vec![Node::Serve(provider(&d, Mode::Honest, 1))], now: 1, saved, max_out: 0, sent: vec![], per_peer_max: 0 };
+    r.req.add_peer(0);
+    r.run(300);
+    assert!(r.done().is_none() && r.saved.borrow().is_empty());
+    assert!(!r.sent.iter().any(|(_, m)| matches!(m, RecoveryMsg::ManifestReq { .. } | RecoveryMsg::ChunkReq { .. })), "no manifest or chunk is requested for a checkpoint that is not forward");
+    assert_eq!(r.req.stats.peers_suppressed, 0);
 }
