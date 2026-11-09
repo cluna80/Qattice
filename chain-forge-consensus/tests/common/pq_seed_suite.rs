@@ -542,3 +542,20 @@ fn the_high_certificate_and_the_carrier_must_themselves_be_valid_and_final_and_a
     let rec = InstallRecord { generation: 1, cref: CheckpointRef { state_root: [7; 32], ..r }, carrier: pt, tip: *seed.tip(), high_qc: ev.hq.clone() };
     assert_eq!(check_install_record(&rec, &seed).unwrap_err(), SeedError::RecordMismatch("checkpoint reference"));
 }
+
+#[test]
+fn a_sync_window_that_straddles_the_base_delivers_the_blocks_above_it_without_error() {
+    let cc = cc3(4, 8);
+    let set = set_n(4);
+    let e = run_net(44);
+    let ev = evidence(&e);
+    let r = good_ref(&set, &cc, &ev, 1);
+    let mut en = engine3(3, 4, &cc);
+    en.seed(auth(&set, &cc, &ev, &r).unwrap()).unwrap();
+    // oldest first, starting two blocks BELOW the base: those, and the base itself, are skipped without error; the first block above the base connects to it
+    for b in ev.chain.iter().filter(|b| b.height + 2 >= r.height) {
+        en.on_sync_block(b.clone()).unwrap_or_else(|er| panic!("height {}: {er}", b.height));
+    }
+    assert!(en.known_blocks().iter().all(|b| b.height > r.height), "nothing at or below the base was stored");
+    assert!(en.known_blocks().iter().any(|b| b.height == r.height + 1), "and the block directly above it was");
+}

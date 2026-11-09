@@ -72,6 +72,10 @@ fn seed_evidence_round_trips_and_its_decoder_is_strict() {
     for cut in [0usize, 1, 10, 40, bytes.len() / 2, bytes.len() - 33, bytes.len() - 1] { assert!(SeedEvidence::decode(&bytes[..cut], MAX_EVIDENCE_HEADERS).is_err(), "prefix {cut}"); }
     for at in [0usize, 20, 25, 60, bytes.len() / 3, bytes.len() / 2, bytes.len() - 40, bytes.len() - 1] { let mut m = bytes.clone(); m[at] ^= 1; assert!(SeedEvidence::decode(&m, MAX_EVIDENCE_HEADERS).is_err(), "flip {at}"); }
     let mut t = bytes.clone(); t.push(0); assert!(SeedEvidence::decode(&t, MAX_EVIDENCE_HEADERS).is_err());
+    // trailing bytes INSIDE a correctly checksummed body (so only the structure check can refuse them)
+    let mut body = bytes[..bytes.len() - 32].to_vec(); body.push(0);
+    let sum = rcodec::sha3(&[&body]); body.extend_from_slice(&sum);
+    assert!(SeedEvidence::decode(&body, MAX_EVIDENCE_HEADERS).is_err(), "trailing bytes inside the checksummed body");
     assert!(SeedEvidence::decode(&bytes, ev.headers.len() - 1).is_err(), "more headers than the caller allows");
 }
 
@@ -158,9 +162,18 @@ fn live_v3_snapshot_recovery_restart_successive_installs_and_agreement_without_d
     // ---- crash and restart after recovery: same base, committed history and cursor; nothing re-executed
     let before = net.nodes[3].as_ref().unwrap().status().exec;
     let log_len = net.logs[3].borrow().len();
-    net.recover(3, None, "L").expect("restart after recovery");
+    // the root log's record of the checkpoint is damaged while the node is down: the restart writes the authenticated root again
+    let d3 = net.nodes[3].take().unwrap();
+    let (e3, bs3, x3) = d3.into_parts();
+    let bs3 = replace_file(bs3, &format!("root-{:020}", a.height), b"garbage");
+    assert!(bs3.load_roots(4).unwrap().damaged.contains(&a.height));
+    let (nd, first) = start_node(restart_f(e3, 3, net.n, &net.cc), bs3, x3.inner.into_inner(), &net.logs[3], "L", net.now).expect("restart after recovery");
+    net.nodes[3] = Some(nd); net.push(3, first);
     {
         let d = net.nodes[3].as_ref().unwrap();
+        let log = d.block_store().load_roots(4).unwrap();
+        assert!(log.damaged.is_empty() && log.roots.get(&a.height) == Some(&a.state_root), "the checkpoint's root was written again");
+        assert!(!d.engine().is_recovering(), "with every block already in the store, start itself completes recovery (no tick needed)");
         assert_eq!(d.engine().base().map(|b| b.id), Some(a.block_id));
         assert!(d.status().exec.height >= before.height, "no rewind");
         assert!(d.engine().committed_tip().1 >= before.height);
@@ -234,6 +247,17 @@ fn a_start_with_missing_damaged_mismatched_or_unauthentic_evidence_or_a_wrong_ex
     let mut mism = BlockStore::new(mem());
     mism.put_seed_evidence(other.height, &other.block_id, &ev.encode()).unwrap();
     assert!(matches!(go(mism, snapshot_app(donor, a.height)), Some(DriverError::SeedEvidence(m)) if m.contains("does not describe")), "name and content disagree");
+    // the executor at the checkpoint height with the RIGHT state digest but a different block id (the app-state record is re-sealed by hand)
+    {
+        let mut st = snapshot_app(donor, a.height);
+        let mut rec = st.read("app-state").unwrap().unwrap();
+        rec[59] ^= 1; // block id, bytes 59..91
+        let n = rec.len() - 32;
+        let sum = rcodec::sha3(&[&rec[..n]]);
+        rec[n..].copy_from_slice(&sum);
+        st.write_tmp("app-state.tmp", &rec).unwrap(); st.sync_file("app-state.tmp").unwrap(); st.rename("app-state.tmp", "app-state").unwrap(); st.sync_dir().unwrap();
+        assert!(matches!(go(store_with(&ev), st), Some(DriverError::BaseMismatch(_))), "same state digest, different block id at the checkpoint");
+    }
     // the executor: behind the checkpoint, at the checkpoint with a different state, and with a different block
     assert!(matches!(go(store_with(&ev), snapshot_app(donor, a.height - 4)), Some(DriverError::ExecutorBehindBase { .. })), "executor behind");
     let mut wrong_state = InterimApp::open(mem(), GENESIS_HASH).unwrap();

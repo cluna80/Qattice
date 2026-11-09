@@ -304,7 +304,7 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
                 }
                 Ok(out)
             }
-            NetMsg::SyncResponse(resp) => { let o = self.apply_sync(from, resp)?; self.try_complete_recovery(); Ok(o) }
+            NetMsg::SyncResponse(resp) => self.apply_sync(from, resp),
             // advice only: it proves nothing and changes nothing but a counter; recovery comes from authenticated evidence, never from this message
             NetMsg::SyncBelowBase(_) => { self.stats.below_base_advice += 1; Ok(vec![]) }
             NetMsg::Consensus(m) => self.deliver(from, m),

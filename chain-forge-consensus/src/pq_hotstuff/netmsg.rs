@@ -322,7 +322,7 @@ pub fn decode(b: &[u8], lim: &MessageLimits) -> Result<NetMsg, NetError> {
             NetMsg::SyncResponse(SyncResponse { want, blocks })
         }
         K_BELOW_BASE => {
-            if b.len() as u64 != BELOW_BASE_LEN { return Err(NetError::Malformed("below-base length")); }
+            // exact length: longer is refused by the per-kind size limit above, shorter by the truncated read, trailing bytes by the check below
             let (want, base_height, base_id, state_root) = (r.h32()?, u64::from_be_bytes(r.take(8)?.try_into().unwrap()), r.h32()?, r.h32()?);
             let recovery_available = match r.u8()? { 0 => false, 1 => true, _ => return Err(NetError::Malformed("flag")) };
             NetMsg::SyncBelowBase(BelowBase { want, base_height, base_id, state_root, recovery_available })
