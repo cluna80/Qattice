@@ -54,6 +54,8 @@ struct Eng3 {
     proposals: Vec<Block>,
     qc_rounds: u64,
     timeouts: u64,
+    /// Mixed into every payload: two networks with the same keys and parameters but different salts fork from height 1.
+    salt: u8,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Step3 { Qc, Timeout, Stuck }
@@ -62,7 +64,7 @@ impl Eng3 {
     fn new(n: usize, cc: CheckpointConfig) -> Eng3 { Self::with_policies(n, cc, vec![cc.policy; n]) }
     fn with_policies(n: usize, cc: CheckpointConfig, policies: Vec<RefPolicy>) -> Eng3 {
         let nodes = (0..n).map(|i| engine3(i, n, &CheckpointConfig { policy: policies[i], ..cc })).collect();
-        Eng3 { nodes, cc, lag: vec![0; n], exec: vec![0; n], bad_root: vec![false; n], skip_roots: vec![false; n], commits: vec![vec![]; n], proposals: vec![], qc_rounds: 0, timeouts: 0 }
+        Eng3 { nodes, cc, lag: vec![0; n], exec: vec![0; n], bad_root: vec![false; n], skip_roots: vec![false; n], commits: vec![vec![]; n], proposals: vec![], qc_rounds: 0, timeouts: 0, salt: 0 }
     }
     fn n(&self) -> usize { self.nodes.len() }
     /// Bring node `i`'s executor up to (committed height - lag), record the roots of the checkpoint heights it passes, and collect the votes it may now cast.
@@ -95,9 +97,9 @@ impl Eng3 {
         let r = self.nodes.iter().map(|e| e.round()).max().unwrap();
         let l = self.nodes[0].leader_of(r);
         let before = self.nodes.iter().map(|e| e.round()).max().unwrap();
-        match self.nodes[l].propose(format!("tx-{r}").into_bytes()) {
+        match self.nodes[l].propose(format!("tx-{r}-{}", self.salt).into_bytes()) {
             Ok(first) => self.deliver(l, first),
-            Err(EngineError::Halted(_)) => {} // a halted leader proposes nothing: the round times out
+            Err(EngineError::Halted(_)) | Err(EngineError::Recovering(_)) => {} // a halted or recovering leader proposes nothing: the round times out
             Err(_) => return Step3::Stuck,
         }
         self.feed_all();

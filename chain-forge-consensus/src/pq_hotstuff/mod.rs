@@ -33,6 +33,8 @@ pub mod driver;
 #[cfg(feature = "pq-hotstuff")]
 pub mod header;
 #[cfg(feature = "pq-hotstuff")]
+pub mod seed;
+#[cfg(feature = "pq-hotstuff")]
 pub mod recovery;
 #[cfg(feature = "pq-hotstuff")]
 pub mod checkpoint;

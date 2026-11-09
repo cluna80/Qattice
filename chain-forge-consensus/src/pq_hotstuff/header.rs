@@ -122,7 +122,13 @@ pub struct VerifiedChain {
     pub tip: ChainPoint,
     /// Newly FINAL blocks above the start, in height order, under the two-chain predicate.
     pub finalized: Vec<ChainPoint>,
+    /// Every verified header after the start, in height order (final or not), with the checkpoint state at it and the reference it carries.
+    pub points: Vec<VerifiedPoint>,
 }
+
+/// One verified header: its identity, the chain's checkpoint state up to and including it (F(B) and the last reference), and the reference IT carries (if any).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerifiedPoint { pub point: ChainPoint, pub state: ChainRefState, pub carried: Option<CheckpointRef> }
 
 /// Verify a linear run of headers (oldest first) from `start`. `final_qc` may be a QC for the LAST header (for example the high QC), which can finalize
 /// one more block. `max_headers` bounds the work; verification stops at the first invalid header and nothing is returned for a partly valid run.
@@ -207,7 +213,8 @@ pub fn verify_header_chain<V: ConsensusVerifier>(p: &ChainParams, v: &V, start: 
         if !matches!(q, Cert::Qc(_)) || q.block_id() != prev_id || q.round() != prev_round { return Err(HeaderError::FinalCert); }
         finalize(&chain, &mut final_height, &mut finalized);
     }
-    Ok(VerifiedChain { tip: *chain.last().unwrap(), finalized })
+    let points = chain.iter().zip(states.iter()).zip(headers.iter()).map(|((pt, st), h)| VerifiedPoint { point: *pt, state: *st, carried: h.checkpoint }).collect();
+    Ok(VerifiedChain { tip: *chain.last().unwrap(), finalized, points })
 }
 
 /// The id of a full block, for callers that hold both forms (a convenience used by the equivalence tests).
