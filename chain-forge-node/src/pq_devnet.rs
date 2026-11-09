@@ -16,7 +16,15 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use chain_forge_consensus::pq_hotstuff::blockstore::BlockStore;
+use chain_forge_consensus::pq_hotstuff::certs::{block_id_of, Block, BlockId, Cert, IdCtx};
+use chain_forge_consensus::pq_hotstuff::checkpoint::{is_v3, CheckpointConfig, CheckpointParams, CheckpointRef, RefPolicy};
 use chain_forge_consensus::pq_hotstuff::driver::DriverConfig;
+use chain_forge_consensus::pq_hotstuff::engine::Committed;
+use chain_forge_consensus::pq_hotstuff::exec::{ExecCursor, ExecError, Executor, InterimApp};
+use chain_forge_consensus::pq_hotstuff::header::{ChainParams, Start};
+use chain_forge_consensus::pq_hotstuff::seed::{authenticate_checkpoint, SeedEvidence};
+use chain_forge_consensus::pq_hotstuff::safety::{Fips204Verifier, FsStorage, Storage};
 use chain_forge_consensus::pq_hotstuff::engine::EngineConfig;
 use chain_forge_consensus::pq_hotstuff::limits::PqLimits;
 use chain_forge_consensus::pq_hotstuff::netmsg::read_bounded;
@@ -34,6 +42,11 @@ fn sha3(parts: &[&[u8]]) -> [u8; 32] { let mut h = Sha3_256::new(); for p in par
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DevnetValidator { pub address: String, pub public_key: String, pub power: u64, pub endpoint: String }
 
+/// Profile v3 only (absent = the existing v2 devnet, whose config files and genesis hash are unchanged): the checkpoint parameters bound into the genesis, and the
+/// proposer policy (local, not validity). The whole file is hashed into the genesis hash, so every node must have the identical file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DevnetCheckpoint { pub interval: u64, pub max_age: u64, pub margin: u64, pub omit_rotations: u64, pub alarm_age_intervals: u64 }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DevnetConfig {
     pub label: String,
@@ -46,6 +59,8 @@ pub struct DevnetConfig {
     pub pacemaker_base_ms: u64,
     pub pacemaker_max_ms: u64,
     pub min_propose_gap_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<DevnetCheckpoint>,
 }
 
 impl DevnetConfig {
@@ -74,7 +89,24 @@ impl DevnetConfig {
     pub fn engine_config(&self, public_key: &[u8], genesis_hash: [u8; 32]) -> Result<(EngineConfig, usize), String> {
         let set = self.set()?;
         let my_index = set.entries().iter().position(|e| e.public_key == public_key).ok_or("this node's key is not in the validator set")?;
-        Ok((EngineConfig { chain_id: self.chain_id.clone(), protocol_profile: self.protocol_profile.clone(), set, my_index, genesis_hash, limits: self.limits(), seed: 0, checkpoint: None }, my_index))
+        let checkpoint = self.checkpoint_config()?;
+        Ok((EngineConfig { chain_id: self.chain_id.clone(), protocol_profile: self.protocol_profile.clone(), set, my_index, genesis_hash, limits: self.limits(), seed: 0, checkpoint }, my_index))
+    }
+
+    /// `None` for the v2 devnet. Profile v3 and checkpoint parameters must come together; anything else is refused (no silent fallback to v2).
+    pub fn checkpoint_config(&self) -> Result<Option<CheckpointConfig>, String> {
+        match (&self.checkpoint, is_v3(&self.protocol_profile)) {
+            (None, false) => Ok(None),
+            (Some(_), false) => Err("checkpoint parameters are only valid with the v3 profile".into()),
+            (None, true) => Err("the v3 profile needs checkpoint parameters".into()),
+            (Some(c), true) => {
+                let params = CheckpointParams { interval: c.interval, max_age: c.max_age };
+                params.validate().map_err(|e| e.to_string())?;
+                let policy = RefPolicy { propose_refs: true, margin: c.margin, omit_rotations: c.omit_rotations, alarm_age_intervals: c.alarm_age_intervals };
+                policy.validate().map_err(|e| e.to_string())?;
+                Ok(Some(CheckpointConfig { params, policy }))
+            }
+        }
     }
 
     pub fn driver_config(&self) -> DriverConfig {
@@ -374,4 +406,137 @@ mod tests {
         c4.shutdown(std::net::Shutdown::Both).ok();
         assert!(t.recv(Duration::from_millis(400)).is_none());
     }
+
+    fn cfg(profile: &str, checkpoint: Option<DevnetCheckpoint>) -> DevnetConfig {
+        DevnetConfig { label: DEVNET_LABEL.into(), chain_id: "c".into(), protocol_profile: profile.into(), validators: vec![], max_block_payload_bytes: 1, max_message_bytes: 1, max_sync_blocks: 1,
+            pacemaker_base_ms: 1, pacemaker_max_ms: 2, min_propose_gap_ms: 0, checkpoint }
+    }
+    fn ck(interval: u64, max_age: u64) -> DevnetCheckpoint { DevnetCheckpoint { interval, max_age, margin: 2, omit_rotations: 1, alarm_age_intervals: 8 } }
+
+    #[test]
+    fn profile_v3_is_off_unless_a_consistent_checkpoint_block_is_present_and_a_v2_config_serializes_without_one() {
+        let v2 = "qattice-pq-hotstuff-2-v2";
+        assert_eq!(cfg(v2, None).checkpoint_config(), Ok(None), "v2 without a checkpoint block is the unchanged devnet");
+        assert!(cfg(v2, Some(ck(4, 24))).checkpoint_config().is_err(), "checkpoint parameters need the v3 profile: no silent v2 with parameters");
+        assert!(cfg(chain_forge_consensus::pq_hotstuff::checkpoint::PROFILE_V3, None).checkpoint_config().is_err(), "the v3 profile needs checkpoint parameters: no silent v3 without them");
+        let ok = cfg(chain_forge_consensus::pq_hotstuff::checkpoint::PROFILE_V3, Some(ck(4, 24))).checkpoint_config().unwrap().unwrap();
+        assert_eq!((ok.params.interval, ok.params.max_age), (4, 24));
+        for bad in [ck(0, 8), ck(4, 3), ck(1 << 41, 1 << 42), ck(4, (1 << 50) + 1)] { assert!(cfg(chain_forge_consensus::pq_hotstuff::checkpoint::PROFILE_V3, Some(bad)).checkpoint_config().is_err()); }
+        assert!(!serde_json::to_string(&cfg(v2, None)).unwrap().contains("checkpoint"), "a v2 config has no checkpoint key, so its bytes (and genesis hash) are what they always were");
+        let back: DevnetConfig = serde_json::from_str(&serde_json::to_string(&cfg(v2, None)).unwrap()).unwrap();
+        assert!(back.checkpoint.is_none(), "and an old file without the key still parses");
+    }
+
+}
+
+// ------------------------------------------------------------------------------------------------------------------ execution log (test aid)
+/// Wraps the executor and, if a path is given, appends the height of every block AFTER its effects are durable (so a kill between the two can leave a gap but never a
+/// duplicate). A test aid for the live recovery test; with no path it is a pass-through.
+pub struct LoggedApp<X: Executor> { pub inner: X, log: Option<PathBuf> }
+impl<X: Executor> LoggedApp<X> { pub fn new(inner: X, log: Option<PathBuf>) -> Self { LoggedApp { inner, log } } }
+impl<X: Executor> Executor for LoggedApp<X> {
+    fn cursor(&self) -> ExecCursor { self.inner.cursor() }
+    fn apply(&mut self, b: &Committed) -> Result<ExecCursor, ExecError> {
+        let c = self.inner.apply(b)?;
+        if let Some(p) = &self.log {
+            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(p).map_err(|e| ExecError::Storage(e.to_string()))?;
+            f.write_all(format!("{}\n", b.height).as_bytes()).and_then(|_| f.sync_data()).map_err(|e| ExecError::Storage(e.to_string()))?;
+        }
+        Ok(c)
+    }
+}
+
+// ------------------------------------------------------------------------------------------------------------------ operator-staged snapshot (offline)
+/// TEST-ONLY crash injection for the DEVNET-ONLY staging tool: if the environment variable `PQDEV_TEST_STAGE_CRASH` names this point, the process exits at once (no
+/// cleanup), as a crash between two of the staging writes would. Never set outside tests.
+fn crash_point(name: &str) { if std::env::var("PQDEV_TEST_STAGE_CRASH").map_or(false, |v| v == name) { std::process::exit(86); } }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Staged { pub reference: CheckpointRef, pub evidence_bytes: usize }
+
+/// OPERATOR-STAGED, OFFLINE snapshot staging (this is NOT network installation, which stays disabled). Reads an UNSEEDED donor's block store, builds the header-chain
+/// evidence for the `back`-th newest checkpoint reference that authenticates, replays the donor's finalized payloads up to that height through the devnet-interim
+/// application, checks that the resulting state digest IS the attested root, and writes (1) the evidence into the target's block store (forward only) and (2) the
+/// application state into the target's `app` directory. The target's signing-safety state and counter are never touched. The target node re-authenticates the evidence
+/// itself at start; nothing here is trusted by it.
+pub fn stage_snapshot(cfg: &DevnetConfig, genesis_hash: [u8; 32], donor: &Path, target: &Path, back: usize, lag: usize) -> Result<Staged, String> {
+    let ckpt = cfg.checkpoint_config()?.ok_or("staging needs a v3 config")?;
+    let loaded = BlockStore::new(FsStorage::new(donor.join("blocks")).map_err(|e| e.0)?).load().map_err(|e| e.to_string())?;
+    if loaded.seeded_height != 0 { return Err("the donor is itself seeded: it does not hold the history below its checkpoint".into()); }
+    let set = cfg.set()?;
+    let idc = IdCtx { protocol_profile: &cfg.protocol_profile, chain_id: &cfg.chain_id, set: &set };
+    let by_id: std::collections::BTreeMap<BlockId, &Block> = loaded.blocks.iter().map(|b| (block_id_of(b, &idc).map(|i| (i, b)))).collect::<Result<_, _>>().map_err(|e| e.to_string())?;
+    let hq = loaded.high_qc.clone().ok_or("the donor has no high QC yet")?;
+    let Cert::Qc(q) = &hq else { return Err("the donor's high QC is the genesis certificate".into()) };
+    let (mut chain, mut cur) = (vec![], q.block_id);
+    while let Some(b) = by_id.get(&cur) { chain.push((*b).clone()); cur = b.parent_id; }
+    chain.reverse();
+    if chain.first().map_or(true, |b| b.height != 1) { return Err("the donor's chain does not reach the genesis block (it is being written; retry)".into()); }
+    // `lag` > 0 ends the evidence that many blocks BEFORE the donor's tip, with the QC embedded in the next block as its high QC (a valid, older view): the node then has more
+    // blocks to fetch, and its post-install round is steered deterministically (used by the controlled-leader test). 0 = the donor's own tip and high QC.
+    let hq = if lag > 0 {
+        if chain.len() <= lag + 1 { return Err("lag is larger than the donor's chain".into()); }
+        let cut = chain.len() - lag;
+        let qc = chain[cut].qc.clone();
+        chain.truncate(cut);
+        qc
+    } else { hq };
+    let headers: Vec<_> = chain.iter().map(Block::to_header).collect();
+    let params = ChainParams { protocol_profile: &cfg.protocol_profile, chain_id: &cfg.chain_id, set: &set, genesis_hash, seed: 0, checkpoint: Some(ckpt.params) };
+    let mut refs: Vec<CheckpointRef> = vec![];
+    for b in &chain { if let Some(r) = b.checkpoint { if refs.last() != Some(&r) { refs.push(r); } } }
+    let mut ok = vec![];
+    for r in refs.iter().rev() {
+        if authenticate_checkpoint(&params, &Fips204Verifier, Start::Genesis, &headers, Some(&hq), headers.len(), r, &hq, None).is_ok() { ok.push(*r); if ok.len() > back { break; } }
+    }
+    let cref = *ok.get(back).ok_or_else(|| format!("only {} authenticating checkpoints on the donor's chain", ok.len()))?;
+    // STALENESS FIRST, before anything at all is created or written in the target: an install only moves forward
+    let blocks_dir = target.join("blocks");
+    if blocks_dir.is_dir() {
+        let bs = BlockStore::new(FsStorage::new(&blocks_dir).map_err(|e| e.0)?);
+        if let Some((have, _, _)) = bs.load_seed_evidence().map_err(|e| e.to_string())? {
+            if have > cref.height { return Err(format!("stale: the target already holds a checkpoint at height {have}, above {}; installs only move forward; nothing was changed", cref.height)); }
+        }
+    }
+    // ... and the same for the APPLICATION state: a snapshot BELOW what the target has already executed would rewind it (a real application would re-apply effects), and a
+    // different block or root at the same height is a divergence. Read-only; a damaged or foreign application state is refused, never overwritten silently.
+    let app_dir = target.join("app");
+    if app_dir.is_dir() {
+        let cur = InterimApp::open(FsStorage::new(&app_dir).map_err(|e| e.0)?, genesis_hash).map_err(|e| format!("the target's application state cannot be read ({e}); remove it explicitly if it is to be replaced; nothing was changed"))?.cursor();
+        if cur.height > cref.height { return Err(format!("stale: the target's application state is already at height {}, above the checkpoint at {}; installing an older snapshot would rewind it; nothing was changed", cur.height, cref.height)); }
+        if cur.height == cref.height && (cur.block_id != cref.block_id || cur.state_digest != cref.state_root) { return Err("the target's application state at the checkpoint height is a different block or state: it has diverged; nothing was changed".into()); }
+    }
+    let ev = SeedEvidence { headers, final_qc: Some(hq.clone()), cref, high_qc: hq, high_tc: None };
+    // the application state at the checkpoint: the donor's finalized payloads 1..=H through the interim application, built in a scratch directory OUTSIDE the target
+    let stage = std::env::temp_dir().join(format!("pqdev-stage-{}-{}", std::process::id(), cref.height));
+    let _ = std::fs::remove_dir_all(&stage);
+    std::fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
+    let built = (|| -> Result<Vec<u8>, String> {
+        let mut app = InterimApp::open(FsStorage::new(&stage).map_err(|e| e.0)?, genesis_hash).map_err(|e| e.to_string())?;
+        for b in chain.iter().filter(|b| b.height <= cref.height) {
+            let id = block_id_of(b, &idc).map_err(|e| e.to_string())?;
+            app.apply(&Committed { id, round: b.round, height: b.height, payload: b.payload.clone() }).map_err(|e| e.to_string())?;
+        }
+        let cur = app.cursor();
+        if cur.height != cref.height || cur.block_id != cref.block_id || cur.state_digest != cref.state_root { return Err("the replayed application state is not the attested checkpoint (height, block or root differ)".into()); }
+        app.storage().read("app-state").map_err(|e| e.0)?.ok_or_else(|| "no application state was written".to_string())
+    })();
+    let _ = std::fs::remove_dir_all(&stage);
+    let bytes = built?;
+    // WRITE PHASE. Order: evidence, then the application state (write, sync, rename, sync the directory). A crash after the evidence leaves new evidence over an OLDER
+    // executor, which the node refuses to start with (ExecutorBehindBase) - it never signs; redoing the staging completes it. A crash after the rename leaves a complete
+    // generation. (The crash model is process death; a power-loss/fsync-reordering model is not tested.)
+    for sub in ["blocks", "app"] { std::fs::create_dir_all(target.join(sub)).map_err(|e| e.to_string())?; }
+    let mut bs = BlockStore::new(FsStorage::new(&blocks_dir).map_err(|e| e.0)?);
+    let enc = ev.encode();
+    bs.put_seed_evidence(cref.height, &cref.block_id, &enc).map_err(|e| e.to_string())?;
+    crash_point("after-evidence");
+    let mut dst = FsStorage::new(target.join("app")).map_err(|e| e.0)?;
+    dst.write_tmp("app-state.tmp", &bytes).and_then(|_| dst.sync_file("app-state.tmp")).map_err(|e| e.0)?;
+    crash_point("after-app-tmp");
+    dst.rename("app-state.tmp", "app-state").map_err(|e| e.0)?;
+    crash_point("after-app-rename");
+    dst.sync_dir().map_err(|e| e.0)?;
+    Ok(Staged { reference: cref, evidence_bytes: enc.len() })
+
 }

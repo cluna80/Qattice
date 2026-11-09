@@ -170,8 +170,10 @@ impl<S: BlockFiles> BlockStore<S> {
         Ok(v)
     }
 
-    /// Store the evidence for a checkpoint at `height` (block `id`). Forward only: older than what is stored is refused, the same bytes again is a no-op, and different
-    /// bytes at the same height are a conflict. Call this BEFORE seeding the engine: a crash in between is repaired by the next start, which re-authenticates it.
+    /// Store the evidence for a checkpoint at `height` (block `id`). Forward only: older than what is stored is refused; a DIFFERENT block id at the same height is a
+    /// conflict; the same checkpoint again with the same bytes is a no-op, and with DIFFERENT bytes it replaces the record atomically (fresher evidence for the same
+    /// checkpoint, e.g. a longer header chain, is legitimate - it is re-authenticated at every start - and refusing it would strand an operator whose staging crashed
+    /// half way). Call this BEFORE seeding the engine: a crash in between is repaired by the next start, which re-authenticates it.
     pub fn put_seed_evidence(&mut self, height: u64, id: &BlockId, evidence: &[u8]) -> Result<(), StoreError> {
         if let Some(&have) = self.seed_heights()?.last() {
             if have > height { return Err(StoreError::StaleSeedEvidence { have, got: height }); }
@@ -180,7 +182,11 @@ impl<S: BlockFiles> BlockStore<S> {
         let mut body = id.to_vec();
         body.extend_from_slice(evidence);
         if let Some(bytes) = self.s.read(&name)? {
-            return match unseal(&bytes, K_SEED) { Some(b) if b == &body[..] => Ok(()), _ => Err(StoreError::SeedEvidenceConflict(height)) };
+            match unseal(&bytes, K_SEED) {
+                Some(b) if b == &body[..] => return Ok(()),
+                Some(b) if b.len() >= 32 && b[..32] != id[..] => return Err(StoreError::SeedEvidenceConflict(height)),
+                _ => {} // same block id with other bytes, or a damaged record: replaced below, atomically
+            }
         }
         self.put(&name, K_SEED, &body)
     }
