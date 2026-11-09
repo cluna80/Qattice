@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::certs::*;
+use super::seed::{Base, CheckpointSeed};
 use super::checkpoint::{check_reference, effective_genesis_hash, final_height_after, is_v3, Alarm, ChainRefState, CheckpointConfig, CheckpointRef, Evidence, RefContext, RootCheck};
 use super::leader::leader_index;
 use super::limits::PqLimits;
@@ -47,6 +48,9 @@ pub enum Output {
     PersistHighTc(Tc),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeedOutcome { Seeded, AlreadyAtBase }
+
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
     #[error("configuration: {0}")]
@@ -69,6 +73,10 @@ pub enum EngineError {
     Restore(String),
     #[error("signing is halted by a safety/execution-consistency alarm: {0}")]
     Halted(String),
+    #[error("RECOVERING: no signing until the seeded checkpoint's dependencies are in place ({0})")]
+    Recovering(String),
+    #[error("seed refused: {0}")]
+    Seed(String),
 }
 
 #[derive(Debug, Clone)]
@@ -97,6 +105,10 @@ pub struct Engine<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: Consen
     valset_hash: [u8; 32],
     genesis: GenesisCert,
     genesis_id: BlockId,
+    /// Set by [`Engine::seed`]: the authenticated checkpoint block that stands in for the tree below it.
+    base: Option<Base>,
+    /// While true the engine signs NOTHING (no proposal, vote or timeout, and no re-send of a stored one).
+    recovering: bool,
     blocks: BTreeMap<BlockId, Stored>,
     high_qc: Cert,
     high_tc: Option<Tc>,
@@ -143,7 +155,7 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
         let genesis = GenesisCert { protocol_profile: cfg.protocol_profile.clone(), chain_id: cfg.chain_id.clone(), genesis_hash, valset_hash };
         let genesis_id = genesis.block_id();
         Ok(Self {
-            valset_hash, genesis_id, high_qc: Cert::Genesis(genesis.clone()), genesis, cfg, store, signer, verifier,
+            valset_hash, genesis_id, base: None, recovering: false, high_qc: Cert::Genesis(genesis.clone()), genesis, cfg, store, signer, verifier,
             blocks: BTreeMap::new(), high_tc: None, round: 1, committed_tip: genesis_id, committed_height: 0,
             votes: BTreeMap::new(), voted: BTreeSet::new(), timeouts: BTreeMap::new(), proposed: 0,
             roots: BTreeMap::new(), executed_height: 0, deferred: BTreeSet::new(), final_refs: BTreeMap::new(), certified_refs: BTreeMap::new(), alarm: None, evidence: vec![], omit_until: 0, proposed_ref_round: None, proposed_ref_block: None, omit_streak: 0,
@@ -166,8 +178,9 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
         VerifyCtx { chain_id: &self.cfg.chain_id, set: &self.cfg.set, valset_hash: self.valset_hash, genesis: &self.genesis, verifier: &self.verifier }
     }
     fn idctx(&self) -> IdCtx<'_> { IdCtx { protocol_profile: &self.cfg.protocol_profile, chain_id: &self.cfg.chain_id, set: &self.cfg.set } }
-    fn height_of(&self, id: &BlockId) -> Option<u64> { if *id == self.genesis_id { Some(0) } else { self.blocks.get(id).map(|s| s.height) } }
-    fn round_of(&self, id: &BlockId) -> Option<Round> { if *id == self.genesis_id { Some(0) } else { self.blocks.get(id).map(|s| s.round) } }
+    fn height_of(&self, id: &BlockId) -> Option<u64> { if *id == self.genesis_id { Some(0) } else if self.base.as_ref().map_or(false, |b| b.id == *id) { self.base.as_ref().map(|b| b.height) } else { self.blocks.get(id).map(|s| s.height) } }
+    fn round_of(&self, id: &BlockId) -> Option<Round> { if *id == self.genesis_id { Some(0) } else if self.base.as_ref().map_or(false, |b| b.id == *id) { self.base.as_ref().map(|b| b.round) } else { self.blocks.get(id).map(|s| s.round) } }
+    fn is_base(&self, id: &BlockId) -> bool { self.base.as_ref().map_or(false, |b| b.id == *id) }
     fn voter_state(&self) -> VoterState {
         let r = self.store.record();
         VoterState { hvr: r.hvr.unwrap_or(0), hqr: r.hqr.unwrap_or(0) }
@@ -250,6 +263,7 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
             return Err(EngineError::Invalid("proposer signature"));
         }
         // parent certificate
+        if self.base.is_some() && matches!(b.qc, Cert::Genesis(_)) { return Err(EngineError::Invalid("does not extend the seeded checkpoint")); }
         verify_cert(&self.ctx(), &b.qc)?;
         if b.qc.block_id() != b.parent_id { return Err(EngineError::Invalid("parent_id differs from the certificate's block")); }
         let parent_height = match &b.qc {
@@ -286,6 +300,7 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
     }
 
     fn vote_for(&mut self, b: &Block, id: BlockId, out: &mut Vec<Output>) -> Result<(), EngineError> {
+        if self.recovering { return Ok(()); } // no vote (and no re-send of a stored one) while recovering
         let msg = VoteMessage { alg_id: ALG, chain_id: self.cfg.chain_id.clone(), epoch: b.epoch, round: b.round, block_id: id, parent_id: b.parent_id, parent_round: b.qc.round() };
         let bytes = msg.encode().map_err(|_| EngineError::Invalid("vote message"))?;
         let to = self.leader_of(b.round.saturating_add(1));
@@ -374,7 +389,7 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
     /// Commit `target` and its uncommitted ancestors in height order. Refuses (and reports) a block that does not extend the tip.
     fn commit_through(&mut self, target: BlockId, out: &mut Vec<Output>) -> Result<(), EngineError> {
         // a target at or below the tip is already committed if it is an ancestor of the tip, and a fork if it is not
-        if target == self.genesis_id { return Ok(()); }
+        if target == self.genesis_id || self.is_base(&target) { return Ok(()); } // the base is final by construction (authenticated), never re-emitted
         if self.blocks.get(&target).map_or(false, |s| s.height <= self.committed_height) {
             let mut cur = self.committed_tip;
             while cur != self.genesis_id {
@@ -407,6 +422,7 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
     /// The round timer expired: sign and broadcast a timeout for the current round (if the safety rules allow it).
     pub fn local_timeout(&mut self) -> Result<Vec<Output>, EngineError> {
         self.refuse_if_halted()?;
+        self.refuse_if_recovering()?;
         let r = self.round;
         // a reference-bearing proposal of this node failed to gather a QC: omit references for a growing number of leader rotations (doubling per consecutive failure,
         // capped at 2^9 rotations) so that a quorum that cannot check references is not asked again every rotation
@@ -557,6 +573,7 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
     /// After a restart: the stored vote, byte for byte, addressed to the next leader again (a restored node's block tree already holds
     /// the block, so a re-delivered proposal would not be voted for a second time). Counted locally if this node is that leader.
     pub fn resend_last_vote(&mut self) -> Result<Vec<Output>, EngineError> {
+        if self.recovering { return Ok(vec![]); }
         let Some(l) = self.store.record().last_vote.clone() else { return Ok(vec![]) };
         let Ok(msg) = VoteMessage::decode(&l.message, ALG) else { return Ok(vec![]) };
         let to = self.leader_of(msg.round.saturating_add(1));
@@ -568,6 +585,7 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
     /// After a restart: the stored timeout, byte for byte, broadcast again - only if the high QC this node holds is still the one it
     /// reported when it signed (otherwise peers would reject the carried certificate; a later round's timeout is built fresh).
     pub fn resend_last_timeout(&mut self) -> Result<Vec<Output>, EngineError> {
+        if self.recovering { return Ok(vec![]); }
         let Some(l) = self.store.record().last_timeout.clone() else { return Ok(vec![]) };
         let Ok(msg) = TimeoutMessage::decode(&l.message, ALG) else { return Ok(vec![]) };
         if self.high_qc.round() != msg.high_qc_round { return Ok(vec![]); }
@@ -587,6 +605,7 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
     /// Like [`Engine::propose`] with an explicit reference (tests and tools). The block is still subject to every rule when the leader processes its own proposal.
     pub fn propose_with(&mut self, payload: Vec<u8>, checkpoint: Option<CheckpointRef>) -> Result<Vec<Output>, EngineError> {
         self.refuse_if_halted()?;
+        self.refuse_if_recovering()?;
         let r = self.round;
         if !self.is_leader() { return Err(EngineError::NotLeader); }
         if r <= self.proposed { return Err(EngineError::Invalid("already proposed this round")); }
@@ -610,14 +629,86 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
     }
 
     // ------------------------------------------------------------------------------------------------------ checkpoint references
+    fn refuse_if_recovering(&self) -> Result<(), EngineError> {
+        if self.recovering { Err(EngineError::Recovering(self.recovery_missing().unwrap_or_else(|| "complete_recovery has not been called".into()))) } else { Ok(()) }
+    }
+
+    pub fn is_recovering(&self) -> bool { self.recovering }
+    pub fn base(&self) -> Option<&Base> { self.base.as_ref() }
+
+    /// Why the engine may not sign yet, or `None` when every condition holds: the high QC's block is known (so its ancestry down to the base is), and the
+    /// engine has seen at least the highest QC round it ever voted on (the SafetyStore's `hqr`), so it never proposes or votes on a view older than its own record.
+    pub fn recovery_missing(&self) -> Option<String> {
+        if !self.recovering { return None; }
+        let q = &self.high_qc;
+        if self.height_of(&q.block_id()).is_none() && !matches!(q, Cert::Genesis(_)) { return Some(format!("the block certified by the high QC (round {}) has not arrived", q.round())); }
+        let hqr = self.store.record().hqr.unwrap_or(0);
+        if q.round() < hqr { return Some(format!("the high QC round {} is below the highest QC round this validator has signed against ({hqr})", q.round())); }
+        None
+    }
+
+    /// Leave `Recovering` when [`Engine::recovery_missing`] is `None`.
+    pub fn complete_recovery(&mut self) -> Result<(), EngineError> {
+        if let Some(why) = self.recovery_missing() { return Err(EngineError::Recovering(why)); }
+        self.recovering = false; // the round was raised to at least the store's hvr by `seed` and never goes down
+        Ok(())
+    }
+
+    /// Checkpoint-start: adopt an AUTHENTICATED checkpoint as the root of the block tree. The engine enters `Recovering` (no signing at all) until the blocks above
+    /// the base up to the high QC have arrived through [`Engine::on_sync_block`] (validated exactly like proposals, never voted) and [`Engine::complete_recovery`]
+    /// succeeds. The SafetyStore is not touched: its floors (hvr, hqr, last vote, last timeout) are exactly what they were, and the engine's round never goes below hvr.
+    ///
+    /// Forward only and never a rewind: a checkpoint at a height below the committed tip is refused (a stale snapshot); the same checkpoint again is a no-op; a
+    /// different block at the committed height is a conflict. Blocks that do not descend from the new base are dropped (they are below it or on another fork).
+    pub fn seed(&mut self, seed: CheckpointSeed) -> Result<SeedOutcome, EngineError> {
+        let b = &seed.base;
+        if self.committed_height > b.height { return Err(EngineError::Seed(format!("stale checkpoint: height {} is below the committed height {}", b.height, self.committed_height))); }
+        if self.committed_height == b.height {
+            return if self.committed_tip == b.id { Ok(SeedOutcome::AlreadyAtBase) } else { Err(EngineError::Seed("a different block is already committed at the checkpoint height".into())) };
+        }
+        // a committed prefix below the checkpoint must be on the authenticated (final) chain: wherever the evidence names the block at our committed height, it must be our tip.
+        // Where the evidence does not reach that height there is nothing to compare with; under the stated assumptions two final chains cannot differ.
+        if self.committed_height > 0 {
+            let at = seed.chain.iter().find(|p| p.height == self.committed_height).map(|p| p.id).or_else(|| b.ancestors.iter().find(|(h, _)| *h == self.committed_height).map(|(_, id)| *id));
+            if let Some(id) = at { if id != self.committed_tip { return Err(EngineError::Seed("the committed history conflicts with the authenticated checkpoint".into())); } }
+        }
+        self.base = Some(b.clone());
+        self.committed_tip = b.id;
+        self.committed_height = b.height;
+        // keep only blocks that descend from the base
+        let base_id = b.id; let base_h = b.height;
+        let keep: Vec<BlockId> = self.blocks.iter().filter(|(_, s)| s.height > base_h).map(|(id, _)| *id).filter(|id| {
+            let mut cur = *id;
+            loop { match self.blocks.get(&cur) { Some(s) => { if s.parent == base_id { return true; } if s.height <= base_h + 1 { return false; } cur = s.parent; } None => return false } }
+        }).collect();
+        let keep: std::collections::BTreeSet<BlockId> = keep.into_iter().collect();
+        self.blocks.retain(|id, _| keep.contains(id));
+        self.deferred.retain(|id| keep.contains(id));
+        if let Some(r) = b.state.last_ref { self.final_refs.insert(r.height, r); }
+        self.final_refs.insert(seed.cref.height, seed.cref);
+        // the authenticated checkpoint root is attested by a final carrier: the engine may rely on it like a final ancestor's reference
+        let mut sink = vec![];
+        if seed.high_qc.round() > self.high_qc.round() { self.high_qc = seed.high_qc.clone(); }
+        if let Some(t) = &seed.high_tc { self.observe_tc(t.clone(), &mut sink); }
+        let before = self.round;
+        self.round = next_round(self.round, self.high_qc.round()).max(self.store.record().hvr.unwrap_or(0));
+        if self.round != before { self.entered(&mut sink); }
+        self.recovering = true;
+        Ok(SeedOutcome::Seeded)
+    }
+
     fn refuse_if_halted(&self) -> Result<(), EngineError> {
         match &self.alarm { Some(a) => Err(EngineError::Halted(format!("{a:?}"))), None => Ok(()) }
     }
 
     /// `(F(B), last reference)` for a child of `parent`: the two-chain rule applied to the parent and its own parent, and the most recent reference on the chain.
     fn child_state(&self, parent: &BlockId) -> (u64, Option<CheckpointRef>) {
+        if let Some(b) = self.base.as_ref().filter(|b| b.id == *parent) {
+            let p = if b.height >= 2 { Some((b.parent_round, b.height - 1)) } else { None };
+            return (final_height_after(b.state.final_height, b.round, p), b.state.last_ref);
+        }
         let Some(c) = self.blocks.get(parent) else { return (0, None) }; // the genesis block
-        let p = if c.parent == self.genesis_id { None } else { self.blocks.get(&c.parent).map(|s| (s.round, s.height)) };
+        let p = if c.parent == self.genesis_id { None } else if let Some(b) = self.base.as_ref().filter(|b| b.id == c.parent) { Some((b.round, b.height)) } else { self.blocks.get(&c.parent).map(|s| (s.round, s.height)) };
         (final_height_after(c.state.final_height, c.round, p), c.state.last_ref)
     }
 
@@ -625,6 +716,11 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
     fn ancestor_at(&self, from: &BlockId, height: u64) -> Option<BlockId> {
         let mut cur = *from;
         loop {
+            if let Some(b) = self.base.as_ref().filter(|b| b.id == cur) {
+                if b.height == height { return Some(cur); }
+                if b.height < height { return None; }
+                return b.ancestors.iter().find(|(h, _)| *h == height).map(|(_, id)| *id);
+            }
             let s = self.blocks.get(&cur)?;
             if s.height == height { return Some(cur); }
             if s.height < height { return None; }
@@ -687,7 +783,7 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
     /// Heights between the committed tip and the most recent reference on the committed chain (or the whole committed height if there is none): the monitoring
     /// figure for "optional references do not guarantee checkpoint progress".
     pub fn checkpoint_age(&self) -> u64 {
-        let last = self.blocks.get(&self.committed_tip).and_then(|s| s.state.last_ref).map_or(0, |r| r.height);
+        let last = (if self.is_base(&self.committed_tip) { self.base.as_ref().and_then(|b| b.state.last_ref) } else { self.blocks.get(&self.committed_tip).and_then(|s| s.state.last_ref) }).map_or(0, |r| r.height);
         self.committed_height.saturating_sub(last)
     }
     /// Whether `checkpoint_age` exceeds the configured alarm age (a number of intervals); always false without checkpoint configuration.
