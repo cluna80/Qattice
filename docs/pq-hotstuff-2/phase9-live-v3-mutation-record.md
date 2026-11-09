@@ -88,3 +88,48 @@ The runtime monitor in the node has two parts: the signing counter must not move
 @@ -606 +605,0 @@
 -        if self.recovering { return Ok(vec![]); }
 ```
+
+
+---
+
+## Review follow-up — the proposal-gate survivor, and the two review fixes (code `a929c94fafba9b0939545d3c2787c4d5bdb04ea3`)
+
+Run one at a time in a disposable git worktree with its own target directory, after a baseline for each command (all passed: live controlled-leader test 184.5 s, crash-injection test 30.8 s, restart test 47.8 s). **3 mutants; 3 caught; 0 survived; 0 timeouts; 0 build errors.**
+
+| # | Mutation | Result | Seconds | Failure observed |
+|---|---|---|---|---|
+| 1 | proposal gate (the surviving process-level mutant) | CAUGHT | 72.7 | node 3 exited (exit status: 2) while waiting for: the gate is reached: the engine is asked to propose while recovering and refuses; pq-devnet-node: SAFETY: the signing co |
+| 2 | staging: refuse a snapshot below the target's executed height | CAUGHT | 78.8 | installing a snapshot below the executed height (executed 59) must be refused:  |
+| 3 | restart: complete recovery before the re-sends (the fix) | CAUGHT | 35.4 | every dependency is present, so the restart completes recovery |
+
+**Status of the two process-level survivors recorded above:**
+* **Proposal gate — NOT CLOSED (under revision); one run caught the mutant, a later run of the same design never reached a leader state, so this is not recorded as closed.** The earlier survivor was a reachability limit: a recovering node proposes only if it is the leader of its post-install round, which an uncontrolled run leaves to chance. `live_v3_a_recovering_node_that_leads_its_round_is_asked_to_propose_refuses_and_signs_nothing` now controls it: it re-stages the victim (the staging tool's `--lag K` ends the evidence K blocks before the donor's tip, with an older valid QC) until its first status says it leads its round, then waits for the node itself to report that its engine was ASKED to propose while recovering and REFUSED (`propose_refused_while_recovering >= 1`; 10 refusals in the recorded run) - positive evidence that the gate was reached and held - and checks that nothing was signed or sent. With the gate removed the node stopped itself (`SAFETY`) in that scenario. A structural fact found while building it: while the victim is down no QC can form for the round just before its own slot (it would have to aggregate those votes), so the donors' recent chains never contain the one QC round that puts it on its slot; the evidence must reach back across the moment it went down (observed: 24 attempts with a recent-tip evidence, never the leader).
+* **Re-send of a stored timeout — remains IN-PROCESS coverage only, by label.** A stored timeout is re-sent only if the node's high QC round equals the one the timeout was signed on; a staged snapshot's high QC is the donor's, so a process test cannot arrange that without stalling the whole network at a controlled round. It is mutation-caught deterministically in-process (`phase7-mutation-record.md`, `resend timeout gate`). No process test reaches it, and none is claimed.
+
+
+### The exact diffs
+
+#### 1. proposal gate (the surviving process-level mutant) — CAUGHT
+```diff
+--- a/chain-forge-consensus/src/pq_hotstuff/engine.rs
++++ b/chain-forge-consensus/src/pq_hotstuff/engine.rs
+@@ -626 +625,0 @@
+-        self.refuse_if_recovering()?;
+```
+
+#### 2. staging: refuse a snapshot below the target's executed height — CAUGHT
+```diff
+--- a/chain-forge-node/src/pq_devnet.rs
++++ b/chain-forge-node/src/pq_devnet.rs
+@@ -506 +506 @@
+-        if cur.height > cref.height { return Err(format!("stale: the target's application state is already at height {}, above the checkpoint at {}; installing an older snapshot would rewind it; nothing was changed", cur.height, cref.height)); }
++        if false { return Err(format!("stale: the target's application state is already at height {}, above the checkpoint at {}; installing an older snapshot would rewind it; nothing was changed", cur.height, cref.height)); }
+```
+
+#### 3. restart: complete recovery before the re-sends (the fix) — CAUGHT
+```diff
+--- a/chain-forge-consensus/src/pq_hotstuff/driver.rs
++++ b/chain-forge-consensus/src/pq_hotstuff/driver.rs
+@@ -209 +208,0 @@
+-        d.try_complete_recovery();
+```
