@@ -4,7 +4,7 @@ Code under test: commit `308d9dc96d345d73f325e19570f33e8c02a20abf` (`feat/pq-hot
 
 Baseline (unmutated, same command): **PASS test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 141 filtered out; finished in 27.59s** in 27.8 s. Per-mutant timeout 900 s; none timed out.
 
-**Final accounting: 31 mutants; 29 caught; 2 survived; 0 timeouts; 0 build errors; 0 not applicable.** The two survivors are explained below and are NOT counted as caught.
+**Accounting of the 31-mutant campaign on `308d9dc`: 29 caught; 2 survived; 0 timeouts; 0 build errors; 0 not applicable.** One survivor was later closed (see the addendum at the end); the other is explained below and is NOT counted as caught.
 
 An earlier run of a 33-mutant list on `b9cd042` caught 23 and left 10 survivors: 5 test gaps (executor block id at the base; the base root re-persisted; completion at start; the base-height boundary of sync windows; trailing bytes inside a checksummed evidence body), closed by new assertions; 2 redundant checks (the completion trigger after a sync response and the explicit below-base length check), removed together with their mutants; 1 (completion on tick) that was only redundant with the removed trigger and is now caught; and the 2 survivors recorded below. The two lists differ because the code differs; this record is of the final code.
 
@@ -322,3 +322,17 @@ An earlier run of a 33-mutant list on `b9cd042` caught 23 and left 10 survivors:
 -            let recovery_available = match r.u8()? { 0 => false, 1 => true, _ => return Err(NetError::Malformed("flag")) };
 +            let recovery_available = r.u8()? != 0;
 ```
+
+
+## Addendum — the surviving `driver: base root recorded` mutant (code `dc89d456ae148a66d7634c6cc617c4796950f106`)
+Between `308d9dc` and `dc89d45` only test code and docs changed (`git diff 308d9dc dc89d45 -- chain-forge-consensus/src chain-forge-node` is empty), so the 28 results above for the other mutants still describe the production source; they were not re-run. Only the following were re-run, one at a time in a disposable worktree after a baseline (28 tests passed, 17.1 s):
+
+| Mutation | Result | Failing test |
+|---|---|---|
+| driver: base root recorded (the previously surviving mutant: the driver's `record_root` of the authenticated checkpoint root removed) | **CAUGHT** | `a_correctly_signed_proposal_with_a_conflicting_root_at_exactly_the_installed_base_height_is_mismatch_evidence_and_is_never_signed_for` |
+| engine: a mismatch classified `Unknown` instead of `Mismatch` | **CAUGHT** | same test |
+| engine: vote despite a mismatch (`vote_for` called after noting the evidence) | **CAUGHT** | same test |
+
+**Why it survived before, and what closed it.** When the executor's cursor is exactly at the base (how the first test started), the driver's older reconcile step already records the root from the cursor, so the base-root call was redundant there. It is the only source of that root when the executor is AHEAD of the base and the root log lacks the base height (a restart). The test now starts that way. Run with the mutant, the engine has no root for the base height, the conflicting reference is classified `Unknown`, and the assertions on `Mismatch` and on `engine.root(height)` fail.
+
+**`driver: commit marker offset` remains a survivor and is documented separately.** What is demonstrated (`rewriting_an_existing_commit_marker_with_the_same_content_changes_nothing_but_the_number_of_writes`): rewriting an existing commit marker with identical content yields byte-identical files and an identical loaded history, so the mutant's observable logical result is unchanged. What is NOT demonstrated or claimed: that the extra writes are free (each is a write, a sync and a rename), or what a crash in the middle of one of them would leave. It is equivalent only in the first sense.

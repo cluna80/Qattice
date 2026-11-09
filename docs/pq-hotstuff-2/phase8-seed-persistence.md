@@ -40,18 +40,27 @@ While `Recovering` the engine signs nothing (see #143); the driver tolerates the
 * **The node and the TCP devnet do not run profile v3.** A live v3 test over TCP needs node wiring and a v3 genesis, which is outside this PR.
 * Blocks below the base are not served (answered with advice only); pruning is not implemented.
 * The deferred-vote set is volatile; a restart drops it (costs a vote, not safety).
-* Two mutants survive (see `phase8-mutation-record.md`): one equivalent in effect, one an acknowledged test gap (classification of a conflicting root at exactly the checkpoint height).
+* One mutant survives (`phase8-mutation-record.md`): the commit-marker offset, whose logical result is unchanged (shown) while its extra write/sync/rename operations are not. The earlier gap (classification of a conflicting root at exactly the checkpoint height) is closed by a test.
 * Windows confirmation of the code commit, and the review this PR needs, before anything is enabled.
 
 ## Linux results (sandbox; NOT a milestone confirmation — Windows confirmation is still required)
-Run on a clean tree whose code is `308d9dc96d345d73f325e19570f33e8c02a20abf`. Release mode, `PQHS_SEEDS=10`.
+Run on a clean tree whose code is `dc89d456ae148a66d7634c6cc617c4796950f106` (production source identical to `308d9dc`; later commits changed tests and docs only). Release mode, `PQHS_SEEDS=10`.
 | Suite | Result |
 |---|---|
-| real ML-DSA-65 `pq_hotstuff_engine_fips204` | 165 passed, 0 failed, 2 ignored (158 + 7 new) |
-| doubles `pq_hotstuff_engine` | 165 passed, 0 failed, 2 ignored |
+| real ML-DSA-65 `pq_hotstuff_engine_fips204` | 167 passed, 0 failed, 2 ignored (158 + 9 new) |
+| doubles `pq_hotstuff_engine` | 167 passed, 0 failed, 2 ignored |
 | foundation / safety (doubles, fips204) / wire | 30 / 76 + 11 / 24 passed |
 | consensus lib (`pq-hotstuff`, `pq-hotstuff-fips204`, default) | 98 / 98 / 98 passed |
 | core lib / p2p lib | 74 / 21 passed |
 | node: default check, `pq-devnet` check, `pq_devnet` unit tests | ok / ok / 4 passed |
-| LIVE four-node TCP devnet (profile **v2**) | 1 passed, 38 s — regression evidence only; it does not run profile v3 or seeding |
-The 7 new tests: evidence codec strictness; block-store evidence rules; authentication against the node's own configuration; the refusal matrix for a start; below-base serving and advice; a sync window straddling the base; and the live v3 recovery scenario. Mutation campaign: 29 of 31 caught, 2 survive (`phase8-mutation-record.md`).
+| LIVE four-node TCP devnet (profile **v2**) | 1 passed — regression evidence only; it does not run profile v3 or seeding |
+Mutation: 29 of 31 caught on `308d9dc`; the previously surviving base-root mutant and two mutants attacking the new conflict test were re-run on `dc89d45` and are all caught; one survivor remains (commit-marker offset). See `phase8-mutation-record.md`.
+
+## What is demonstrated, and what is still missing
+| Demonstrated here | Still missing |
+|---|---|
+| Re-authenticated evidence and checkpoint-based restart | Automated network snapshot installation |
+| Four drivers recovering on an in-process network | Profile-v3 TCP/process recovery |
+| No duplicate execution in the tested scenarios | Real Qattice application snapshot integration |
+| Base-aware storage and explicit sync advice | Pruning and bounded evidence growth |
+| A conflicting root at exactly the base height is `Mismatch` evidence and never signed for (with a matching-root control) | A run on Windows; this PR's own review |
