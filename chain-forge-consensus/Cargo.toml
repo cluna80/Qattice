@@ -22,6 +22,8 @@ real-crypto = ["chain-forge-crypto", "chain-forge-crypto/real-pqc"]
 pq-hotstuff = ["dep:sha3"]
 # S-2b: snapshot SERVING and capture inside the PQ-HotStuff-2 driver. Off by default; a driver additionally needs an explicit runtime opt-in (`enable_snapshot_serving`).
 pq-snapshot-transfer = ["pq-hotstuff"]
+# Anchored (incremental) evidence (docs/pq-hotstuff-2/phase11-anchored-evidence-scope.md). Off by default; AN-1 is storage only (nothing verifies or uses an anchor yet).
+pq-anchored-evidence = ["pq-hotstuff"]
 # The real FIPS 204 ML-DSA-65 adapter for the safety-state signer/verifier traits (in-memory keys only; off by default).
 # (enables ONLY chain-forge-crypto's fips204-backend; the Ed25519 `real-crypto` feature stays tied to the `real-crypto` feature)
 pq-hotstuff-fips204 = ["pq-hotstuff", "chain-forge-crypto/fips204-backend"]
