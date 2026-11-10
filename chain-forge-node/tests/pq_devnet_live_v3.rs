@@ -476,7 +476,7 @@ fn live_v3_a_recovering_node_that_leads_its_round_is_asked_to_propose_refuses_an
 
 // ------------------------------------------------------------------------------------------------------------------------ S-2b: snapshot serving (opt-in)
 fn snapshot_dirs(dir: &Path) -> Vec<String> {
-    std::fs::read_dir(dir.join("snapshots")).map(|r| r.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| n.len() == 64).collect()).unwrap_or_default()
+    std::fs::read_dir(dir.join("snapshot-cache").join("snapshots")).map(|r| r.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| n.len() == 64).collect()).unwrap_or_default()
 }
 
 /// Without the build feature the opt-in flag is REFUSED (never silently ignored), and nothing else changes: the node simply does not start.
@@ -502,7 +502,7 @@ fn live_v3_with_the_feature_built_but_the_flag_off_the_node_behaves_as_before() 
     let mut net = Net::new("flagoff2");
     for i in 0..N { net.start(i); }
     net.wait("all four execute height 40", 90, |n| n.heights().iter().all(|h| *h >= 40));
-    for i in 0..N { let s = net.status(i).unwrap(); assert!(s.get("snapshot_serving").is_none(), "no snapshot status without the flag"); assert!(!net.dirs[i].join("snapshots").exists(), "no snapshot directory without the flag"); }
+    for i in 0..N { let s = net.status(i).unwrap(); assert!(s.get("snapshot_serving").is_none(), "no snapshot status without the flag"); assert!(!net.dirs[i].join("snapshot-cache").exists(), "no snapshot directory without the flag"); }
     net.assert_agreement("flag off");
 }
 

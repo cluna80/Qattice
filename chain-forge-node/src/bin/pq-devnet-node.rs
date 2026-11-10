@@ -242,8 +242,10 @@ fn enable_serving(drv: &mut Drv, args: &[String], cfg: &DevnetConfig, genesis_ha
     let codec = CodecLimits { transport: lim.transport, n: cfg.endpoints()?.len(), max_headers: 64, max_chunk_size: 262_144, max_chunk_count: 65_536, max_snapshot_bytes: retention.max_snapshot_bytes };
     // the minimum spacing is what throttles a flood of SMALL requests (the byte buckets refund what a small answer did not use)
     let serve = ServeConfig { limit, burst: 2 * limit, refill_per_s: limit / 2, aggregate_per_s: 8 * limit, max_concurrent: 16, per_peer_outstanding: 4, min_spacing_ms: num("--snapshot-min-spacing-ms", 20)?, chunk_size: 262_144 };
-    let scfg = ServingConfig { serve, codec, genesis_hash, chunk_size: 262_144, max_candidates: 8, pin_idle_ms: num("--snapshot-pin-idle-ms", 300_000)?, max_pins_per_peer: 1, max_pins_total: 4 };
-    let fs = StdTreeFs::new(flag(args, "--snapshot-dir").map(PathBuf::from).unwrap_or_else(|| dir.join("snapshots"))).map_err(|e| e.0)?;
+    let scfg = ServingConfig { serve, codec, genesis_hash, chunk_size: 262_144, max_candidates: 8, pin_idle_ms: num("--snapshot-pin-idle-ms", 60_000)?, max_pins_per_peer: 1, max_pins_total: 4 };
+    let snap_dir = flag(args, "--snapshot-dir").map(PathBuf::from).unwrap_or_else(|| dir.join("snapshot-cache"));
+    std::fs::create_dir_all(&snap_dir).map_err(|e| format!("snapshot directory: {e}"))?;
+    let fs = StdTreeFs::new(snap_dir).map_err(|e| e.0)?;
     let store = SnapshotStore::open(fs, retention, codec, genesis_hash).map_err(|e| format!("snapshot cache refused: {e}"))?;
     let svc = SnapshotServing::new(store, scfg, now).map_err(|e| format!("snapshot serving refused: {e}"))?;
     drv.enable_snapshot_serving(Box::new(svc));

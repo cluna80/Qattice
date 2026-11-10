@@ -80,6 +80,8 @@ fn every_node_captures_the_final_references_it_executed_and_each_snapshot_measur
         checked += 1;
     }
     assert!(checked >= 1, "at least one retained snapshot was served and measured");
+    let c = svc_counters(&net, 0);
+    assert_eq!((c.pins_released_complete, c.pinned_now), (checked, 0), "each transfer that fetched every chunk released its pin at once: {c:?}");
 }
 
 /// Drive an S-1 requester through real drivers: peers `0..k` of `net` are the providers, `me` is the label they see as the asker.
@@ -119,6 +121,11 @@ fn an_s1_requester_installs_from_live_driver_providers_with_silent_and_non_servi
     assert_eq!(rig.req.outstanding(), 0, "every request slot was released");
     assert!(rig.req.stats.dropped_unsolicited + rig.req.stats.dropped_late <= 4, "{:?}", rig.req.stats);
     for i in [0usize, 1] { assert_eq!(svc_counters(&net, i).gate_concurrent, 0, "the provider's admission slots are all released"); }
+    // the requester spread its chunks over both providers, so neither saw a complete transfer: their pins are released by the idle timeout, never held for ever
+    let later = net.now + 6_000;
+    for i in [0usize, 1] { let _ = net.nodes[i].as_mut().unwrap().tick(later); }
+    let served: Vec<ServingCounters> = [0usize, 1].iter().map(|i| svc_counters(&net, *i)).collect();
+    assert!(served.iter().all(|c| c.pinned_now == 0), "no pin outlives the transfer: {served:?}");
     let app = installed_app(&rig.req.sink().fs, rec.generation);
     drop(rig);
     let bs = Rc::try_unwrap(bs).ok().expect("sole owner").into_inner();
@@ -234,4 +241,39 @@ fn an_exhausted_snapshot_budget_defers_capture_without_disturbing_consensus_or_w
     for i in 0..3_000u64 { if let Some(RecoveryMsg::ManifestResp { body: ManifestBody::Busy { .. }, .. }) = ask(&mut net, 0, 1, &RecoveryMsg::ManifestReq { request_id: i, cref: r }).first() { busy += 1; } }
     assert!(busy > 0, "a flood is told to back off");
     assert_eq!(svc_counters(&net, 0).gate_concurrent, 0);
+}
+
+#[test]
+fn only_the_state_this_node_executed_at_the_height_and_that_the_final_reference_attests_is_captured() {
+    use chain_forge_consensus::pq_hotstuff::exec::ExecCursor;
+    let mut svc = SnapshotServing::new(SnapshotStore::open({ let mut fs = MemTreeFs::new(tfaults()); extras(&mut fs); fs }, rest(), rl(), GENESIS_HASH).unwrap(), scfg(1, 3), 0).unwrap();
+    let state: Vec<u8> = (0..200u8).collect();
+    let cur = |h: u64, id: u8, root: u8| ExecCursor { height: h, block_id: [id; 32], state_digest: [root; 32] };
+    svc.note_executed(&cur(8, 1, 2), Some(state.clone()));
+    // a reference naming a different root, a different block, or a height this node never executed: nothing is captured
+    for r in [CheckpointRef { height: 8, block_id: [1; 32], state_root: [9; 32] }, CheckpointRef { height: 8, block_id: [9; 32], state_root: [2; 32] }, CheckpointRef { height: 16, block_id: [1; 32], state_root: [2; 32] }] { svc.note_final_ref(&r); }
+    assert_eq!(svc.counters().captured, 0, "{:?}", svc.counters());
+    // an executor that cannot produce a snapshot contributes no candidate
+    svc.note_executed(&cur(16, 3, 4), None);
+    svc.note_final_ref(&CheckpointRef { height: 16, block_id: [3; 32], state_root: [4; 32] });
+    assert_eq!(svc.counters().captured, 0);
+    // the matching reference captures exactly once
+    svc.note_final_ref(&CheckpointRef { height: 8, block_id: [1; 32], state_root: [2; 32] });
+    assert_eq!(svc.counters().captured, 1);
+    svc.note_final_ref(&CheckpointRef { height: 8, block_id: [1; 32], state_root: [2; 32] });
+    assert_eq!(svc.counters().captured, 1, "the candidate is consumed");
+    // the candidate map is bounded
+    for h in 100..120u64 { svc.note_executed(&cur(h, 5, 6), Some(state.clone())); }
+    assert!(svc.counters().candidates_dropped >= 12, "{:?}", svc.counters());
+}
+
+#[test]
+fn serving_configuration_is_validated_locally_before_any_use() {
+    let ok = scfg(1, 3);
+    assert!(ok.validate().is_ok());
+    let mut c = ok.clone(); c.max_pins_per_peer = 4; assert!(c.validate().is_err(), "per-peer pins above the total");
+    let mut c = ok.clone(); c.chunk_size = 0; assert!(c.validate().is_err());
+    let mut c = ok.clone(); c.chunk_size = c.codec.max_chunk_size + 1; assert!(c.validate().is_err(), "chunk above the codec maximum");
+    let mut c = ok.clone(); c.pin_idle_ms = 0; assert!(c.validate().is_err());
+    let mut c = ok.clone(); c.serve.burst = 1; assert!(c.validate().is_err(), "the serve gate's own invariants are checked");
 }
