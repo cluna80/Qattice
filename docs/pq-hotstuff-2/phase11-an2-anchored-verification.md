@@ -1,6 +1,6 @@
 # PQ-HotStuff-2 - AN-2: anchored verification — segmented verifier, build-record, cross-check and audit (DRAFT; off by default)
 
-Scope: `phase11-anchored-evidence-scope.md` (PR #152; sections 5A, 5B and 6A; owner decisions of 2026-11-10). Stacked on AN-1 (`feat/pq-hotstuff-2-anchored-evidence-an1`, frozen at `e0d29c847d3848fa8eee880368304460dce9fab5`). **Code freeze pending Windows confirmation.**
+Scope: `phase11-anchored-evidence-scope.md` (PR #152; sections 5A, 5B and 6A; owner decisions of 2026-11-10). Stacked on AN-1 (`feat/pq-hotstuff-2-anchored-evidence-an1`, frozen at `e0d29c847d3848fa8eee880368304460dce9fab5`). **Frozen code commits: `f7ffded38465c4249c3c1dc9e75ce52fc55ab691` (initial AN-2 implementation) and `7f2416d` (adds M11 survivor test). Windows confirmation required before milestone is closed.**
 Feature `pq-anchored-evidence`, OFF by default. **Nothing in the node, driver or network calls any of this; no anchor-start mode exists; pruning is not implemented.**
 
 ---
@@ -28,6 +28,8 @@ Anchor {
 ### B. Build-record (`build_record`)
 Accepts only a `CheckpointSeed` (constructible only by `authenticate_checkpoint`, which runs the full `verify_header_chain` rule set). The seed pins the carrier block and the two consecutive-round blocks that constitute the finality proof. `build_record` locates those blocks in the provided headers, re-decodes the proof under the configured limits, and records the result. Because the seed can only come from verified evidence, the resulting `AnchorRecord` can only summarize the node's own verification (trust rule T2: a record cannot be forged from arbitrary headers, only from successfully verified ones).
 
+The re-decode step (`AnchorRecord::decode(&rec.encode(), lim)`) enforces that the stored record is exactly what a later open would accept. A proof that exceeds `lim.max_proof_headers` or `lim.max_proof_bytes` is refused here, not at open time.
+
 ### C. Cross-check (`cross_check`)
 Re-verifies the finality proof in an `AnchorRecord` against the genesis validator set. This proves that a genesis-keyed quorum certified the anchor block's round. It does **not** prove that every block from genesis to the anchor was rule-valid — that gap is intentional (the cross-check is a lightweight sanity check, not a full re-audit). The gap is closed by the Audit.
 
@@ -43,6 +45,8 @@ Advances from genesis to the anchor, verifying rule-valid history one segment at
 - `ancestors` window (all checkpoint references in the sliding window)
 
 Progress is capped at `anchor.height` — the audit never claims to have gone beyond the block it was given, even if the provided headers extend further. The audit is resumable: the caller feeds windows of headers and calls `advance` until `AuditStep::complete` is true.
+
+**An audit establishes historical validity only after it completes successfully.** Until `AuditStep::complete` is true (every field matched, anchor height finalized), the local-storage trust assumption from AN-1 remains in effect: the record was written by this node's own prior verified run, but the re-verification from genesis has not yet confirmed it. A partial audit provides no additional trust; a failed audit invalidates the record.
 
 **Re-verifying certificates alone does not turn an arbitrary persisted anchor into trusted history.** A caller who has forged or corrupted `anchor.last_ref` or `anchor.ancestors` will see `Mismatch("final height or last reference")` or `Mismatch("ancestors window")` from `Audit::advance`. A forked or substituted chain at the anchor height yields `Mismatch("block id at the anchor height")`. The cross-check alone cannot detect these: it validates the finality proof but cannot see that the anchor fields disagree with the actual rule-valid history from genesis.
 
@@ -61,7 +65,7 @@ pub fn resume_point(p: &ChainParams, start: &Start, vc: &VerifiedChain) -> Optio
 pub struct Segmented { pub tip, pub finalized, pub resume: Option<Anchor>, pub segments: usize }
 pub fn verify_segments<V: ConsensusVerifier>(p, v, start, headers, final_qc, seg) -> Result<Segmented, SegmentError>
 
-// Build-record (only from an authenticated seed)
+// Build-record (only from an authenticated seed; re-decoded under lim before returning)
 pub fn build_record(seed: &CheckpointSeed, headers, final_qc, generation, provenance,
                     audited_height, binding, lim) -> Result<AnchorRecord, AnchorError>
 
@@ -69,7 +73,7 @@ pub fn build_record(seed: &CheckpointSeed, headers, final_qc, generation, proven
 pub struct ProofChecked { pub anchor_height: u64, pub proof_headers: usize }
 pub fn cross_check<V: ConsensusVerifier>(rec, p, v, lim) -> Result<ProofChecked, CrossCheckError>
 
-// Resumable audit (closes the gap cross_check leaves)
+// Resumable audit (closes the gap cross_check leaves; establishes history only on completion)
 pub struct AuditStep { pub audited_height: u64, pub complete: bool }
 pub struct Audit { /* anchor, cur, next_height, audited, seg, checked_anchor */ }
 impl Audit {
@@ -82,19 +86,24 @@ impl Audit {
 
 ---
 
-## Evidence at the AN-2 commit (Linux, release, REAL FIPS 204 ML-DSA-65; NOT milestone confirmation)
+## Evidence at the frozen commits (Linux, release mode, REAL FIPS 204 ML-DSA-65; NOT milestone confirmation)
 
-Required engine run: the named real-crypto binary only. All statuses 0.
+Exact command for each run (sequential, no overlap, working tree clean):
+```
+cargo test --release --features <FEATURES> --test pq_hotstuff_engine_fips204 -- --nocapture
+```
 
-| Configuration | engine (`pq_hotstuff_engine_fips204`) | anchored+snapshot |
-|---|---|---|
-| `pq-hotstuff-fips204` (feature OFF) | **194** passed, 2 ignored | — |
-| `pq-hotstuff-fips204,pq-anchored-evidence` | **209** passed, 2 ignored | — |
-| `pq-hotstuff-fips204,pq-snapshot-transfer,pq-anchored-evidence` | **218** passed, 2 ignored | — |
+**Commit `7f2416d`** (adds M11 survivor test; head of the branch):
 
-The feature-off engine count is **unchanged** (194). The node tests were NOT rerun on Linux at this commit (no node, driver or network code changed). Counts above are from background sandbox runs (see notification); Windows-confirmed counts are the milestone gate.
+| Features | `running` reported | Final summary | Runtime | Cargo exit |
+|---|---|---|---|---|
+| `pq-hotstuff-fips204` (feature OFF) | 196 | **194 passed; 0 failed; 2 ignored** | 38.15 s | 0 |
+| `pq-hotstuff-fips204,pq-anchored-evidence` | 212 | **210 passed; 0 failed; 2 ignored** | 41.34 s | 0 |
+| `pq-hotstuff-fips204,pq-snapshot-transfer,pq-anchored-evidence` | 221 | **219 passed; 0 failed; 2 ignored** | 43.57 s | 0 |
 
-**15 new tests over AN-1 (194 → 209; AN-1 added 8, AN-2 adds 7):**
+The feature-off engine count is **unchanged** (194). The node tests were NOT rerun on Linux (no node, driver or network code changed).
+
+**16 new tests over AN-1 baseline (194 → 210; AN-1 added 8, AN-2 adds 8):**
 
 | # | Test name | What it tests |
 |---|---|---|
@@ -102,32 +111,37 @@ The feature-off engine count is **unchanged** (194). The node tests were NOT rer
 | 2 | `a_restart_boundary_carries_exactly_the_resume_state_and_the_unfinalized_suffix_is_represented_never_skipped` | Resume point is the highest finalized block (never the tip); re-presenting the unfinalized suffix to the next run finalizes the same blocks exactly once; skipping the suffix is structurally impossible (parent link fails) |
 | 3 | `a_returning_node_extending_from_its_own_anchor_record_authenticates_the_same_checkpoint_as_from_genesis` | A node that persisted AN-1-style verification as its own anchor can continue from that anchor and authenticate the next checkpoint identically to a from-genesis run; the extended record round-trips and cross-checks |
 | 4 | `the_cross_check_reverifies_the_proof_against_the_genesis_validator_set_and_rejects_every_tampering` | Correct genesis-keyed proof → `ProofChecked`; tampered binding, structure, headers, and reference are each rejected |
-| 5 | `the_finality_cross_check_does_not_establish_history_and_the_audit_closes_exactly_that_gap` | Forged `last_ref` / ancestors PASS cross_check; forked chain PASSES cross_check; both FAIL audit at the specific mismatched field (the cross-check / history distinction pinned) |
-| 6 | `the_audit_compares_every_anchor_field_a_start_would_trust_and_progress_is_capped_at_the_anchor` | Covers M6–M10: each forged field (`round`, `parent_round`, `final_height`+`last_ref`, `ancestors`) caught individually; `audited_height ≤ anchor.height` throughout even when headers extend beyond |
+| 5 | `the_finality_cross_check_does_not_establish_history_and_the_audit_closes_exactly_that_gap` | Forged `last_ref` / ancestors PASS cross_check; forked chain PASSES cross_check; both FAIL audit at the specific mismatched field (cross-check / history distinction pinned) |
+| 6 | `the_audit_compares_every_anchor_field_a_start_would_trust_and_progress_is_capped_at_the_anchor` | Each forged field (`round`, `parent_round`, `final_height`+`last_ref`, `ancestors`) caught individually; `audited_height ≤ anchor.height` throughout even when headers extend beyond |
 | 7 | `the_audit_reverifies_genesis_to_the_anchor_in_bounded_segments_with_forward_only_durable_progress` | Full genesis-to-anchor audit completes; `audited_height == anchor.height`; progress is durable and forward-only |
+| 8 | `build_record_re_decodes_under_the_caller_limits_and_rejects_a_proof_that_exceeds_them` | `build_record` with limits one header tighter than the proof returns `ProofTooLarge`; confirms the re-decode step is enforced (M11) |
 
 ---
 
-## Mutation record (real crypto; a spot check of chosen mutants, not a proof)
+## Mutation record (real crypto, release mode; a spot check of chosen mutants, not a proof)
 
-12 mutants applied; **all 12 caught** after the 7th test was added.
+**Baseline**: commit `f7ffded` (initial AN-2 implementation, 7 tests). Campaign run with all 8 tests at commit `7f2416d`.
 
-| ID | Mutation | First caught by | Test added |
+12 mutants; **10 caught by assertion failure, 2 are compile errors** (the mutations produce ill-typed code that cannot compile):
+
+| ID | Mutation | Verdict | Caught by |
 |---|---|---|---|
-| M1 | `resume_point` returns tip instead of finalized top | T1 (segmented equals uninterrupted) | No |
-| M2 | Skips suffix re-presentation on segment boundary | T1 | No |
-| M3 | Skips `AnchorBinding` check in `build_record` | T4 (binding mismatch) | No |
-| M4 | Skips `ReferenceNotAttested` path in `cross_check` | T5 (trust gap pin) | No |
-| M5 | Skips audit `id` check | T5 | No |
-| M6 | Skips audit `round` comparison | T7 (survivor cover) | Yes |
-| M7 | Skips audit `parent_round` comparison | T7 | Yes |
-| M8 | Skips audit `final_height`/`last_ref` check | T7 | Yes |
-| M9 | Skips audit `ancestors` window comparison | T7 | Yes |
-| M10 | Removes `audited_height ≤ anchor.height` cap | T7 | Yes |
-| M11 | Skips proof re-decode in `cross_check` | T3 (cross_check validates proof) | No |
-| M12 | Skips structural reference check (`reference.height == anchor.height`) | T3 | No |
+| M1 | `resume_point` returns `vc.tip` instead of `*vc.finalized.last()?` | CAUGHT | T1 |
+| M2 | Skips suffix re-presentation; advances `consumed` by full `seg` instead of `k` | CAUGHT | T1 |
+| M3 | Removes `AnchorBinding` equality check in `cross_check` | CAUGHT | T4 |
+| M4 | Removes `ReferenceNotAttested` guard in `cross_check` | CAUGHT | T5 |
+| M5 | Removes `id` comparison in `Audit::advance` | CAUGHT | T5 |
+| M6 | Removes `round` comparison in `Audit::advance` | CAUGHT | T6 |
+| M7 | Removes `parent_round` comparison in `Audit::advance` | CAUGHT | T6 |
+| M8 | Removes `final_height`/`last_ref` comparison in `Audit::advance` | CAUGHT | T6 |
+| M9 | Replaces ancestors for-loop with empty iterator | COMPILE ERROR | — |
+| M10 | Removes `.min(self.anchor.height)` cap on `self.audited` | COMPILE ERROR | — |
+| M11 | Replaces `AnchorRecord::decode(&rec.encode(), lim)` with `Ok(rec)` | CAUGHT | T8 (added) |
+| M12 | Removes structural reference check in `cross_check` | CAUGHT | T4 |
 
-**5 of 12 required a new test** (M6–M10). The 5 survivors from the initial 6-test suite used real chains where all anchor fields match by construction; the 7th test forges each field explicitly.
+**M9 and M10** produce code that fails Rust's type inference or lifetime checks and cannot be compiled; they cannot be live mutants. No test is needed for them. **M11** was a genuine survivor of the first 7-test suite; test 8 (`build_record_re_decodes_under_the_caller_limits_...`) was added and confirmed to catch it.
+
+**1 of 12 required a new test** (M11). The first campaign run (7 tests, commit `f7ffded`) yielded 9 caught by assertion failure, 2 compile errors, 1 genuine survivor (M11).
 
 ---
 
@@ -135,8 +149,9 @@ The feature-off engine count is **unchanged** (194). The node tests were NOT rer
 
 - **Not implemented**: node wiring, anchor-start mode, pruning, snapshot installation from anchor, fresh-node bootstrap, network distribution of anchor records.
 - **Not tested here**: multi-node liveness under real network conditions; adversarial peers; production key custody; signing-state rollback protection.
+- An audit establishes historical validity only after `AuditStep::complete` is true; a partial audit provides no additional trust.
 - The mutation campaign is a spot check of chosen mutants, not a proof of absence of bugs.
-- Counts above are from a Linux sandbox run. Per CLAUDE.md, the milestone is NOT marked ✅ until the developer confirms the Windows run.
+- Counts above are from Linux sandbox runs. Per CLAUDE.md, the milestone is NOT marked ✅ until the developer confirms the Windows run.
 
 ---
 
@@ -146,9 +161,9 @@ The feature-off engine count is **unchanged** (194). The node tests were NOT rer
 git pull origin feat/pq-hotstuff-2-anchored-evidence-an2
 cargo build -p chain-forge-node
 cargo test -p chain-forge-consensus --test pq_hotstuff_engine_fips204 --features pq-hotstuff-fips204,pq-anchored-evidence -- --nocapture 2>&1 | tail -3
-# expect: 209 passed, 2 ignored
+# expect: test result: ok. 210 passed; 0 failed; 2 ignored
 cargo test -p chain-forge-consensus --test pq_hotstuff_engine_fips204 --features pq-hotstuff-fips204,pq-snapshot-transfer,pq-anchored-evidence -- --nocapture 2>&1 | tail -3
-# expect: 218 passed, 2 ignored
+# expect: test result: ok. 219 passed; 0 failed; 2 ignored
 cargo test -p chain-forge-consensus --test pq_hotstuff_engine_fips204 --features pq-hotstuff-fips204 -- --nocapture 2>&1 | tail -3
-# expect: 194 passed, 2 ignored (feature-off unchanged)
+# expect: test result: ok. 194 passed; 0 failed; 2 ignored (feature-off unchanged)
 ```
