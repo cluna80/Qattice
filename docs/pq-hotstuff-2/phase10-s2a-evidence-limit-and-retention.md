@@ -44,3 +44,16 @@ cargo test --release -p chain-forge-node --features pq-devnet --test pq_devnet_l
 powershell -NoProfile -Command "Get-MpComputerStatus | Select-Object AntivirusEnabled,RealTimeProtectionEnabled | Format-List"
 ```
 Expected: lib 101; each engine file 194 passed + 2 ignored; node live v2 1 and v3 4.
+
+## Windows confirmation RESULT (owner-run, MINGW64, 2026-11-10; pinned code commit)
+`git rev-parse HEAD` printed `5bffc05ea0a35148f6a68b911b5e3981f1604769` (detached HEAD). `git status --short`, run after the checkout, listed only four untracked log files, the `s1-*.log` files left by the earlier S-1 run
+(no modified tracked file). Results as pasted:
+| Check | Result | Exit statuses |
+|---|---|---|
+| `chain-forge-consensus --features pq-hotstuff --lib` | 101 passed, 0 failed (2.10 s) | 0 0 0 |
+| `pq_hotstuff_engine` (test doubles) | 194 passed, 0 failed, 2 ignored (435.75 s) | 0 0 0 |
+| `pq_hotstuff_engine_fips204` (real ML-DSA-65) | 194 passed, 0 failed, 2 ignored (174.85 s) | 0 0 0 |
+| `pq_devnet_live` (v2 regression) | 1 passed (35.09 s) | 0 0 0 (shared line with v3) |
+| `pq_devnet_live_v3` | 4 passed (198.62 s) | 0 0 0 |
+These match the expectations. A read-only Defender query immediately afterwards printed `AntivirusEnabled : False`, `RealTimeProtectionEnabled : False` (exclusions were not queried; no other scanner was checked; the
+query was run after the tests, as in the earlier runs). This validates the S-2a components and the unchanged node paths on the stated platform; it is not Qattice application recovery, not network installation, and not pruning.
