@@ -49,6 +49,9 @@ pub trait Executor {
     /// Apply the NEXT finalized block (height == cursor.height + 1). Anything else is `OutOfOrder` and changes nothing. An `Err` other than
     /// `OutOfOrder` leaves the on-disk state either entirely old or entirely new; the caller must stop and reopen (replay settles which).
     fn apply(&mut self, b: &Committed) -> Result<ExecCursor, ExecError>;
+    /// The application state at the CURRENT cursor, as an opaque snapshot (used only by snapshot capture, which is off unless the driver opts in). `None`: this executor
+    /// cannot produce one.
+    fn snapshot_bytes(&self) -> Option<Vec<u8>> { None }
 }
 
 const TAG: &[u8] = b"CFH1|interim-app|";
@@ -116,6 +119,7 @@ impl<S: Storage> InterimApp<S> {
 
 impl<S: Storage> Executor for InterimApp<S> {
     fn cursor(&self) -> ExecCursor { self.cur }
+    fn snapshot_bytes(&self) -> Option<Vec<u8>> { self.s.read(FILE).ok().flatten() }
 
     fn apply(&mut self, b: &Committed) -> Result<ExecCursor, ExecError> {
         let expected = self.cur.height.checked_add(1).ok_or(ExecError::Corrupt("height overflow"))?;

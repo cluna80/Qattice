@@ -32,17 +32,16 @@ pub trait ProviderStore {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderStats { pub served: u64, pub busy: u64, pub too_large: u64, pub not_found: u64, pub ignored: u64 }
 
-/// Serves recovery requests under the existing [`ServeGate`] (rate limits, reservations, per-peer and global caps).
-pub struct Provider<S: ProviderStore> { store: S, gate: ServeGate, limits: CodecLimits, pub stats: ProviderStats }
+/// Serves recovery requests under the existing [`ServeGate`] against a store passed with each call (so one core can serve from a store that borrows other state).
+pub struct ServeCore { gate: ServeGate, limits: CodecLimits, pub stats: ProviderStats }
 
-impl<S: ProviderStore> Provider<S> {
-    pub fn new(store: S, gate: ServeGate, limits: CodecLimits) -> Self { Provider { store, gate, limits, stats: ProviderStats::default() } }
-    pub fn store(&self) -> &S { &self.store }
+impl ServeCore {
+    pub fn new(gate: ServeGate, limits: CodecLimits) -> Self { ServeCore { gate, limits, stats: ProviderStats::default() } }
     pub fn concurrent(&self) -> usize { self.gate.concurrent() }
 
     /// Handle one decoded request from `peer`. `None` for anything that is not a request (responses are never answered). The reply is built, size-checked
     /// against the kind's maximum, and the gate's reservation released before returning (the machine is synchronous).
-    pub fn handle(&mut self, peer: usize, m: &RecoveryMsg, now: u64) -> Option<RecoveryMsg> {
+    pub fn handle_with(&mut self, store: &dyn ProviderStore, peer: usize, m: &RecoveryMsg, now: u64) -> Option<RecoveryMsg> {
         let kind = match m { RecoveryMsg::HeaderReq { .. } => KIND_HEADER_REQ, RecoveryMsg::ManifestReq { .. } => KIND_MANIFEST_REQ, RecoveryMsg::ChunkReq { .. } => KIND_CHUNK_REQ, _ => { self.stats.ignored += 1; return None; } };
         let ticket = match self.gate.admit(peer, kind, now) {
             Ok(t) => t,
@@ -51,10 +50,10 @@ impl<S: ProviderStore> Provider<S> {
         let mut reply = match m {
             RecoveryMsg::HeaderReq { request_id, after, max_headers } => {
                 let max = (*max_headers).min(self.limits.max_headers);
-                RecoveryMsg::HeaderResp { request_id: *request_id, after: *after, body: if max == 0 { HeaderBody::NotFound } else { self.store.headers_after(after, max) } }
+                RecoveryMsg::HeaderResp { request_id: *request_id, after: *after, body: if max == 0 { HeaderBody::NotFound } else { store.headers_after(after, max) } }
             }
-            RecoveryMsg::ManifestReq { request_id, cref } => RecoveryMsg::ManifestResp { request_id: *request_id, cref: *cref, body: match self.store.manifest(cref) { Some(mf) => ManifestBody::Ok(mf), None => ManifestBody::NotFound } },
-            RecoveryMsg::ChunkReq { request_id, snapshot_id, index } => RecoveryMsg::ChunkResp { request_id: *request_id, snapshot_id: *snapshot_id, index: *index, body: match self.store.chunk(snapshot_id, *index) { Some(d) => ChunkBody::Ok(d), None => ChunkBody::NotFound } },
+            RecoveryMsg::ManifestReq { request_id, cref } => RecoveryMsg::ManifestResp { request_id: *request_id, cref: *cref, body: match store.manifest(cref) { Some(mf) => ManifestBody::Ok(mf), None => ManifestBody::NotFound } },
+            RecoveryMsg::ChunkReq { request_id, snapshot_id, index } => RecoveryMsg::ChunkResp { request_id: *request_id, snapshot_id: *snapshot_id, index: *index, body: match store.chunk(snapshot_id, *index) { Some(d) => ChunkBody::Ok(d), None => ChunkBody::NotFound } },
             _ => unreachable!(),
         };
         // never send what the peer's decoder would refuse: an oversized reply (or one the codec will not encode) degrades to advice
@@ -68,7 +67,8 @@ impl<S: ProviderStore> Provider<S> {
         Some(reply)
     }
 
-    fn busy(m: &RecoveryMsg, retry_after_ms: u32) -> RecoveryMsg {
+    /// A BUSY answer to `m` (the same shape the gate produces when it refuses a request).
+    pub fn busy(m: &RecoveryMsg, retry_after_ms: u32) -> RecoveryMsg {
         match m {
             RecoveryMsg::HeaderReq { request_id, after, .. } => RecoveryMsg::HeaderResp { request_id: *request_id, after: *after, body: HeaderBody::Busy { retry_after_ms } },
             RecoveryMsg::ManifestReq { request_id, cref } => RecoveryMsg::ManifestResp { request_id: *request_id, cref: *cref, body: ManifestBody::Busy { retry_after_ms } },
@@ -93,6 +93,16 @@ impl<S: ProviderStore> Provider<S> {
 fn provider_attributable(e: &InstallError) -> bool {
     matches!(e, InstallError::Aborted(r) if r.starts_with("assemble:") || r.starts_with("measure:") || r.starts_with("the staged state does not match"))
 }
+
+/// A provider that owns its store (tests and simple embeddings).
+pub struct Provider<S: ProviderStore> { store: S, core: ServeCore }
+impl<S: ProviderStore> std::ops::Deref for Provider<S> { type Target = ServeCore; fn deref(&self) -> &ServeCore { &self.core } }
+impl<S: ProviderStore> Provider<S> {
+    pub fn new(store: S, gate: ServeGate, limits: CodecLimits) -> Self { Provider { store, core: ServeCore::new(gate, limits) } }
+    pub fn store(&self) -> &S { &self.store }
+    pub fn handle(&mut self, peer: usize, m: &RecoveryMsg, now: u64) -> Option<RecoveryMsg> { self.core.handle_with(&self.store, peer, m, now) }
+}
+
 fn reply_kind(m: &RecoveryMsg) -> u8 { m.kind() }
 fn is_not_found(m: &RecoveryMsg) -> bool { matches!(m, RecoveryMsg::HeaderResp { body: HeaderBody::NotFound, .. } | RecoveryMsg::ManifestResp { body: ManifestBody::NotFound, .. } | RecoveryMsg::ChunkResp { body: ChunkBody::NotFound, .. }) }
 

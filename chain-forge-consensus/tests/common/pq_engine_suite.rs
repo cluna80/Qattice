@@ -1713,7 +1713,7 @@ fn startup_rejects_unsupported_configurations_explicitly() {
 struct LogApp { inner: InterimApp<MemStorage>, log: std::rc::Rc<std::cell::RefCell<Vec<u64>>> }
 impl Executor for LogApp {
     fn cursor(&self) -> ExecCursor { self.inner.cursor() }
-    fn apply(&mut self, b: &Committed) -> Result<ExecCursor, ExecError> { let c = self.inner.apply(b)?; self.log.borrow_mut().push(b.height); Ok(c) }
+    fn apply(&mut self, b: &Committed) -> Result<ExecCursor, ExecError> { let c = self.inner.apply(b)?; self.log.borrow_mut().push(b.height); Ok(c) }    fn snapshot_bytes(&self) -> Option<Vec<u8>> { self.inner.snapshot_bytes() }
 }
 type Drv = Driver<MemStorage, TestCounter, TestSigner, TestVerifier, MemStorage, LogApp>;
 type ExecLog = std::rc::Rc<std::cell::RefCell<Vec<u64>>>;

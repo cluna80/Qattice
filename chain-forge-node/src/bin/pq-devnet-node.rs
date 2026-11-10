@@ -78,7 +78,7 @@ type Drv = Driver<FsStorage, DevnetFileCounter, chain_forge_consensus::pq_hotstu
 fn status_json(d: &Drv, index: usize, fatal: Option<String>, violation: bool, resent: bool) -> String {
     let s = d.status();
     let cur = |c: &chain_forge_consensus::pq_hotstuff::exec::ExecCursor| serde_json::json!({"height": c.height, "block_id": hex::encode(c.block_id), "state_digest": hex::encode(c.state_digest)});
-    serde_json::json!({
+    let mut j = serde_json::json!({
         "index": index, "label": DEVNET_LABEL, "round": s.round, "high_qc_round": s.high_qc_round, "committed_height": s.committed_height,
         "committed_tip": hex::encode(s.committed_tip), "exec": cur(&s.exec), "recent": s.recent.iter().map(cur).collect::<Vec<_>>(),
         "recovering": d.engine().is_recovering(), "base": d.engine().base().map(|b| serde_json::json!({"height": b.height, "id": hex::encode(b.id)})),
@@ -86,7 +86,13 @@ fn status_json(d: &Drv, index: usize, fatal: Option<String>, violation: bool, re
         "is_leader": d.engine().is_leader(), "propose_refused_while_recovering": s.stats.propose_refused_while_recovering, "timeout_refused_while_recovering": s.stats.timeout_refused_while_recovering,
         "signed_while_recovering": violation, "sent_signed_while_recovering": resent, "below_base_served": s.stats.below_base_served, "below_base_advice": s.stats.below_base_advice,
         "malformed": s.stats.malformed, "bad_sync": s.stats.bad_sync, "sync_requests": s.stats.sync_requests, "unsolicited_sync": s.stats.unsolicited_sync, "fatal": fatal,
-    }).to_string()
+    });
+    // only when the node opted in: with serving off the status document is exactly what it always was
+    #[cfg(feature = "pq-snapshot-transfer")]
+    if let Some(c) = d.snapshot_serving() {
+        j["snapshot_serving"] = serde_json::json!({"captured": c.captured, "capture_deferred": c.capture_deferred, "capture_other_error": c.capture_other_error, "retained": c.retained, "retained_bytes": c.retained_bytes, "pinned_now": c.pinned_now, "requests": c.requests, "malformed": c.malformed, "unsolicited_responses": c.unsolicited_responses, "replies_busy_for_pins": c.replies_busy_for_pins, "pins_released_idle": c.pins_released_idle, "gate_concurrent": c.gate_concurrent});
+    }
+    j.to_string()
 }
 
 fn write_atomic(path: &Path, text: &str) { let tmp = path.with_extension("tmp"); if std::fs::write(&tmp, text).is_ok() { let _ = std::fs::rename(&tmp, path); } }
@@ -136,6 +142,13 @@ fn run(args: &[String]) -> Result<(), String> {
     let now = || t0.elapsed().as_millis() as u64 + 1;
     let payload: chain_forge_consensus::pq_hotstuff::driver::PayloadSource = Box::new(|round, idx| format!("devnet-interim:{idx}:{round}").into_bytes());
     let (mut drv, first) = Driver::start(dcfg, engine, blocks, app, payload, now()).map_err(|e: DriverError| format!("start refused: {e}"))?;
+    // S-2b, OFF by default: snapshot capture and serving needs the `pq-snapshot-transfer` build feature AND this explicit flag. It serves; it never installs, imports signing state or prunes.
+    if args.iter().any(|a| a == "--serve-snapshots") {
+        #[cfg(feature = "pq-snapshot-transfer")]
+        { enable_serving(&mut drv, args, &cfg, genesis_hash, &dir, now())?; }
+        #[cfg(not(feature = "pq-snapshot-transfer"))]
+        { return Err("--serve-snapshots needs a build with the pq-snapshot-transfer feature (this build has it off)".into()); }
+    }
     let t = Transport::start(me, cfg.endpoints()?, cfg.max_message_bytes, 256, Some(dir.join("partition.txt"))).map_err(|e| format!("transport: {e}"))?;
     eprintln!("pq-devnet-node {me}: {DEVNET_LABEL}; committed height {}, executed height {}", drv.status().committed_height, drv.status().exec.height);
     let lim = *drv.limits();
@@ -213,5 +226,27 @@ fn inspect(args: &[String]) -> Result<(), String> {
         "seed_evidence": evidence,
         "safety": rec.map(|r| serde_json::json!({"hvr": r.hvr, "hqr": r.hqr, "counter": r.counter, "last_vote_round": r.last_vote.as_ref().map(|v| v.round), "last_timeout_round": r.last_timeout.as_ref().map(|t| t.round), "last_proposal_round": r.last_proposal.as_ref().map(|p| p.round)})),
     }));
+    Ok(())
+}
+
+/// Validate the per-node retention and serving settings (refusing locally, before any network use), open the snapshot cache and opt the driver in.
+#[cfg(feature = "pq-snapshot-transfer")]
+fn enable_serving(drv: &mut Drv, args: &[String], cfg: &DevnetConfig, genesis_hash: [u8; 32], dir: &Path, now: u64) -> Result<(), String> {
+    use chain_forge_consensus::pq_hotstuff::recovery::{codec::CodecLimits, requests::ServeConfig, retention::{RetentionConfig, SnapshotStore}, tree::StdTreeFs};
+    use chain_forge_consensus::pq_hotstuff::serving::{ServingConfig, SnapshotServing};
+    let num = |name: &str, default: u64| -> Result<u64, String> { flag(args, name).map(|v| v.parse().map_err(|_| format!("bad {name}"))).transpose().map(|o| o.unwrap_or(default)) };
+    let retention = RetentionConfig { max_snapshots: num("--snapshot-count", 3)? as usize, disk_budget_bytes: num("--snapshot-budget-bytes", 64 << 20)?, max_snapshot_bytes: num("--snapshot-max-bytes", 16 << 20)? };
+    retention.validate().map_err(|e| format!("snapshot retention refused: {e}"))?;
+    let limit = cfg.max_message_bytes as u64;
+    let lim = *drv.limits();
+    let codec = CodecLimits { transport: lim.transport, n: cfg.endpoints()?.len(), max_headers: 64, max_chunk_size: 262_144, max_chunk_count: 65_536, max_snapshot_bytes: retention.max_snapshot_bytes };
+    // the minimum spacing is what throttles a flood of SMALL requests (the byte buckets refund what a small answer did not use)
+    let serve = ServeConfig { limit, burst: 2 * limit, refill_per_s: limit / 2, aggregate_per_s: 8 * limit, max_concurrent: 16, per_peer_outstanding: 4, min_spacing_ms: num("--snapshot-min-spacing-ms", 20)?, chunk_size: 262_144 };
+    let scfg = ServingConfig { serve, codec, genesis_hash, chunk_size: 262_144, max_candidates: 8, pin_idle_ms: num("--snapshot-pin-idle-ms", 300_000)?, max_pins_per_peer: 1, max_pins_total: 4 };
+    let fs = StdTreeFs::new(flag(args, "--snapshot-dir").map(PathBuf::from).unwrap_or_else(|| dir.join("snapshots"))).map_err(|e| e.0)?;
+    let store = SnapshotStore::open(fs, retention, codec, genesis_hash).map_err(|e| format!("snapshot cache refused: {e}"))?;
+    let svc = SnapshotServing::new(store, scfg, now).map_err(|e| format!("snapshot serving refused: {e}"))?;
+    drv.enable_snapshot_serving(Box::new(svc));
+    eprintln!("pq-devnet-node: snapshot serving ENABLED (opt-in); retention {} snapshots, budget {} bytes; installation stays operator-initiated", retention.max_snapshots, retention.disk_budget_bytes);
     Ok(())
 }

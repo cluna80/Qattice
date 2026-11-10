@@ -444,6 +444,7 @@ impl<X: Executor> Executor for LoggedApp<X> {
         }
         Ok(c)
     }
+    fn snapshot_bytes(&self) -> Option<Vec<u8>> { self.inner.snapshot_bytes() }
 }
 
 // ------------------------------------------------------------------------------------------------------------------ operator-staged snapshot (offline)
