@@ -1,6 +1,8 @@
-# PQ-HotStuff-2 - AN-2: anchored verification — segmented verifier, build-record, cross-check and audit (DRAFT; off by default)
+# PQ-HotStuff-2 - AN-2: anchored verification — segmented verifier, build-record, cross-check and audit
 
-Scope: `phase11-anchored-evidence-scope.md` (PR #152; sections 5A, 5B and 6A; owner decisions of 2026-11-10). Stacked on AN-1 (`feat/pq-hotstuff-2-anchored-evidence-an1`, frozen at `e0d29c847d3848fa8eee880368304460dce9fab5`). **Frozen code commits: `f7ffded38465c4249c3c1dc9e75ce52fc55ab691` (initial AN-2 implementation) and `7f2416d` (adds M11 survivor test). Windows confirmation required before milestone is closed.**
+✅ AN-2 anchored-verification components: all 8 targeted tests passed on Windows at the recorded revision (`e639fea`, 2026-11-10). The full 194/210/219-test configurations were not run to completion on Windows and are not claimed here. Node activation, anchored startup and pruning remain gated.
+
+Scope: `phase11-anchored-evidence-scope.md` (PR #152; sections 5A, 5B and 6A; owner decisions of 2026-11-10). Stacked on AN-1 (`feat/pq-hotstuff-2-anchored-evidence-an1`, frozen at `e0d29c847d3848fa8eee880368304460dce9fab5`). **Frozen code commits: `f7ffded38465c4249c3c1dc9e75ce52fc55ab691` (initial AN-2 implementation) and `7f2416d` (adds M11 survivor test).**
 Feature `pq-anchored-evidence`, OFF by default. **Nothing in the node, driver or network calls any of this; no anchor-start mode exists; pruning is not implemented.**
 
 ---
