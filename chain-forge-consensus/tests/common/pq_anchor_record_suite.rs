@@ -169,3 +169,23 @@ fn a_crash_at_any_point_of_publishing_or_of_an_audit_update_leaves_the_old_or_th
     }
     assert!(low > 0 && high > 0, "both outcomes reached: old {low}, new {high}");
 }
+
+#[test]
+fn a_stale_audit_progress_file_can_never_lower_the_audited_height() {
+    let mut r = aring();
+    r.publish(arec(1, Provenance::Genesis, 12, 4)).unwrap();
+    let mut fs = r.fs;
+    let progress = |gen: u64, h: u64| { let mut o = b"CFH1|anchor-audit|".to_vec(); o.extend_from_slice(&gen.to_be_bytes()); o.extend_from_slice(&h.to_be_bytes()); let sum = rcodec::sha3(&[&o]); o.extend_from_slice(&sum); o };
+    fs.set_raw("anchors/audit-progress", progress(1, 10)); // valid, names the generation, but is BELOW what the record already says
+    let r2 = AnchorRing::open(fs, alim(), abind()).unwrap();
+    assert_eq!(r2.newest().unwrap().audited_height, 12, "progress only ever raises the audited height");
+    let mut fs = r2.fs;
+    fs.delete_raw("anchors/audit-progress"); fs.set_raw("anchors/audit-progress", progress(1, 14));
+    let r3 = AnchorRing::open(fs, alim(), abind()).unwrap();
+    assert_eq!(r3.newest().unwrap().audited_height, 14, "control: a higher valid progress value is applied");
+    let top = r3.newest().unwrap().anchor.height;
+    let mut fs = r3.fs;
+    fs.delete_raw("anchors/audit-progress"); fs.set_raw("anchors/audit-progress", progress(1, top + 1));
+    let r4 = AnchorRing::open(fs, alim(), abind()).unwrap();
+    assert_eq!(r4.newest().unwrap().audited_height, 12, "progress above the anchor is ignored");
+}
