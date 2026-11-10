@@ -154,11 +154,13 @@ fn malformed_unsolicited_and_hostile_requests_change_nothing_create_no_pins_and_
     let m0 = svc_counters(&net, 0).malformed;
     for b in &hostile { let o = net.nodes[0].as_mut().unwrap().on_bytes(1, b, net.now).unwrap(); assert!(o.is_empty()); }
     assert!(svc_counters(&net, 0).malformed >= m0, "counted, never answered");
-    // responses nobody asked for
+    // responses nobody asked for: counted as such, never as requests, never answered
+    let req0 = svc_counters(&net, 0).requests;
     for r in [RecoveryMsg::HeaderResp { request_id: 1, after: [0; 32], body: HeaderBody::NotFound }, RecoveryMsg::ChunkResp { request_id: 2, snapshot_id: [0; 32], index: 0, body: ChunkBody::NotFound }, RecoveryMsg::ManifestResp { request_id: 3, cref: CheckpointRef { height: 8, block_id: [1; 32], state_root: [2; 32] }, body: ManifestBody::NotFound }] {
         assert!(ask(&mut net, 0, 1, &r).is_empty());
     }
     assert_eq!(svc_counters(&net, 0).unsolicited_responses, 3);
+    assert_eq!(svc_counters(&net, 0).requests, req0, "a response is never counted as a request");
     // a request from this node's own index, or from a peer that does not exist: ignored
     for from in [0usize, 4, 99] { let o = net.nodes[0].as_mut().unwrap().on_bytes(from, &good, net.now).unwrap(); assert!(o.is_empty(), "from {from}"); }
     // an unknown reference or snapshot is answered NOT_FOUND and pins nothing; an absurd page size is clamped
