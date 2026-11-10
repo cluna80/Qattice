@@ -126,11 +126,16 @@ The caller (future node wiring, outside this slice) is responsible for:
 
 ## Tests (`pq_anchor_restart_suite.rs`, real ML-DSA-65)
 
-**Linux result** (commit `01699c5`, 2026-11-10, release mode, real FIPS 204 ML-DSA-65):
+**Linux result — component tests** (commit `01699c5`, 2026-11-10, release mode, real FIPS 204 ML-DSA-65):
 `test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 212 filtered out; finished in 1.07s`
 
-**Windows result** (commit `fb60173`, 2026-11-10, MINGW64 krizz@BossKing, release mode, real FIPS 204 ML-DSA-65):
+**Windows result — component tests** (commit `fb60173`, 2026-11-10, MINGW64 krizz@BossKing, release mode, real FIPS 204 ML-DSA-65):
 All 11 tests run individually — each reported `test result: ok. 1 passed; 0 failed`. Cargo exit 0.
+
+**Linux result — driver wiring tests** (commit `04c98c0`, 2026-11-10, release mode, real FIPS 204 ML-DSA-65):
+`test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 223 filtered out; finished in 0.59s`
+
+**Windows result — driver wiring tests**: PENDING — owner must run on MINGW64 krizz@BossKing.
 
 | # | Test name | What it tests |
 |---|---|---|
@@ -145,6 +150,11 @@ All 11 tests run individually — each reported `test result: ok. 1 passed; 0 fa
 | T9 | `reconciliation_fails_when_executor_state_root_disagrees` | Audit ready but attested state root ≠ executor root → `RestartError::Inconsistent` |
 | T10 | `reconciliation_succeeds_with_consistent_executor_state` | Correct executor state → `reconcile` returns `Ok` |
 | T11 | `feature_off_path_is_untouched_engine_counts_unchanged` | `AnchorMode::default() == Off` (feature-off regression guard) |
+| T12 | `audit_first_start_returns_empty_first_and_blocks_retransmission` | `start` with anchor pending returns empty first-sends; `anchor_pending` is true |
+| T13 | `advance_anchor_returns_pending_until_audit_is_complete` | Partial window (1 header, `audited_height=0`) → `Pending`; gate not cleared |
+| T14 | `advance_anchor_drives_audit_to_completion_or_reconcile` | Full audit completes; outcome is `Ready` or `ReconcileFailed` (not `AuditFailed`) |
+| T15 | `not_pending_when_no_anchor_is_installed` | No anchor in config → `anchor_pending` false; `advance_anchor` returns `NotPending` |
+| T16 | `failed_audit_returns_audit_failed_and_anchor_pending_stays_true` | Tampered record → `AuditFailed`; gate not cleared |
 
 **Implementation note (T8 / `Audit::new_from` invariant):** `an2_record` builds a record with
 `audited_height = anchor.height` (the building node has already verified the full chain). This sets
@@ -185,6 +195,19 @@ cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204,pq-
 cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204,pq-anchored-evidence --test pq_hotstuff_engine_fips204 -- reconciliation_fails
 cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204,pq-anchored-evidence --test pq_hotstuff_engine_fips204 -- reconciliation_succeeds
 cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204,pq-anchored-evidence --test pq_hotstuff_engine_fips204 -- feature_off_path
+```
+
+Each command should report `test result: ok. 1 passed; 0 failed`.
+
+Driver wiring tests (T12–T16, commit `04c98c0`):
+
+```bash
+git pull origin feat/pq-hotstuff-2-anchored-evidence-an3
+cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204,pq-anchored-evidence --test pq_hotstuff_engine_fips204 -- audit_first_start
+cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204,pq-anchored-evidence --test pq_hotstuff_engine_fips204 -- advance_anchor_returns_pending
+cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204,pq-anchored-evidence --test pq_hotstuff_engine_fips204 -- advance_anchor_drives_audit
+cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204,pq-anchored-evidence --test pq_hotstuff_engine_fips204 -- not_pending_when_no_anchor
+cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204,pq-anchored-evidence --test pq_hotstuff_engine_fips204 -- failed_audit_returns_audit_failed
 ```
 
 Each command should report `test result: ok. 1 passed; 0 failed`.
