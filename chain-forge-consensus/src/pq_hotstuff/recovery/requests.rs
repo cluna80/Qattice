@@ -45,6 +45,11 @@ impl RequestTable {
     pub fn new(cap: usize, first_id: u64, timeout_ms: u64) -> Self { RequestTable { cap, timeout_ms, next_id: first_id, entries: Vec::new(), stats: TableStats::default() } }
     pub fn len(&self) -> usize { self.entries.len() }
     pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+    /// Outstanding requests to `peer`, of any kind.
+    pub fn entries_for(&self, peer: usize) -> usize { self.entries.iter().filter(|e| e.peer == peer).count() }
+    pub fn entries_of_kind(&self, kind: u8) -> usize { self.entries.iter().filter(|e| e.selector.request_kind() == kind).count() }
+    /// `(snapshot id, index)` of every outstanding chunk request, so a chunk is never requested twice at once.
+    pub fn chunk_indices(&self) -> std::collections::BTreeSet<u32> { self.entries.iter().filter_map(|e| if let Selector::Chunk(_, i) = e.selector { Some(i) } else { None }).collect() }
 
     pub fn issue(&mut self, peer: usize, selector: Selector, now: u64) -> Result<u64, IssueError> {
         if self.entries.len() >= self.cap { return Err(IssueError::GlobalCap); }
@@ -104,6 +109,8 @@ impl Cooldown {
         *e = (now.saturating_add(wait), e.1.saturating_add(1).min(20));
         e.0
     }
+    /// A peer that said BUSY with a wait of `wait_ms` (already clamped): honour it exactly, without escalating the doubling used for silence.
+    pub fn note_unserved_for(&mut self, peer: usize, sel: Selector, now: u64, wait_ms: u64) { let e = self.map.entry((peer, sel)).or_insert((0, 0)); e.0 = now.saturating_add(wait_ms); }
     pub fn note_served(&mut self, peer: usize, sel: Selector) { self.map.remove(&(peer, sel)); }
     pub fn ready(&self, peer: usize, sel: &Selector, now: u64) -> bool { self.map.get(&(peer, *sel)).map_or(true, |(until, _)| now >= *until) }
 }
