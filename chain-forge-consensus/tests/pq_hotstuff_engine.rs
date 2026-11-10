@@ -24,3 +24,5 @@ include!("common/pq_transfer_suite.rs");
 include!("common/pq_retention_suite.rs");
 #[cfg(feature = "pq-snapshot-transfer")]
 include!("common/pq_serving_suite.rs");
+#[cfg(feature = "pq-anchored-evidence")]
+include!("common/pq_anchor_record_suite.rs");

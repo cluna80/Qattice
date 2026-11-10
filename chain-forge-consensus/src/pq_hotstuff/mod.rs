@@ -41,3 +41,6 @@ pub mod checkpoint;
 
 #[cfg(feature = "pq-snapshot-transfer")]
 pub mod serving;
+
+#[cfg(feature = "pq-anchored-evidence")]
+pub mod anchor_record;
