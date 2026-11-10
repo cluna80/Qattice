@@ -38,3 +38,6 @@ pub mod seed;
 pub mod recovery;
 #[cfg(feature = "pq-hotstuff")]
 pub mod checkpoint;
+
+#[cfg(feature = "pq-snapshot-transfer")]
+pub mod serving;

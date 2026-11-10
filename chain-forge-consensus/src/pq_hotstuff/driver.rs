@@ -145,6 +145,9 @@ pub struct Driver<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: Consen
     stats: Stats,
     pending_exec: VecDeque<Committed>,
     interval: Option<u64>,
+    /// Snapshot capture and serving (S-2b): absent unless the `pq-snapshot-transfer` feature is built AND the node opted in at runtime.
+    #[cfg(feature = "pq-snapshot-transfer")]
+    recovery: Option<Box<dyn super::serving::RecoveryService>>,
 }
 
 impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, B: BlockFiles, X: Executor> Driver<S, C, G, V, B, X> {
@@ -202,6 +205,7 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
             pace: Pacemaker::new(dc.pace).map_err(|e| DriverError::Config(e.to_string()))?, sync: SyncClient::new(dc.sync_ttl, dc.sync_outstanding),
             round_started: now, last_round: engine.round(), last_hqc: engine.high_qc().round(), rr: me,
             dc, lim, engine, store, exec, payload, profile, chain, set, me, n, now, parked: VecDeque::new(), recent, stats: Stats::default(), pending_exec: VecDeque::new(), interval,
+            #[cfg(feature = "pq-snapshot-transfer")] recovery: None,
         };
         // Leave `Recovering` first if every dependency is already present (it signs nothing: it only checks that the high QC's block is known and that the round is not
         // below the store's `hqr`): the re-sends below are gated while recovering, and a restarted node that is not recovering must re-send its stored vote and timeout
@@ -222,6 +226,15 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
     fn try_complete_recovery(&mut self) { if self.engine.is_recovering() { let _ = self.engine.complete_recovery(); } }
 
     pub fn engine(&self) -> &Engine<S, C, G, V> { &self.engine }
+
+    /// Opt in to snapshot capture and serving (needs the `pq-snapshot-transfer` feature). Nothing here touches signing state, and nothing is installed or pruned.
+    #[cfg(feature = "pq-snapshot-transfer")]
+    pub fn enable_snapshot_serving(&mut self, svc: Box<dyn super::serving::RecoveryService>) { self.recovery = Some(svc); }
+    #[cfg(feature = "pq-snapshot-transfer")]
+    pub fn snapshot_serving(&self) -> Option<super::serving::ServingCounters> { self.recovery.as_ref().map(|s| s.counters()) }
+    /// Retained snapshots, oldest first: (height, snapshot id, bytes, pinned). Empty when serving is not enabled.
+    #[cfg(feature = "pq-snapshot-transfer")]
+    pub fn snapshot_retained(&self) -> Vec<(u64, [u8; 32], u64, bool)> { self.recovery.as_ref().map_or(vec![], |s| s.retained()) }
     /// Stop and give back the durable pieces (a process restart in tests; a clean shutdown in a node).
     pub fn into_parts(self) -> (Engine<S, C, G, V>, BlockStore<B>, X) { (self.engine, self.store, self.exec) }
     pub fn executor(&self) -> &X { &self.exec }
@@ -238,6 +251,13 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
     /// reconciled from the cursor at start) and handed to the engine, which may now vote for proposals whose vote it had deferred.
     fn execute(&mut self, c: Committed) -> Result<Vec<Output>, DriverError> {
         let cur = self.exec.apply(&c)?;
+        #[cfg(feature = "pq-snapshot-transfer")]
+        if self.recovery.is_some() {
+            // a block that carries a reference is final here (it was just finalized); the state it attests was executed at a LOWER height, earlier in this same order
+            let snap = self.exec.snapshot_bytes();
+            let r = self.engine.checkpoint_of(&c.id);
+            if let Some(svc) = self.recovery.as_mut() { svc.note_executed(&cur, snap); if let Some(r) = r { svc.note_final_ref(&r); } }
+        }
         self.recent.push_back(cur);
         while self.recent.len() > self.dc.recent { self.recent.pop_front(); }
         let Some(k) = self.interval else { return Ok(vec![]) };
@@ -296,6 +316,16 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
     /// Feed one received datagram. Undecodable or oversize input is counted and dropped; only durable-state, executor or safety failures are `Err`.
     pub fn on_bytes(&mut self, from: usize, bytes: &[u8], now: u64) -> Result<Vec<Outbound>, DriverError> {
         self.now = now;
+        // S-2b (opt-in only): recovery kinds go to the snapshot service; with no service installed this branch does not exist and the bytes fall through to the decoder
+        // below exactly as before (kinds 7 to 14 are unknown input there).
+        #[cfg(feature = "pq-snapshot-transfer")]
+        if let Some(svc) = self.recovery.as_mut() {
+            if super::serving::is_recovery_kind(bytes) {
+                if from == self.me || from >= self.n { self.stats.malformed += 1; return Ok(vec![]); }
+                let chain = EngineChain(&self.engine);
+                return Ok(svc.on_bytes(&chain, from, bytes, now).into_iter().map(|b| Outbound { to: Some(from), bytes: b }).collect());
+            }
+        }
         let msg = match net::decode(bytes, &self.lim) { Ok(m) => m, Err(_) => { self.stats.malformed += 1; return Ok(vec![]); } };
         match msg {
             NetMsg::SyncRequest(req) => {
@@ -379,6 +409,8 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
     /// Advance timers: retry parked messages, propose if this node leads the round, and time the round out with exponential backoff.
     pub fn tick(&mut self, now: u64) -> Result<Vec<Outbound>, DriverError> {
         self.now = now;
+        #[cfg(feature = "pq-snapshot-transfer")]
+        if let Some(svc) = self.recovery.as_mut() { svc.tick(now); }
         self.try_complete_recovery();
         let mut out = vec![];
         let (r, hq) = (self.engine.round(), self.engine.high_qc().round());
@@ -399,5 +431,20 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
             match self.engine.local_timeout() { Ok(outs) => { self.pace.on_timeout(); out.extend(self.route(outs)?); } Err(EngineError::Recovering(_)) => self.stats.timeout_refused_while_recovering += 1, Err(e) => self.soft(e)? }
         }
         Ok(out)
+    }
+}
+
+/// The engine as the snapshot service's read-only view of this node's chain.
+#[cfg(feature = "pq-snapshot-transfer")]
+struct EngineChain<'a, S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier>(&'a Engine<S, C, G, V>);
+#[cfg(feature = "pq-snapshot-transfer")]
+impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> super::serving::ChainView for EngineChain<'_, S, C, G, V> {
+    fn headers_after(&self, after: &BlockId, max: u32) -> super::recovery::codec::HeaderBody {
+        use super::recovery::codec::HeaderBody;
+        match self.0.headers_after(after, max as usize) {
+            None => HeaderBody::NotFound,
+            Some((h, tip, _)) if h.is_empty() => HeaderBody::AtTip { tip_height: tip },
+            Some((h, tip, at_end)) => HeaderBody::Ok { headers: h, final_qc: if at_end { Some(self.0.high_qc().clone()) } else { None }, tip_height: tip },
+        }
     }
 }

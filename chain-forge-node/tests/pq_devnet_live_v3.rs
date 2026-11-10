@@ -27,7 +27,7 @@ const K: u64 = 4;
 static LIVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn serial() -> std::sync::MutexGuard<'static, ()> { LIVE.lock().unwrap_or_else(|e| e.into_inner()) }
 
-struct Net { dirs: Vec<PathBuf>, cfg: PathBuf, kids: Vec<Option<Child>>, root: PathBuf, genesis_hash_file: PathBuf }
+struct Net { dirs: Vec<PathBuf>, cfg: PathBuf, kids: Vec<Option<Child>>, root: PathBuf, genesis_hash_file: PathBuf, extra: Vec<String> }
 
 impl Drop for Net {
     fn drop(&mut self) {
@@ -58,12 +58,13 @@ impl Net {
         let dirs_arg = dirs.iter().map(|d| d.to_str().unwrap().to_string()).collect::<Vec<_>>().join(",");
         run_ok(&["assemble", "--out", cfg.to_str().unwrap(), "--chain-id", "qattice-pqhs2-v3-devnet-live", "--ports", &ports.join(","), "--dirs", &dirs_arg,
                  "--checkpoint-interval", &K.to_string(), "--checkpoint-max-age", "24", "--checkpoint-margin", "4"]);
-        Net { dirs, cfg, kids: (0..N).map(|_| None).collect(), root: root.clone(), genesis_hash_file: root.join("unused") }
+        Net { dirs, cfg, kids: (0..N).map(|_| None).collect(), root: root.clone(), genesis_hash_file: root.join("unused"), extra: vec![] }
     }
     fn start(&mut self, i: usize) {
         let _ = std::fs::remove_file(self.dirs[i].join("status.json")); // so that the next status read is from the NEW process
         let log = std::fs::OpenOptions::new().create(true).append(true).open(self.dirs[i].join("node.log")).unwrap();
-        let child = Command::new(BIN).args(["run", "--config", self.cfg.to_str().unwrap(), "--dir", self.dirs[i].to_str().unwrap(), "--exec-log", self.dirs[i].join("exec.log").to_str().unwrap()])
+        let child = Command::new(BIN)
+            .args(["run", "--config", self.cfg.to_str().unwrap(), "--dir", self.dirs[i].to_str().unwrap(), "--exec-log", self.dirs[i].join("exec.log").to_str().unwrap()]).args(&self.extra)
             .stdout(Stdio::null()).stderr(log).spawn().expect("spawn node");
         self.kids[i] = Some(child);
     }
@@ -471,4 +472,65 @@ fn live_v3_a_recovering_node_that_leads_its_round_is_asked_to_propose_refuses_an
     net.wait("the victim recovers and catches up", 240, |n| n.status(VICTIM).map_or(false, |s| s["recovering"] == Value::Bool(false) && u(&s["exec"]["height"]) + 3 >= n.height(0)));
     for i in 0..N { assert!(net.alive(i), "node {i} stopped: {}", net.log_tail(i)); }
     net.assert_agreement("after the controlled-leader recovery");
+}
+
+// ------------------------------------------------------------------------------------------------------------------------ S-2b: snapshot serving (opt-in)
+fn snapshot_dirs(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir.join("snapshot-cache").join("snapshots")).map(|r| r.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| n.len() == 64).collect()).unwrap_or_default()
+}
+
+/// Without the build feature the opt-in flag is REFUSED (never silently ignored), and nothing else changes: the node simply does not start.
+#[cfg(not(feature = "pq-snapshot-transfer"))]
+#[test]
+fn live_v3_the_serve_snapshots_flag_is_refused_by_a_build_without_the_feature() {
+    let _g = serial();
+    let mut net = Net::new("flagoff");
+    net.extra = vec!["--serve-snapshots".into()];
+    net.start(0);
+    let st = net.wait_exit(0, 20).expect("the node must exit, not run");
+    assert!(!st.success());
+    let log = std::fs::read_to_string(net.dirs[0].join("node.log")).unwrap_or_default();
+    assert!(log.contains("pq-snapshot-transfer"), "the refusal names the missing feature: {log}");
+    assert!(net.status(0).is_none(), "no status document was written");
+}
+
+/// With the feature built but the flag OFF the node is exactly the old node: no snapshot status field, no snapshot directory, normal agreement.
+#[cfg(feature = "pq-snapshot-transfer")]
+#[test]
+fn live_v3_with_the_feature_built_but_the_flag_off_the_node_behaves_as_before() {
+    let _g = serial();
+    let mut net = Net::new("flagoff2");
+    for i in 0..N { net.start(i); }
+    net.wait("all four execute height 40", 90, |n| n.heights().iter().all(|h| *h >= 40));
+    for i in 0..N { let s = net.status(i).unwrap(); assert!(s.get("snapshot_serving").is_none(), "no snapshot status without the flag"); assert!(!net.dirs[i].join("snapshot-cache").exists(), "no snapshot directory without the flag"); }
+    net.assert_agreement("flag off");
+}
+
+#[cfg(feature = "pq-snapshot-transfer")]
+#[test]
+fn live_v3_four_processes_with_serving_on_capture_final_snapshots_stay_in_agreement_and_a_restarted_node_re_verifies_its_cache() {
+    let _g = serial();
+    let mut net = Net::new("serve");
+    net.extra = vec!["--serve-snapshots".into()];
+    for i in 0..N { net.start(i); }
+    net.wait("all four execute height 48 (references are flowing)", 120, |n| n.heights().iter().all(|h| *h >= 48));
+    net.wait("every node has captured a final snapshot", 90, |n| (0..N).all(|i| n.status(i).map_or(false, |s| u(&s["snapshot_serving"]["captured"]) >= 1)));
+    net.assert_agreement("serving on");
+    for i in 0..N {
+        let s = net.status(i).unwrap();
+        let c = &s["snapshot_serving"];
+        assert!(u(&c["retained"]) >= 1 && u(&c["retained"]) <= 3, "node {i}: {c}");
+        assert_eq!((u(&c["capture_other_error"]), u(&c["malformed"]), u(&c["gate_concurrent"]), u(&c["pinned_now"])), (0, 0, 0, 0), "node {i}: {c}");
+        assert!(!snapshot_dirs(&net.dirs[i]).is_empty(), "node {i}: snapshots are on disk");
+        assert!(s["fatal"].is_null());
+    }
+    // kill a node and restart it: its cache is re-verified from disk on open (nothing damaged is served), it rejoins, and serving resumes
+    let before = snapshot_dirs(&net.dirs[2]);
+    net.crash(2);
+    net.start(2);
+    net.wait("the restarted node reports its retained snapshots", 60, |n| n.status(2).map_or(false, |s| u(&s["snapshot_serving"]["retained"]) >= 1));
+    let s2 = net.status(2).unwrap();
+    assert_eq!(u(&s2["snapshot_serving"]["retained"]) as usize, before.len().min(3), "the same snapshots were re-verified and kept: {:?}", s2["snapshot_serving"]);
+    net.wait("the restarted node is back in step", 90, |n| { let h = n.heights(); h[2] + 4 >= *h.iter().max().unwrap() });
+    net.assert_agreement("serving on, after a restart");
 }

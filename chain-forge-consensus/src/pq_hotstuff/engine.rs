@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::certs::*;
 use super::seed::{authenticate_checkpoint, Base, CheckpointSeed, SeedError, SeedEvidence};
-use super::header::{ChainParams, Start};
+use super::header::{ChainParams, PayloadFreeBlock, Start};
 use super::sync::BelowBase;
 use super::checkpoint::{check_reference, effective_genesis_hash, final_height_after, is_v3, Alarm, ChainRefState, CheckpointConfig, CheckpointRef, Evidence, RefContext, RootCheck};
 use super::leader::leader_index;
@@ -177,6 +177,20 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
     pub fn config(&self) -> &EngineConfig { &self.cfg }
     pub fn store(&self) -> &SafetyStore<S, C> { &self.store }
     pub fn into_parts(self) -> (SafetyStore<S, C>, G, V) { (self.store, self.signer, self.verifier) }
+    /// The payload-free headers of the chain this node holds, from the block after `after` up to the block its high QC certifies: at most `max`, the height of the last
+    /// header of the whole path, and whether the slice reaches it. `None` when `after` is not on this node's chain (including anything below a seeded base).
+    pub fn headers_after(&self, after: &BlockId, max: usize) -> Option<(Vec<PayloadFreeBlock>, u64, bool)> {
+        let mut path: Vec<(BlockId, &Block)> = vec![];
+        let mut cur = self.high_qc.block_id();
+        while let Some(st) = self.blocks.get(&cur) { path.push((cur, &st.block)); cur = st.block.parent_id; }
+        path.reverse();
+        let start = if *after == self.genesis_id { if path.first().map_or(true, |(_, b)| b.parent_id == self.genesis_id) { 0 } else { return None } } else { path.iter().position(|(i, _)| i == after)? + 1 };
+        let tip = path.last().map_or(0, |(_, b)| b.height);
+        let end = start.saturating_add(max).min(path.len());
+        Some((path[start.min(path.len())..end].iter().map(|(_, b)| b.to_header()).collect(), tip, end == path.len()))
+    }
+    /// The checkpoint reference a known block carries, if any.
+    pub fn checkpoint_of(&self, id: &BlockId) -> Option<CheckpointRef> { self.blocks.get(id).and_then(|s| s.block.checkpoint) }
     pub fn known_blocks(&self) -> Vec<&Block> { self.blocks.values().map(|s| &s.block).collect() }
     pub fn leader_of(&self, round: Round) -> usize { leader_index(&self.cfg.set, round, self.cfg.seed).expect("a validated set has an eligible leader") }
     pub fn is_leader(&self) -> bool { self.leader_of(self.round) == self.cfg.my_index }

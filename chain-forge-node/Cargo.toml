@@ -66,6 +66,8 @@ sha3                  = { workspace = true, optional = true }
 real-network = []
 # DEVNET ONLY (off by default): the PQ-HotStuff-2 devnet node, its devnet-only key loader, non-production counter and local transport.
 pq-devnet = ["chain-forge-consensus/pq-hotstuff-fips204", "dep:sha3"]
+# S-2b: snapshot capture and serving for the PQ devnet node. OFF by default; a node additionally needs the explicit `--serve-snapshots` flag. Installation stays operator-initiated.
+pq-snapshot-transfer = ["pq-devnet", "chain-forge-consensus/pq-snapshot-transfer"]
 # TEST-ONLY: forwards to chain-forge-execution/signing-v2 (node-level v2 tests). Not enabled by default; no activation path.
 signing-v2 = ["chain-forge-execution/signing-v2"]
 # Public-alpha release bundle: implies signing-v2 (and with it the conformant FIPS 204 backend). The general development build keeps these feature-gated.
