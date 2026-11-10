@@ -72,3 +72,4 @@ include!("common/pq_checkpoint_suite.rs");
 include!("common/pq_seed_suite.rs");
 include!("common/pq_seed_persist_suite.rs");
 include!("common/pq_transfer_suite.rs");
+include!("common/pq_retention_suite.rs");

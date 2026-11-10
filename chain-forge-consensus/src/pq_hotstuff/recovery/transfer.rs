@@ -127,6 +127,8 @@ pub struct RequesterLimits {
     pub headers_per_request: u32,
     /// Headers held while a chain is assembled; reaching it without an authenticating checkpoint abandons that source.
     pub max_accumulated_headers: usize,
+    /// Bytes of encoded headers held while a chain is assembled (the bound that actually protects memory; the count alone does not, headers differ in size).
+    pub max_accumulated_bytes: u64,
     /// Snapshot size the node is willing to stage (the staging-disk budget); a larger manifest is refused locally.
     pub max_staging_bytes: u64,
     /// Outstanding requests, total and per peer.
@@ -148,7 +150,7 @@ pub enum TransferConfigError {
 impl RequesterLimits {
     /// Refuse locally, before any network use, a configuration the codec or the 8 MiB envelope cannot carry.
     pub fn validate(&self, codec: &CodecLimits) -> Result<(), TransferConfigError> {
-        if self.headers_per_request == 0 || self.max_accumulated_headers == 0 || self.max_staging_bytes == 0 || self.max_outstanding == 0 || self.per_peer_outstanding == 0 || self.request_timeout_ms == 0 || self.overall_timeout_ms == 0 { return Err(TransferConfigError::Zero); }
+        if self.headers_per_request == 0 || self.max_accumulated_headers == 0 || self.max_accumulated_bytes == 0 || self.max_staging_bytes == 0 || self.max_outstanding == 0 || self.per_peer_outstanding == 0 || self.request_timeout_ms == 0 || self.overall_timeout_ms == 0 { return Err(TransferConfigError::Zero); }
         if self.per_peer_outstanding > self.max_outstanding { return Err(TransferConfigError::PerPeerAboveTotal { per: self.per_peer_outstanding, total: self.max_outstanding }); }
         if self.headers_per_request > codec.max_headers { return Err(TransferConfigError::HeadersAboveCodec { req: self.headers_per_request, codec: codec.max_headers }); }
         let one = CodecLimits { max_headers: self.headers_per_request, ..*codec };
@@ -158,12 +160,18 @@ impl RequesterLimits {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Phase { Idle, Headers, Manifest, Chunks, Done(InstallRecord), Failed(String) }
+pub enum Phase {
+    Idle, Headers, Manifest, Chunks, Done(InstallRecord), Failed(String),
+    /// The chain from genesis does not fit the evidence bounds (count or bytes). Authentication starts at genesis, so on a long enough chain snapshot recovery is
+    /// impossible with these limits: NOTHING was installed, no peer is blamed, local state and signing floors are untouched, and the node keeps its ordinary block
+    /// sync (verified replay). Nothing is trusted that was not authenticated from genesis, and no evidence is discarded in favour of a newer unauthenticated anchor.
+    EvidenceLimitExceeded { headers: usize, bytes: u64 },
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RequesterStats {
     pub requests: u64, pub dropped_unsolicited: u64, pub dropped_mismatch: u64, pub dropped_late: u64, pub peers_suppressed: u64,
-    pub headers_rejected: u64, pub manifests_rejected: u64, pub chunks_rejected: u64, pub snapshots_rejected: u64, pub no_checkpoint_yet: u64,
+    pub headers_rejected: u64, pub evidence_limit_exceeded: u64, pub manifests_rejected: u64, pub chunks_rejected: u64, pub snapshots_rejected: u64, pub no_checkpoint_yet: u64,
 }
 
 /// What the requester wants sent. The caller encodes and delivers it.
@@ -180,7 +188,7 @@ pub struct Requester<A: Authenticator, I: InstallSink, E: EvidenceSink> {
     table: RequestTable, cool: Cooldown, supp: Suppression,
     phase: Phase, started_at: u64,
     // headers: ONE source at a time, so a bad page can only ever poison (and is discarded with) that source
-    hsrc: Option<usize>, headers: Vec<PayloadFreeBlock>, final_qc: Option<Cert>, tip_height: u64,
+    hsrc: Option<usize>, headers: Vec<PayloadFreeBlock>, header_bytes: u64, final_qc: Option<Cert>, tip_height: u64,
     chosen: Option<Chosen>,
     manifest: Option<Manifest>, manifest_src: Option<usize>, bad_snapshots: BTreeSet<[u8; 32]>,
     have: BTreeSet<u32>, chunk_src: BTreeMap<u32, usize>,
@@ -193,7 +201,7 @@ impl<A: Authenticator, I: InstallSink, E: EvidenceSink> Requester<A, I, E> {
         Ok(Requester {
             auth, sink, evidence, genesis_id, genesis_hash, codec, lim, local_height, peers: BTreeSet::new(),
             table: RequestTable::new(lim.max_outstanding, 1, lim.request_timeout_ms), cool: Cooldown::default(), supp: Suppression::default(), phase: Phase::Idle, started_at: 0,
-            hsrc: None, headers: vec![], final_qc: None, tip_height: 0, chosen: None, manifest: None, manifest_src: None, bad_snapshots: BTreeSet::new(), have: BTreeSet::new(), chunk_src: BTreeMap::new(),
+            hsrc: None, headers: vec![], header_bytes: 0, final_qc: None, tip_height: 0, chosen: None, manifest: None, manifest_src: None, bad_snapshots: BTreeSet::new(), have: BTreeSet::new(), chunk_src: BTreeMap::new(),
             stats: RequesterStats::default(),
         })
     }
@@ -202,7 +210,7 @@ impl<A: Authenticator, I: InstallSink, E: EvidenceSink> Requester<A, I, E> {
     pub fn outstanding_for(&self, peer: usize) -> usize { self.table.entries_for(peer) }
     pub fn add_peer(&mut self, peer: usize) { self.peers.insert(peer); }
     pub fn remove_peer(&mut self, peer: usize) { self.peers.remove(&peer); }
-    pub fn is_finished(&self) -> bool { matches!(self.phase, Phase::Done(_) | Phase::Failed(_)) }
+    pub fn is_finished(&self) -> bool { matches!(self.phase, Phase::Done(_) | Phase::Failed(_) | Phase::EvidenceLimitExceeded { .. }) }
     pub fn sink(&self) -> &I { &self.sink }
     /// Give back the installer and the evidence sink (a finished or abandoned transfer).
     pub fn into_parts(self) -> (I, E) { (self.sink, self.evidence) }
@@ -269,7 +277,7 @@ impl<A: Authenticator, I: InstallSink, E: EvidenceSink> Requester<A, I, E> {
     }
 
     fn last_id(&self) -> BlockId { self.headers.last().and_then(|h| self.auth.header_id(h)).unwrap_or(self.genesis_id) }
-    fn reset_headers(&mut self) { self.headers.clear(); self.final_qc = None; self.tip_height = 0; }
+    fn reset_headers(&mut self) { self.headers.clear(); self.header_bytes = 0; self.final_qc = None; self.tip_height = 0; }
 
     /// Periodic call: expire requests (their slots are released and the silent peer is put on cooldown for that selector) and issue more.
     pub fn on_tick(&mut self, now: u64) -> Vec<Out> {
@@ -308,7 +316,14 @@ impl<A: Authenticator, I: InstallSink, E: EvidenceSink> Requester<A, I, E> {
                 // cheap structure checks BEFORE the page is kept (the cryptographic check is the authenticator's)
                 let mut prev = (after, self.headers.last().map_or(0, |h| h.height));
                 for h in headers { if h.parent_id != prev.0 || h.height != prev.1 + 1 { self.stats.headers_rejected += 1; self.blame(peer, now); self.reset_headers(); self.hsrc = None; return; } match self.auth.header_id(h) { Some(i) => prev = (i, h.height), None => { self.stats.headers_rejected += 1; self.blame(peer, now); self.reset_headers(); self.hsrc = None; return; } } }
-                if self.headers.len().saturating_add(headers.len()) > self.lim.max_accumulated_headers { self.stats.headers_rejected += 1; self.blame(peer, now); self.reset_headers(); self.hsrc = None; return; }
+                let page_bytes: u64 = headers.iter().map(|h| crate::pq_hotstuff::netmsg::encode_header(h).len() as u64).sum();
+                if self.headers.len().saturating_add(headers.len()) > self.lim.max_accumulated_headers || self.header_bytes.saturating_add(page_bytes) > self.lim.max_accumulated_bytes {
+                    // a chain that honestly does not fit the local evidence bounds: stop, keep everything local as it was, blame nobody
+                    let (h, b) = (self.headers.len().saturating_add(headers.len()), self.header_bytes.saturating_add(page_bytes));
+                    self.reset_headers(); self.hsrc = None; self.stats.evidence_limit_exceeded += 1;
+                    let _ = self.sink.abort(); self.phase = Phase::EvidenceLimitExceeded { headers: h, bytes: b }; return;
+                }
+                self.header_bytes = self.header_bytes.saturating_add(page_bytes);
                 self.headers.extend(headers.iter().cloned());
                 if final_qc.is_some() { self.final_qc = final_qc.clone(); }
                 self.tip_height = *tip_height;
@@ -429,7 +444,7 @@ mod tests {
         fn abort(&mut self) -> Result<(), InstallError> { Ok(()) }
     }
     fn codec() -> CodecLimits { CodecLimits { transport: 8_388_608, n: 4, max_headers: 64, max_chunk_size: 262_144, max_chunk_count: 65_536, max_snapshot_bytes: 256 << 20 } }
-    fn lim(total: usize, per_peer: usize) -> RequesterLimits { RequesterLimits { headers_per_request: 8, max_accumulated_headers: 100, max_staging_bytes: 1 << 20, max_outstanding: total, per_peer_outstanding: per_peer, request_timeout_ms: 1_000, overall_timeout_ms: 100_000 } }
+    fn lim(total: usize, per_peer: usize) -> RequesterLimits { RequesterLimits { headers_per_request: 8, max_accumulated_headers: 100, max_accumulated_bytes: 1 << 24, max_staging_bytes: 1 << 20, max_outstanding: total, per_peer_outstanding: per_peer, request_timeout_ms: 1_000, overall_timeout_ms: 100_000 } }
     fn req(l: RequesterLimits) -> Requester<NoAuth, NoSink, NoEv> { let mut r = Requester::new(NoAuth, NoSink, NoEv, [0; 32], [1; 32], codec(), l, 0).unwrap(); r.add_peer(0); r.add_peer(1); r }
     fn cref() -> CheckpointRef { CheckpointRef { height: 8, block_id: [2; 32], state_root: [3; 32] } }
 
