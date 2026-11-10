@@ -66,3 +66,32 @@ cargo test --release -p chain-forge-node --features pq-devnet --test pq_devnet_l
 ```
 Node regressions at the same commit (Linux): v2 live 1/1, v3 live 4/4, node `pq_devnet` unit tests 5/5, all exit 0.
 Expected: lib 101; each engine file 187 passed + 2 ignored; node live: v2 1 and v3 4 tests. Report `git rev-parse HEAD`, each exit status, and any antivirus/exception state as found (do not change it to get a pass).
+
+## Windows confirmation RESULT (owner-run, MINGW64, 2026-11-10; pinned code commit)
+`git rev-parse HEAD` printed `26872ce5110b2e8205c7e03bb9c87000b0c33b1b` (detached HEAD at that commit). Results as pasted:
+| Check | Result |
+|---|---|
+| `chain-forge-consensus --features pq-hotstuff --lib` | 101 passed, 0 failed |
+| `pq_hotstuff_engine` (test doubles) | 187 passed, 0 failed, 2 ignored (531.54 s) |
+| `pq_hotstuff_engine_fips204` (real ML-DSA-65) | 187 passed, 0 failed, 2 ignored (193.34 s) |
+| `pq_devnet_live` (v2 regression) | 1 passed (34.92 s) |
+| `pq_devnet_live_v3` | 4 passed (193.13 s), agreement checks ok at every stage |
+These match the expectations. **What the paste does not show (stated, not inferred):** (1) the exit statuses of the four commands were not printed (`set -o pipefail` was
+set and every command printed an all-passed `test result`; no failure line appears); (2) **no antivirus/exception state was recorded for this run** - the antivirus query in the
+same paste belongs to the earlier #145 run (`88c0685`, antivirus off per a read-only query) and must not be read as this run's state; (3) `git status --short` was not shown
+for this checkout. The paste also contains that earlier #145 run again (169/169 per backend, v3 live 4, v2 live 1, all exit 0), already recorded in the recovery-stack review.
+This is validation of the S-1 components on the stated platform; it is not a Qattice application-recovery result and not network installation.
+
+## PROPOSED resource budgets for S-2 (owner review; derived from this code, not yet decided or implemented)
+Derived quantities (n = 4; ML-DSA-65 signature envelope 3,323 B): QC <= 13.4 KB; TC <= 26.8 KB; largest legal header ~43.6 KB (typical, one 3-signature QC: ~14 KB).
+| Bound | Proposal for the devnet | Basis |
+|---|---|---|
+| Frame buffer, per connection | `transport limit + 4` (8 MiB + 4), one frame at a time, drop on overrun | the locked 8 MiB envelope |
+| Decoded objects in flight | `max_recovery_memory = 64 MiB` -> `outstanding_cap = 8` (`min(16, floor(64 MiB / 8 MiB))`); requester `max_outstanding` <= that cap, per peer 2 | existing `outstanding_cap`; each outstanding response may be decoded at up to L |
+| Accumulated headers | **10,000 headers** (~140 MB typical, ~436 MB worst case); a chain longer than this is an UNSUPPORTED configuration, refused locally | evidence is O(chain) from genesis until anchored evidence exists; this is the binding limit, and 100,000 would need 1.4 GB+ |
+| Staging disk | explicit budget = `retained snapshots (3) x max snapshot + one in staging`; devnet proposal 64 MiB per snapshot -> 256 MiB; a larger manifest is refused locally | interim state is tiny; the codec ceiling (64 GiB) is not a budget |
+| Concurrent requests | total 4, per peer 2 (as in the S-1 tests), reserved per phase so headers cannot starve chunks | S-1 slot-accounting tests |
+| Chunk size | 256 KiB (codec max 1 MiB) | memory per in-flight chunk response |
+Open questions for the owner: whether 10,000 headers is acceptable for the devnet lifetime (at one block per second it is under three hours of chain), which makes the
+O(chain) evidence limit the first thing S-2 must address (anchored evidence or segmented authentication), not a tuning knob; and whether the retention budget should be
+configured per node or fixed.
