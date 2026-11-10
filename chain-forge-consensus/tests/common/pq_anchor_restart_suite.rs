@@ -19,7 +19,8 @@ fn drive_restart(restart: &mut AnchorRestart, hs: &[PayloadFreeBlock], win: usiz
     let cc = cc3(4, 8);
     let set = set_n(4);
     let p = cparams3(&set, &cc);
-    loop {
+    // bound iterations so a buggy advance that never exits NeedHeaders fails fast rather than hanging
+    for _ in 0..(hs.len() + 2) {
         let from = (restart.next_height() as usize).saturating_sub(1);
         if from >= hs.len() { return RestartOutcome::NeedHeaders { next_height: restart.next_height() }; }
         let to = (from + win).min(hs.len());
@@ -28,6 +29,7 @@ fn drive_restart(restart: &mut AnchorRestart, hs: &[PayloadFreeBlock], win: usiz
             other => return other,
         }
     }
+    panic!("drive_restart: exceeded iteration bound — advance never left NeedHeaders");
 }
 
 #[test]
