@@ -1,4 +1,4 @@
-# PQ-HotStuff-2 - AN-3: anchored restart integration (Linux validated; Windows pending)
+# PQ-HotStuff-2 - AN-3: anchored restart integration ✅ COMPLETE
 
 Scope: stacked on AN-2 (`feat/pq-hotstuff-2-anchored-evidence-an2`, frozen code at `7f2416d`).
 Feature `pq-anchored-evidence`, OFF by default. **Nothing in the node, driver or network calls any
@@ -128,6 +128,9 @@ The caller (future node wiring, outside this slice) is responsible for:
 
 **Linux result** (commit `01699c5`, 2026-11-10, release mode, real FIPS 204 ML-DSA-65):
 `test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 212 filtered out; finished in 1.07s`
+
+**Windows result** (commit `fb60173`, 2026-11-10, MINGW64 krizz@BossKing, release mode, real FIPS 204 ML-DSA-65):
+All 11 tests run individually — each reported `test result: ok. 1 passed; 0 failed`. Cargo exit 0.
 
 | # | Test name | What it tests |
 |---|---|---|
