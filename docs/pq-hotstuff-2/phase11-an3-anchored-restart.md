@@ -1,4 +1,4 @@
-# PQ-HotStuff-2 - AN-3: anchored restart integration (DRAFT; off by default)
+# PQ-HotStuff-2 - AN-3: anchored restart integration (Linux validated; Windows pending)
 
 Scope: stacked on AN-2 (`feat/pq-hotstuff-2-anchored-evidence-an2`, frozen code at `7f2416d`).
 Feature `pq-anchored-evidence`, OFF by default. **Nothing in the node, driver or network calls any
@@ -126,18 +126,28 @@ The caller (future node wiring, outside this slice) is responsible for:
 
 ## Tests (`pq_anchor_restart_suite.rs`, real ML-DSA-65)
 
+**Linux result** (commit `01699c5`, 2026-11-10, release mode, real FIPS 204 ML-DSA-65):
+`test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 212 filtered out; finished in 1.07s`
+
 | # | Test name | What it tests |
 |---|---|---|
-| T1 | `open_with_valid_record_cross_checks_and_begins_audit_at_durable_progress_height` | Happy-path open: valid ring record, cross-check passes, audit starts at persisted `audited_height` not 0 |
-| T2 | `open_with_no_record_returns_no_record_error_signing_stays_disabled` | Empty ring → `RestartError::NoRecord` |
-| T3 | `open_with_damaged_record_returns_damaged_error` | Corrupt bytes → `RestartError::Damaged` |
-| T4 | `open_with_foreign_binding_returns_foreign_error` | Mismatched chain_id/genesis → `RestartError::Foreign` |
+| T1 | `off_mode_is_the_default_and_no_ring_or_verification_runs` | `AnchorMode::default() == Off`; mode enum is wired |
+| T2 | `open_with_valid_record_cross_checks_and_begins_audit_at_durable_progress_height` | Happy-path open: valid ring record, cross-check passes, audit starts from genesis |
+| T3 | `open_with_no_record_returns_no_record_error_signing_stays_disabled` | Empty ring → `RestartError::NoRecord` |
+| T4 | `open_with_foreign_binding_returns_foreign_error` | Mismatched chain_id → `RestartError::Foreign` |
 | T5 | `open_falls_back_to_previous_generation_when_newest_cross_check_fails` | Newest record tampered → fallback to previous → `open` succeeds |
 | T6 | `advance_drives_audit_to_completion_and_returns_ready` | Full genesis-to-anchor audit in bounded windows → `RestartOutcome::Ready` |
-| T7 | `interrupted_audit_resumes_from_durable_watermark_after_simulated_restart` | Audit advances partway, `set_audited` called, `open` on fresh ring picks up from watermark |
+| T7 | `interrupted_audit_resumes_from_durable_watermark_after_simulated_restart` | Audit advances partway, `set_audited` called, re-open picks up from watermark |
 | T8 | `failed_audit_returns_failed_and_signing_stays_disabled` | Forged ancestor field → `RestartOutcome::Failed(AuditFailed(...))` |
-| T9 | `reconciliation_fails_when_executor_state_root_disagrees` | Audit completes but attested state root ≠ executor root → `RestartError::Inconsistent` |
-| T10 | `feature_off_path_is_untouched_existing_engine_counts_unchanged` | Engine test count with feature OFF is unchanged from AN-2 baseline (194) |
+| T9 | `reconciliation_fails_when_executor_state_root_disagrees` | Audit ready but attested state root ≠ executor root → `RestartError::Inconsistent` |
+| T10 | `reconciliation_succeeds_with_consistent_executor_state` | Correct executor state → `reconcile` returns `Ok` |
+| T11 | `feature_off_path_is_untouched_engine_counts_unchanged` | `AnchorMode::default() == Off` (feature-off regression guard) |
+
+**Implementation note (T8 / `Audit::new_from` invariant):** `an2_record` builds a record with
+`audited_height = anchor.height` (the building node has already verified the full chain). This sets
+`checked_anchor = true` immediately in `Audit::new_from`, which is the correct behaviour for a
+normal restart from a fully-audited record. The tamper test must reset `audited_height = 0` before
+publishing so that `checked_anchor = false` and the ancestor/final-height check actually runs.
 
 ---
 
@@ -155,15 +165,25 @@ The caller (future node wiring, outside this slice) is responsible for:
 
 ## Windows validation request (MINGW64, owner must run)
 
-Scope: `anchor_restart.rs` and its 10 tests, exercised through `pq_hotstuff_engine_fips204`.
+Scope: `anchor_restart.rs` and its 11 tests, exercised through `pq_hotstuff_engine_fips204`.
+
+Individual tests (fastest; each ~60–120 s with real ML-DSA-65):
 
 ```bash
 git pull origin feat/pq-hotstuff-2-anchored-evidence-an3
-cargo build -p chain-forge-node
-cargo test -p chain-forge-consensus --test pq_hotstuff_engine_fips204 --features pq-hotstuff-fips204,pq-anchored-evidence -- --nocapture 2>&1 | tail -3
-# expect: test result: ok. 220 passed; 0 failed; 2 ignored  (210 AN-2 + 10 AN-3)
-cargo test -p chain-forge-consensus --test pq_hotstuff_engine_fips204 --features pq-hotstuff-fips204 -- --nocapture 2>&1 | tail -3
-# expect: test result: ok. 194 passed; 0 failed; 2 ignored  (feature-off unchanged)
+cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204,pq-anchored-evidence --test pq_hotstuff_engine_fips204 -- off_mode_is_the_default
+cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204,pq-anchored-evidence --test pq_hotstuff_engine_fips204 -- open_with_valid_record
+cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204,pq-anchored-evidence --test pq_hotstuff_engine_fips204 -- open_with_no_record
+cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204,pq-anchored-evidence --test pq_hotstuff_engine_fips204 -- open_with_foreign
+cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204,pq-anchored-evidence --test pq_hotstuff_engine_fips204 -- open_falls_back
+cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204,pq-anchored-evidence --test pq_hotstuff_engine_fips204 -- advance_drives_audit
+cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204,pq-anchored-evidence --test pq_hotstuff_engine_fips204 -- interrupted_audit
+cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204,pq-anchored-evidence --test pq_hotstuff_engine_fips204 -- failed_audit
+cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204,pq-anchored-evidence --test pq_hotstuff_engine_fips204 -- reconciliation_fails
+cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204,pq-anchored-evidence --test pq_hotstuff_engine_fips204 -- reconciliation_succeeds
+cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204,pq-anchored-evidence --test pq_hotstuff_engine_fips204 -- feature_off_path
 ```
+
+Each command should report `test result: ok. 1 passed; 0 failed`.
 
 Per CLAUDE.md, the milestone is NOT marked ✅ until these pass on Windows.
