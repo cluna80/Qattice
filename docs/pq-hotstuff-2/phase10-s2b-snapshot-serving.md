@@ -67,3 +67,16 @@ powershell -NoProfile -Command "Get-MpComputerStatus | Select-Object AntivirusEn
 ```
 Expected, consensus OFF: lib 101; engine 194 passed + 2 ignored; foundation 30; safety 76; safety-fips204 11; wire 24. Consensus ON: the same with engine **203** passed + 2 ignored. Node OFF: v2 1 and v3 **5**.
 Node ON: v2 1 and v3 **6**. (Windows needs no `--test pq_hotstuff_engine`; the test-double engine file is not part of routine validation.)
+
+## Windows confirmation RESULT (owner-run, MINGW64, 2026-11-10; pinned code commit)
+`git rev-parse HEAD` printed `9be9c1854a49a951e5fe196f310c73e75d21b856` (detached HEAD). `git status --short`, run after the checkout, listed only untracked log files from earlier runs
+(`s1-*.log`, `s2a-*.log`; no modified tracked file). Results as pasted (shorter set; the test-double engine file was not run):
+| Check | Result | Exit statuses |
+|---|---|---|
+| consensus `pq-hotstuff-fips204` (snapshot feature OFF): lib / engine / foundation / safety / safety-fips204 / wire | 101 / 194 passed + 2 ignored (189.84 s) / 30 / 76 / 11 / 24 | 0 0 0 |
+| consensus `pq-hotstuff-fips204,pq-snapshot-transfer` (feature ON) | 101 / **203** passed + 2 ignored (181.93 s) / 30 / 76 / 11 / 24 | 0 0 0 |
+| node, feature OFF: v2 live / v3 live | 1 passed (34.69 s) / **5** passed (216.91 s) | 0 0 0 |
+| node, feature ON: v2 live / v3 live | 1 passed (34.50 s) / **6** passed (220.85 s) | 0 0 0 |
+These match the expectations. A read-only Defender query immediately afterwards printed `AntivirusEnabled : False`, `RealTimeProtectionEnabled : False` (exclusions not queried; no other scanner checked;
+the query ran after the tests). This validates the S-2b provider-side components and the unchanged node paths on the stated platform, on the real FIPS 204 path exercised by these tests. It is not
+Qattice application recovery, not network installation, not pruning, and says nothing about mainnet readiness or key-custody safety.
