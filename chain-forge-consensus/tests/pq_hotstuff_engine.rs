@@ -30,3 +30,5 @@ include!("common/pq_anchor_record_suite.rs");
 include!("common/pq_anchor_verify_suite.rs");
 #[cfg(feature = "pq-anchored-evidence")]
 include!("common/pq_anchor_restart_suite.rs");
+#[cfg(feature = "pq-anchored-evidence")]
+include!("common/pq_anchor_driver_suite.rs");

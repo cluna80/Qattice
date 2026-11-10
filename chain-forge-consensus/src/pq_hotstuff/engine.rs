@@ -176,6 +176,7 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
     pub fn genesis_id(&self) -> BlockId { self.genesis_id }
     pub fn config(&self) -> &EngineConfig { &self.cfg }
     pub fn store(&self) -> &SafetyStore<S, C> { &self.store }
+    pub fn verifier(&self) -> &V { &self.verifier }
     pub fn into_parts(self) -> (SafetyStore<S, C>, G, V) { (self.store, self.signer, self.verifier) }
     /// The payload-free headers of the chain this node holds, from the block after `after` up to the block its high QC certifies: at most `max`, the height of the last
     /// header of the whole path, and whether the slice reaches it. `None` when `after` is not on this node's chain (including anything below a seeded base).

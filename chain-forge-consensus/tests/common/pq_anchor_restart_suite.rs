@@ -203,12 +203,15 @@ fn reconciliation_fails_when_executor_state_root_disagrees() {
     let real_root = rec.reference.state_root;
     let committed = rec.anchor.height + 10;
 
+    let real_block_id = rec.reference.block_id;
     // correct data: succeeds
-    assert!(restart.reconcile(committed, |h| if h == ref_h { Some(real_root) } else { None }).is_ok());
+    assert!(restart.reconcile(committed, |h| if h == ref_h { Some((real_block_id, real_root)) } else { None }).is_ok());
     // wrong state root
-    assert!(restart.reconcile(committed, |_| Some([0xAB; 32])).is_err());
+    assert!(restart.reconcile(committed, |_| Some((real_block_id, [0xAB; 32]))).is_err());
+    // wrong block id
+    assert!(restart.reconcile(committed, |_| Some(([0xCD; 32], real_root))).is_err());
     // executor behind anchor
-    assert!(restart.reconcile(rec.anchor.height.saturating_sub(1), |_| Some(real_root)).is_err());
+    assert!(restart.reconcile(rec.anchor.height.saturating_sub(1), |_| Some((real_block_id, real_root))).is_err());
     // missing state at reference height
     assert!(restart.reconcile(committed, |_| None).is_err());
 }
@@ -224,7 +227,7 @@ fn reconciliation_succeeds_with_consistent_executor_state() {
     let mut restart = AnchorRestart::open(&ring, &abind(), &p, &TestVerifier, &alim(), 6).unwrap();
     assert!(matches!(drive_restart(&mut restart, &hs, 9), RestartOutcome::Ready { .. }));
     let result = restart.reconcile(rec.anchor.height + 5, |h| {
-        if h == rec.reference.height { Some(rec.reference.state_root) } else { None }
+        if h == rec.reference.height { Some((rec.reference.block_id, rec.reference.state_root)) } else { None }
     });
     assert!(result.is_ok(), "{result:?}");
 }

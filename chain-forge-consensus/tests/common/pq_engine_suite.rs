@@ -1676,7 +1676,7 @@ fn damaged_or_foreign_executor_state_is_never_treated_as_fresh() {
 fn big_set(n: usize) -> EpochSet {
     EpochSet::new(0, (0..n).map(|i| { let mut k = test_public_key(1); k[0] = (i >> 8) as u8; k[1] = i as u8; ValidatorEntry { address: format!("v{i:05}"), public_key: k, power: 1 } }).collect()).unwrap()
 }
-fn dcfg() -> DriverConfig { DriverConfig { max_sync_blocks: SYNC_K, pace: PACE, sync_ttl: 20, sync_outstanding: 8, min_propose_gap: 0, park_capacity: 16, park_ttl: 200, recent: 64, exec_per_tick: None } }
+fn dcfg() -> DriverConfig { DriverConfig { max_sync_blocks: SYNC_K, pace: PACE, sync_ttl: 20, sync_outstanding: 8, min_propose_gap: 0, park_capacity: 16, park_ttl: 200, recent: 64, exec_per_tick: None, #[cfg(feature = "pq-anchored-evidence")] anchor: None } }
 
 #[test]
 fn startup_rejects_unsupported_configurations_explicitly() {

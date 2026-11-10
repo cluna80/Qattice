@@ -26,8 +26,12 @@ use super::sync::{check_response, SyncClient, SyncRequest, SyncResponse};
 use super::engine::ServeSync;
 use super::seed::{SeedEvidence, MAX_EVIDENCE_HEADERS};
 use super::types::EpochSet;
+#[cfg(feature = "pq-anchored-evidence")]
+use super::anchor_restart::{AnchorRestart, RestartError, RestartOutcome};
+#[cfg(feature = "pq-anchored-evidence")]
+use super::header::{ChainParams, PayloadFreeBlock};
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct DriverConfig {
     /// Blocks per sync response this node asks for and serves.
     pub max_sync_blocks: usize,
@@ -45,6 +49,10 @@ pub struct DriverConfig {
     /// `None`: a finalized block is executed immediately, inline. `Some(n)`: finalized blocks are queued and at most `n` are executed per `tick` (`Some(0)` pauses
     /// execution entirely). This models execution lag; the executor's own durable cursor still decides what is replayed after a restart.
     pub exec_per_tick: Option<usize>,
+    /// AN-3: when `AuditFirst` mode is in use, the caller pre-opens the ring, runs `AnchorRestart::open`, and places the result here before calling `start`.
+    /// Signing stays disabled until `advance_anchor` delivers `AdvanceAnchorOutcome::Ready`. `Off` behavior is fully preserved when this is `None`.
+    #[cfg(feature = "pq-anchored-evidence")]
+    pub anchor: Option<AnchorRestart>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -70,11 +78,36 @@ pub enum DriverError {
     ExecutorBehindBase { exec: u64, base: u64 },
     #[error("the executor and the seeded checkpoint disagree: {0}; refusing to run")]
     BaseMismatch(String),
+    /// AN-3: the anchor ring record or its cross-check failed; the driver will not start in AuditFirst mode.
+    #[cfg(feature = "pq-anchored-evidence")]
+    #[error("anchor refused at startup: {0}")]
+    AnchorRefused(RestartError),
+    /// AN-3: audit completed but executor-state reconciliation failed; the driver will not start in AuditFirst mode.
+    #[cfg(feature = "pq-anchored-evidence")]
+    #[error("anchor reconciliation failed: {0}")]
+    AnchorInconsistent(RestartError),
 }
 
 /// Something to send: to one validator, or (`to == None`) to all the others.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outbound { pub to: Option<usize>, pub bytes: Vec<u8> }
+
+/// AN-3 (`pq-anchored-evidence` feature): the outcome of a [`Driver::advance_anchor`] call.
+#[cfg(feature = "pq-anchored-evidence")]
+#[derive(Debug)]
+pub enum AdvanceAnchorOutcome {
+    /// No anchor is installed; the driver is running in `AnchorMode::Off` mode.
+    NotPending,
+    /// More headers needed; call `advance_anchor` again with the window starting at `next_height`.
+    Pending { next_height: u64 },
+    /// Audit and reconciliation succeeded; `deferred` are the replay and resend messages that were held back at startup.
+    /// The caller should send `deferred` to peers before processing new messages.
+    Ready { audited_height: u64, deferred: Vec<Outbound> },
+    /// The audit failed; signing stays disabled.
+    AuditFailed(RestartError),
+    /// The audit succeeded but executor-state reconciliation failed; signing stays disabled.
+    ReconcileFailed(RestartError),
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Stats { pub malformed: u64, pub bad_sync: u64, pub sync_requests: u64, pub unsolicited_sync: u64, pub parked_dropped: u64, pub below_base_served: u64, pub below_base_advice: u64,
@@ -145,6 +178,9 @@ pub struct Driver<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: Consen
     stats: Stats,
     pending_exec: VecDeque<Committed>,
     interval: Option<u64>,
+    /// AN-3: when `AuditFirst` mode is in use, this holds the restart state machine until `advance_anchor` finishes.
+    #[cfg(feature = "pq-anchored-evidence")]
+    anchor: Option<AnchorRestart>,
     /// Snapshot capture and serving (S-2b): absent unless the `pq-snapshot-transfer` feature is built AND the node opted in at runtime.
     #[cfg(feature = "pq-snapshot-transfer")]
     recovery: Option<Box<dyn super::serving::RecoveryService>>,
@@ -152,7 +188,7 @@ pub struct Driver<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: Consen
 
 impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, B: BlockFiles, X: Executor> Driver<S, C, G, V, B, X> {
     /// Recover from disk and start. Returns the messages to send first (the stored vote/timeout, byte for byte).
-    pub fn start(dc: DriverConfig, mut engine: Engine<S, C, G, V>, mut store: BlockStore<B>, exec: X, payload: PayloadSource, now: u64) -> Result<(Self, Vec<Outbound>), DriverError> {
+    pub fn start(mut dc: DriverConfig, mut engine: Engine<S, C, G, V>, mut store: BlockStore<B>, exec: X, payload: PayloadSource, now: u64) -> Result<(Self, Vec<Outbound>), DriverError> {
         let lim = validate_config(engine.config(), &dc)?;
         let loaded = store.load()?;
         // A stored seed (checkpoint-start) is RE-AUTHENTICATED from its evidence against this node's own genesis, profile, validator set and parameters before anything
@@ -198,6 +234,9 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
             engine.set_executed(cur.height);
             if cur.height > 0 && cur.height % k == 0 { store.put_root(k, cur.height, &cur.state_digest)?; engine.record_root(cur.height, cur.state_digest)?; }
         }
+        // AN-3: extract the anchor before consuming dc
+        #[cfg(feature = "pq-anchored-evidence")]
+        let anchor_sm = dc.anchor.take();
         let cfg = engine.config();
         let (profile, chain, set, me) = (cfg.protocol_profile.clone(), cfg.chain_id.clone(), cfg.set.clone(), cfg.my_index);
         let n = set.len();
@@ -205,12 +244,19 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
             pace: Pacemaker::new(dc.pace).map_err(|e| DriverError::Config(e.to_string()))?, sync: SyncClient::new(dc.sync_ttl, dc.sync_outstanding),
             round_started: now, last_round: engine.round(), last_hqc: engine.high_qc().round(), rr: me,
             dc, lim, engine, store, exec, payload, profile, chain, set, me, n, now, parked: VecDeque::new(), recent, stats: Stats::default(), pending_exec: VecDeque::new(), interval,
+            #[cfg(feature = "pq-anchored-evidence")] anchor: anchor_sm,
             #[cfg(feature = "pq-snapshot-transfer")] recovery: None,
         };
         // Leave `Recovering` first if every dependency is already present (it signs nothing: it only checks that the high QC's block is known and that the round is not
         // below the store's `hqr`): the re-sends below are gated while recovering, and a restarted node that is not recovering must re-send its stored vote and timeout
         // exactly as an unseeded restart does.
         d.try_complete_recovery();
+        // AN-3: when AuditFirst mode is active the anchor audit must complete before any replay or resend.
+        // The driver is returned in a pending state; signing stays disabled until `advance_anchor` delivers Ready.
+        #[cfg(feature = "pq-anchored-evidence")]
+        if d.anchor.is_some() {
+            return Ok((d, vec![]));
+        }
         // the executor catches up from ITS durable cursor, exactly once
         let mut replay_outs = vec![];
         for c in d.engine.committed_after(cur.height) { replay_outs.extend(d.execute(c)?); }
@@ -224,6 +270,79 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
 
     /// Leave `Recovering` as soon as the engine says every condition holds (it never signs before that).
     fn try_complete_recovery(&mut self) { if self.engine.is_recovering() { let _ = self.engine.complete_recovery(); } }
+
+    /// AN-3 (`pq-anchored-evidence` feature): feed the next window of headers to the anchor audit.
+    ///
+    /// Returns `NotPending` immediately if no anchor state machine is installed (`AnchorMode::Off` behavior). Otherwise
+    /// drives the audit forward; on `Ready`, reconciles executor state, then completes the deferred replay and resend
+    /// that `start` skipped. On any failure returns the error without clearing the anchor gate — signing stays disabled.
+    #[cfg(feature = "pq-anchored-evidence")]
+    pub fn advance_anchor(&mut self, headers: &[PayloadFreeBlock]) -> Result<AdvanceAnchorOutcome, DriverError> {
+        if self.anchor.is_none() { return Ok(AdvanceAnchorOutcome::NotPending); }
+        // Build ChainParams from the engine config (all borrows from the EngineConfig stored in self.engine).
+        let cfg = self.engine.config();
+        let cp = cfg.checkpoint.map(|c| c.params);
+        // ChainParams borrows from cfg; create it with a local reference to avoid lifetime tangles.
+        let (profile, chain_id, set, genesis_hash, seed) =
+            (cfg.protocol_profile.clone(), cfg.chain_id.clone(), cfg.set.clone(), cfg.genesis_hash, cfg.seed);
+        let p = ChainParams { protocol_profile: &profile, chain_id: &chain_id, set: &set, genesis_hash, seed, checkpoint: cp };
+        // Advance the audit — sm borrow ends before we touch self.engine below.
+        let outcome = {
+            let sm = self.anchor.as_mut().unwrap();
+            sm.advance(&p, self.engine.verifier(), headers)
+        };
+        match outcome {
+            RestartOutcome::NeedHeaders { next_height } => Ok(AdvanceAnchorOutcome::Pending { next_height }),
+            RestartOutcome::Failed(e) => Ok(AdvanceAnchorOutcome::AuditFailed(e)),
+            RestartOutcome::Ready { audited_height } => {
+                // Collect the reconciliation inputs from the engine before borrowing sm again.
+                let cur = self.exec.cursor();
+                let sm = self.anchor.as_ref().unwrap();
+                let ref_height = sm.record.reference.height;
+                let ref_block_id = sm.record.reference.block_id;
+                let ref_state_root = sm.record.reference.state_root;
+                let anchor_height = sm.record.anchor.height;
+                // Look up (block_id, state_root) at the reference height from the engine's committed history and root store.
+                let engine_block = self.engine.committed_after(ref_height.saturating_sub(1))
+                    .into_iter().find(|c| c.height == ref_height);
+                let engine_root = self.engine.root(ref_height);
+                let cursor_at: Option<([u8; 32], [u8; 32])> = match (engine_block, engine_root) {
+                    (Some(c), Some(r)) => Some((c.id, r)),
+                    _ => None,
+                };
+                // Run reconcile checks inline (matches what AnchorRestart::reconcile does).
+                let rec_result: Result<(), RestartError> = (|| {
+                    if anchor_height > cur.height {
+                        return Err(RestartError::Inconsistent("executor has not committed up to the anchor height"));
+                    }
+                    match cursor_at {
+                        None => Err(RestartError::Inconsistent("executor has no committed state at the reference height")),
+                        Some((bid, _)) if bid != ref_block_id =>
+                            Err(RestartError::Inconsistent("attested block id disagrees with executor's committed block")),
+                        Some((_, root)) if root != ref_state_root =>
+                            Err(RestartError::Inconsistent("attested state root disagrees with executor's committed state")),
+                        Some(_) => Ok(()),
+                    }
+                })();
+                if let Err(e) = rec_result {
+                    return Ok(AdvanceAnchorOutcome::ReconcileFailed(e));
+                }
+                // Clear the anchor gate and perform the deferred replay + resend.
+                self.anchor = None;
+                let mut replay_outs = vec![];
+                for c in self.engine.committed_after(cur.height) { replay_outs.extend(self.execute(c)?); }
+                let mut sends = self.route(replay_outs)?;
+                let mut outs = self.engine.resend_last_vote().unwrap_or_default();
+                outs.extend(self.engine.resend_last_timeout().unwrap_or_default());
+                sends.extend(self.route(outs)?);
+                Ok(AdvanceAnchorOutcome::Ready { audited_height, deferred: sends })
+            }
+        }
+    }
+
+    /// Whether the driver is currently pending an anchor audit (signing stays disabled until `advance_anchor` returns `Ready`).
+    #[cfg(feature = "pq-anchored-evidence")]
+    pub fn anchor_pending(&self) -> bool { self.anchor.is_some() }
 
     pub fn engine(&self) -> &Engine<S, C, G, V> { &self.engine }
 

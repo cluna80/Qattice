@@ -135,21 +135,23 @@ impl AnchorRestart {
     /// after `RestartOutcome::Ready`. Does NOT replay effects or rewind application state.
     ///
     /// `executor_committed_height`: the height the executor has committed up to.
-    /// `state_root_at`: a function that returns the state root the executor committed at a given height,
-    /// or `None` when that height is not in the executor's history.
+    /// `cursor_at`: a function that returns `(block_id, state_root)` the executor committed at a given
+    /// height, or `None` when that height is not in the executor's history.
     pub fn reconcile(
         &self,
         executor_committed_height: u64,
-        state_root_at: impl Fn(u64) -> Option<[u8; 32]>,
+        cursor_at: impl Fn(u64) -> Option<([u8; 32], [u8; 32])>,
     ) -> Result<(), RestartError> {
         let anchor = &self.record.anchor;
         if anchor.height > executor_committed_height {
             return Err(RestartError::Inconsistent("executor has not committed up to the anchor height"));
         }
         let ref_height = self.record.reference.height;
-        match state_root_at(ref_height) {
+        match cursor_at(ref_height) {
             None => return Err(RestartError::Inconsistent("executor has no committed state at the reference height")),
-            Some(root) if root != self.record.reference.state_root =>
+            Some((block_id, _)) if block_id != self.record.reference.block_id =>
+                return Err(RestartError::Inconsistent("attested block id disagrees with executor's committed block")),
+            Some((_, root)) if root != self.record.reference.state_root =>
                 return Err(RestartError::Inconsistent("attested state root disagrees with executor's committed state")),
             Some(_) => {}
         }
