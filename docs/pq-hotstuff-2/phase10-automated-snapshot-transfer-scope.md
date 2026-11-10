@@ -71,13 +71,24 @@ The transfer code takes its limits from configuration and **refuses to start** (
 | Slice | Content | Acceptance |
 |---|---|---|
 | **S-1** | Sans-IO requester and provider state machines over the existing codecs, tables and installer; in-memory transport; a malicious-provider simulator; the bounds of section 4.5; **no provider-agreement threshold**. **No node wiring.** | Deterministic tests for every threat in section 5 that does not need processes; mutation campaign; request/slot accounting tests that would have caught the catch-up starvation class (answered requests release their slots; a multi-hop fetch cannot starve) |
-| **S-2** | Snapshot production and bounded retention for the interim application; provider serving behind the disabled flag; node wiring of requester/provider, still off | Crash tests around capture and retention; bounded disk and memory; disabled flag proven to change nothing |
+| **S-2** | `EvidenceLimitExceeded` and byte-bounded evidence (S-2a); snapshot production and bounded retention with per-node validated budgets (S-2a); then provider serving behind the disabled flag and node wiring of requester/provider, still off (S-2b) | Crash tests around capture and retention; bounded disk and memory; disabled flag proven to change nothing |
 | **S-3** | Operator-initiated `install --from-peers`, install-then-restart, live process test with faults | Process-level monitor (no signing or re-send while recovering), agreement and no-duplicate-execution checks, every fault in section 5, repeated runs |
 | **S-4** | Owner-run Windows validation at a pinned commit | Recorded as in the existing evidence conventions |
 | **Later, separately gated** | Automatic trigger policy; anchored (incremental) evidence; linear-cost catch-up; real application snapshot (after U5 and a canonical state root); anything involving pruning | Each needs its own owner decision and review |
 
 ## 7. Decisions
-The six decisions this section used to ask for are **locked** (section 0). Remaining open items before S-3: the concrete numbers for the limits in section 4.5 (to be proposed with S-1's bounds and reviewed), and the disk budget for snapshot retention.
+The six decisions of section 0 are locked. Two further decisions were made by the owner on 2026-11-10 (after S-1's Windows validation):
+
+**Header ceiling.** The initial ceiling of **10,000 accumulated headers** is accepted as a **bounded devnet recovery limit, not a lifetime guarantee**; anchored (incremental) evidence stays separate, later work.
+Because authentication starts at genesis, the ceiling will eventually prevent snapshot recovery on a long-lived chain. At that boundary the requester reports **`EvidenceLimitExceeded`**
+(headers held, bytes held), **preserves local state and every signing floor, blames no peer**, and leaves the node to **verified block replay (ordinary sync) where available**. It never silently trusts a newer anchor and never
+discards evidence it needs. Accumulated evidence is bounded **by bytes as well as by header count**.
+
+**Snapshot retention budget.** Configured **per node**, with validated limits and explicit disk accounting; **three retained snapshots** remains the initial cache target (a devnet cache policy, not a pruning-safety guarantee).
+The accounting covers: retained snapshots; snapshots pinned by active transfers; temporary capture and staging; and installation generations. If the budget is exhausted, capture is **deferred or a clear resource error is
+returned**; **pinned data and the active recovery generation are never evicted**.
+
+Still open (not decided): the remaining numeric defaults of section 4.5 (they are proposals in the S-1 record until reviewed), and everything in section 8's "later, separately gated" list.
 
 ## 8. Non-goals
 Pruning or any payload deletion; recovery of the real Qattice application (blocked on U5 and a canonical state root); dynamic membership; mainnet or production activation; automatic installation on any existing network; changes to Tendermint or to the separate Chain Forge repository.
