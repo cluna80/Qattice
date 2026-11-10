@@ -171,3 +171,22 @@ cargo test -p chain-forge-consensus --test pq_hotstuff_engine_fips204 --features
 ```
 
 Please report the exact `test result:` lines and Cargo exit statuses. Per CLAUDE.md, the milestone is NOT marked ✅ until these pass on Windows.
+
+---
+
+## Windows validation result (MINGW64, 2026-11-10; commit `e639fea`)
+
+Machine: `krizz@BossKing`, MINGW64. All 8 AN-2 tests run individually with `--features pq-hotstuff-fips204,pq-anchored-evidence` against the real FIPS 204 ML-DSA-65 binary (`pq_hotstuff_engine_fips204`). Debug profile (unoptimized). Each test printed `1 passed; 0 failed; 0 ignored`.
+
+| Test | Runtime |
+|---|---|
+| `segmented_verification_equals_uninterrupted_verification_on_healthy_and_timeout_chains_at_every_segment_size` | 121.84 s |
+| `a_restart_boundary_carries_exactly_the_resume_state_and_the_unfinalized_suffix_is_represented_never_skipped` | 74.00 s |
+| `a_returning_node_extending_from_its_own_anchor_record_authenticates_the_same_checkpoint_as_from_genesis` | 76.52 s |
+| `the_cross_check_reverifies_the_proof_against_the_genesis_validator_set_and_rejects_every_tampering` | 64.62 s |
+| `the_finality_cross_check_does_not_establish_history_and_the_audit_closes_exactly_that_gap` | 89.23 s |
+| `the_audit_compares_every_anchor_field_a_start_would_trust_and_progress_is_capped_at_the_anchor` | 86.05 s |
+| `the_audit_reverifies_genesis_to_the_anchor_in_bounded_segments_with_forward_only_durable_progress` | 77.88 s |
+| `build_record_re_decodes_under_the_caller_limits_and_rejects_a_proof_that_exceeds_them` | 64.57 s |
+
+**All 8 passed. Cargo exit 0 for each run.** AN-2 library validation complete on Windows. Node activation, anchored startup and pruning remain gated.
