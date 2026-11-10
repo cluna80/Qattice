@@ -298,3 +298,30 @@ fn the_audit_reverifies_genesis_to_the_anchor_in_bounded_segments_with_forward_o
         assert!(matches!(audit.advance(&p, &TestVerifier, &bad), Err(AuditError::Segments(SegmentError::Headers(_)))), "{name}");
     }
 }
+
+#[test]
+fn build_record_re_decodes_under_the_caller_limits_and_rejects_a_proof_that_exceeds_them() {
+    // M11: skipping `AnchorRecord::decode(&rec.encode(), lim)` in build_record would return a record that
+    // bypasses the limit check. This test calls build_record with limits tight enough to reject the proof
+    // that authenticate_checkpoint produced, confirming the re-decode is enforced.
+    let (name, e) = &an2_chains()[0];
+    let (hs, hq) = an2_headers(e);
+    let cc = cc3(4, 8);
+    let set = set_n(4);
+    let p = cparams3(&set, &cc);
+    let full = verify_header_chain(&p, &TestVerifier, Start::Genesis, &hs, Some(&hq), 10_000).unwrap();
+    let cref = an2_cref(e, &full);
+    let seed = authenticate_checkpoint(&p, &TestVerifier, Start::Genesis, &hs, Some(&hq), 10_000, &cref, &hq, None)
+        .unwrap_or_else(|er| panic!("{name}: {er}"));
+    // normal limits: build_record succeeds
+    let rec = build_record(&seed, &hs, Some(&hq), 1, Provenance::Genesis, cref.height, abind(), &alim())
+        .unwrap_or_else(|er| panic!("{name}: build with generous limits failed: {er}"));
+    let proof_len = rec.proof.headers.len();
+    assert!(proof_len >= 2, "{name}: proof must have at least 2 headers for the tight-limit test to be meaningful ({proof_len} found)");
+    // tight limits (1 header less than the proof): build_record must refuse with ProofTooLarge
+    let tight = AnchorLimits { max_proof_headers: proof_len - 1, max_proof_bytes: 2 << 20 };
+    let err = build_record(&seed, &hs, Some(&hq), 1, Provenance::Genesis, cref.height, abind(), &tight)
+        .unwrap_err();
+    assert!(matches!(err, AnchorError::ProofTooLarge { .. }),
+        "{name}: build_record with tight limits must return ProofTooLarge, got {err}");
+}
