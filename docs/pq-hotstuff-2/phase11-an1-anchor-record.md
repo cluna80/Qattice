@@ -51,3 +51,16 @@ cargo test --release -p chain-forge-node --features pq-devnet --test pq_devnet_l
 powershell -NoProfile -Command "Get-MpComputerStatus | Select-Object AntivirusEnabled,RealTimeProtectionEnabled | Format-List"
 ```
 Expected: lib 101; engine **194** (feature off), **202** (anchored), **211** (anchored plus snapshot); each +2 ignored; foundation 30; safety 76; safety-fips204 11; wire 24; node v2 1 and v3 5.
+
+## Windows confirmation RESULT (owner-run, MINGW64, 2026-11-10; pinned code commit)
+`git rev-parse HEAD` printed `e0d29c847d3848fa8eee880368304460dce9fab5` (detached HEAD). `git status --short`, run after the checkout, listed only untracked log files from earlier runs
+(`s1-*`, `s2a-*`, `s2b-*`; no modified tracked file). Results as pasted:
+| Check | Result | Exit statuses |
+|---|---|---|
+| consensus `pq-hotstuff-fips204` (feature OFF): lib / engine / foundation / safety / safety-fips204 / wire | 101 / **194** passed + 2 ignored (190.51 s) / 30 / 76 / 11 / 24 | 0 0 0 |
+| consensus `pq-hotstuff-fips204,pq-anchored-evidence` | 101 / **202** passed + 2 ignored (182.29 s) / 30 / 76 / 11 / 24 | 0 0 0 |
+| consensus `pq-hotstuff-fips204,pq-snapshot-transfer,pq-anchored-evidence` | 101 / **211** passed + 2 ignored (182.49 s) / 30 / 76 / 11 / 24 | 0 0 0 |
+| node (default features): v2 live / v3 live | 1 passed (34.67 s) / **5** passed (197.66 s) | 0 0 0 |
+These match the expectations. A read-only Defender query immediately afterwards printed `AntivirusEnabled : False`, `RealTimeProtectionEnabled : False` (exclusions not queried; no other scanner checked; the
+query ran after the tests). This validates the AN-1 storage components and the unchanged node paths on the stated platform, on the real FIPS 204 path these tests exercise. It says nothing about anchor authenticity, anchored start, recovery
+speed, pruning, mainnet readiness or key-custody safety: none of those exist in this slice.
