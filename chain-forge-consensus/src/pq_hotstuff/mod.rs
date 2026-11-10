@@ -44,3 +44,6 @@ pub mod serving;
 
 #[cfg(feature = "pq-anchored-evidence")]
 pub mod anchor_record;
+
+#[cfg(feature = "pq-anchored-evidence")]
+pub mod anchor_verify;
