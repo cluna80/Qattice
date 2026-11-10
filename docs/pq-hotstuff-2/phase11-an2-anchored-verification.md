@@ -120,9 +120,7 @@ The feature-off engine count is **unchanged** (194). The node tests were NOT rer
 
 ## Mutation record (real crypto, release mode; a spot check of chosen mutants, not a proof)
 
-**Baseline**: commit `f7ffded` (initial AN-2 implementation, 7 tests). Campaign run with all 8 tests at commit `7f2416d`.
-
-12 mutants; **10 caught by assertion failure, 2 are compile errors** (the mutations produce ill-typed code that cannot compile):
+**Baseline**: commit `f7ffded` (initial AN-2 implementation, 7 tests). Final campaign run with all 8 tests at commit `7f2416d`. **Result: 12 attempted, 10 detected by assertions, 2 invalid because they did not compile, no surviving executable mutants.**
 
 | ID | Mutation | Verdict | Caught by |
 |---|---|---|---|
@@ -139,9 +137,9 @@ The feature-off engine count is **unchanged** (194). The node tests were NOT rer
 | M11 | Replaces `AnchorRecord::decode(&rec.encode(), lim)` with `Ok(rec)` | CAUGHT | T8 (added) |
 | M12 | Removes structural reference check in `cross_check` | CAUGHT | T4 |
 
-**M9 and M10** produce code that fails Rust's type inference or lifetime checks and cannot be compiled; they cannot be live mutants. No test is needed for them. **M11** was a genuine survivor of the first 7-test suite; test 8 (`build_record_re_decodes_under_the_caller_limits_...`) was added and confirmed to catch it.
+M9 and M10 produce ill-typed code that Rust's type checker rejects; they cannot be live mutants and require no test. M11 survived the initial 7-test suite (the existing tests all use limits generous enough that the proof fits); test 8 (`build_record_re_decodes_under_the_caller_limits_...`) was added and confirmed to catch it.
 
-**1 of 12 required a new test** (M11). The first campaign run (7 tests, commit `f7ffded`) yielded 9 caught by assertion failure, 2 compile errors, 1 genuine survivor (M11).
+**History note**: the initial 7-test run at `f7ffded` produced 9 assertion-caught, 2 compile-error, 1 genuine survivor (M11). Test 8 was added at `7f2416d` to close M11. Future campaigns should use a disposable worktree so mutated files never appear in the working branch's status.
 
 ---
 
@@ -155,7 +153,11 @@ The feature-off engine count is **unchanged** (194). The node tests were NOT rer
 
 ---
 
-## Pinned Windows commands (owner must run, MINGW64)
+## Windows validation request (MINGW64, owner must run)
+
+**Scope of this validation**: the AN-2 library components only — `anchor_verify.rs` and its 8 tests, exercised through the real FIPS 204 ML-DSA-65 engine binary (`pq_hotstuff_engine_fips204`). Node activation, anchored startup and pruning are not part of this validation and remain gated.
+
+**Binary**: `pq_hotstuff_engine_fips204` only. The test-doubles engine suite (`pq_hotstuff_engine`) is not required here.
 
 ```bash
 git pull origin feat/pq-hotstuff-2-anchored-evidence-an2
@@ -167,3 +169,5 @@ cargo test -p chain-forge-consensus --test pq_hotstuff_engine_fips204 --features
 cargo test -p chain-forge-consensus --test pq_hotstuff_engine_fips204 --features pq-hotstuff-fips204 -- --nocapture 2>&1 | tail -3
 # expect: test result: ok. 194 passed; 0 failed; 2 ignored (feature-off unchanged)
 ```
+
+Please report the exact `test result:` lines and Cargo exit statuses. Per CLAUDE.md, the milestone is NOT marked ✅ until these pass on Windows.
