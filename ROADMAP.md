@@ -1086,6 +1086,21 @@ User opens Qattice app → QR challenge displayed
 
 > **QSWIP-001 — Open Post-Quantum Wallet Identity Protocol**: Long-term open standard so other Chain Forge blockchains can reuse Qattice's wallet identity and authentication infrastructure. Proposed; timing deferred until Phase B–D of QCB-DIS-001 is battle-tested.
 
+## QAT-PQ-ZK-POP-001 — Private personhood proofs: implementation gate (owner direction, 2026-11-09)
+
+**Required future capability; not implemented or activated by this entry.** Before advertising or releasing anonymous, zero-knowledge personhood verification, implement and validate a credential proof layer that proves possession of a valid, non-revoked QPC without revealing the holder's identity. This makes Identity Pilot Stage 3 and QCB-PM-001 actionable; it does not redefine DIS authentication as proof of humanity or replace the enrollment/uniqueness process.
+
+- **Sequencing:** retain the current snapshot/recovery work as the immediate priority. Start the dedicated proof-system workstream when specifying the private QPC/DIS presentation layer; complete its acceptance gates before enabling that privacy feature. Ordinary local ML-DSA authorization can proceed independently.
+- **Proof-system selection:** evaluate ZK-SNARKs explicitly for succinct, non-interactive private presentations. Require a documented post-quantum security argument for the complete construction, including commitments, credential signatures, Fiat-Shamir assumptions, recursion and any proof wrapping. Groth16/BLS12-381 prototype results are historical classical evidence, not PQ acceptance. If no suitable PQ-secure SNARK meets requirements, report the gap and submit a reviewed hash-based ZK-STARK or other PQ proof-system alternative rather than silently adopting a quantum-vulnerable construction. No specific backend is approved here.
+- **Statement and privacy specification:** define credential membership, issuer trust, uniqueness provenance, revocation freshness, key possession, chain/profile/audience/nonce binding, selective disclosure and domain-scoped nullifiers where needed to prevent duplicate use. Specify unlinkability boundaries and metadata leakage; avoid a universal tracking identifier. A proof hides attributes; it does not establish real-world humanity without a sound credential issuance process.
+- **Implementation gates:** versioned canonical proof/credential formats, bounded verification and denial-of-service limits, wallet-local witness/prover custody, no secret witness transmission, explicit activation and cryptographic migration plan. Integrate with Qattice's real executor and PQ-HotStuff-2 path without altering personhood voting caps.
+- **Acceptance:** independent cryptographic review and interoperability vectors; invalid/replayed/cross-domain proofs, forged/revoked credentials, stale revocation state, double-use/nullifier, recovery/rotation and privacy-correlation tests; measured proof size, prover memory/time on target phones, verifier cost and throughput; Linux and owner-confirmed Windows integration evidence. Demonstrate that no pairing-based compression wrapper silently defeats the PQ requirement.
+- **Separate scopes:** QCB-ZKP-001 block-execution proving is a different workstream. This entry does not require ZK block proofs for snapshot recovery or pruning and authorizes no merge, deployment, production activation or change to the current consensus profile.
+
+**Status: planned; specification, backend selection, implementation and security acceptance open.**
+
+---
+
 #### QCB-PM-001 — Private Post-Quantum Threshold Authorization
 
 *Goal: Allow Qattice identity holders to prove they are authorized — without revealing which identity they hold — using zero-knowledge or threshold credential mechanisms.*
