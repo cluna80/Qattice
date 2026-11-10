@@ -28,7 +28,7 @@ What the transfer tests establish (in-process; a real driver network; in-memory 
 * slot accounting: outstanding requests never exceed the caps; every slot is released (also with silent providers); a transfer completes from messages alone, with no timer;
 * a provider degrades oversized answers to advice, ignores responses, and answers a flood with BUSY;
 * **recovery boundary:** an in-process driver restarts from the installed state and the persisted evidence with no signing floor moved and executes each block once;
-  a crash matrix over every mutating operation from before the evidence write to the end of the install and over every possible post-crash disk state checks that a published
+  a crash matrix over every mutating operation from before the evidence write to the end of the install and over every post-crash disk state that the test model (`MemTreeFs::crash_outcomes`, a sample of 6 per crash point) represents - NOT every possible filesystem or power-loss outcome - checks that a published
   generation always has durable, matching, re-authenticating evidence and that the node's own files are untouched; evidence-ahead-of-application makes a driver refuse to start
   (`ExecutorBehindBase`) and the install can be redone;
 * **local storage failure** (a chunk fsync fails; the generations directory cannot be made durable): the requester fails closed within 120 messages, blames nobody, the prior
@@ -40,11 +40,11 @@ Campaign 1 (first S-1 commit): **9 of 12 mutants caught; 3 survived** - (1) no p
 check removed. A message-driven test was then added for (1).
 Rerun at `41be391`: (1) caught, (2) caught (by a new unit test that shares one peer's capacity across request kinds; the request table's own cap is per kind),
 (3) **still survived**; a new mutant (storage failure retried without end) was caught by the crash matrix.
-Rerun at the frozen commit `26872ce`: (1), (2), (3) and the storage-failure mutant are all **caught** - (3) by a unit test that calls the chunk logic directly with a chunk
+Targeted rerun at the frozen commit `26872ce` (these four mutants only; **not a fresh complete 12-mutant campaign at the final commit**): (1), (2), (3) and the storage-failure mutant are all **caught** - (3) by a unit test that calls the chunk logic directly with a chunk
 naming another snapshot (the request table normally refuses such a response first, on the echoed selector, so (3) cannot be reached through the public API while the table is
 correct).
 These two checks are therefore **defence in depth behind the request table**; they were not shown equivalent to anything, they were killed by direct tests. Whether to keep them
-is a design choice, not an unresolved test gap. Mutation is a spot check of 12 chosen mutants, not a proof.
+is a design choice, not an unresolved test gap. Mutation is a spot check of 12 chosen mutants plus targeted reruns, not a proof; the other eight first-campaign mutants were last run at the first S-1 commit.
 
 ## Open / not covered
 * Not wired: no operator command, no network decoder, no node integration (S-2), no automatic trigger (separate decision), no pruning.
