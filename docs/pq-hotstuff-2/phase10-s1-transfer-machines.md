@@ -82,6 +82,13 @@ same paste belongs to the earlier #145 run (`88c0685`, antivirus off per a read-
 for this checkout. The paste also contains that earlier #145 run again (169/169 per backend, v3 live 4, v2 live 1, all exit 0), already recorded in the recovery-stack review.
 This is validation of the S-1 components on the stated platform; it is not a Qattice application-recovery result and not network installation.
 
+## Windows confirmation, SECOND RUN with exit statuses (owner-run, 2026-11-10; same pinned commit `26872ce5110b2e8205c7e03bb9c87000b0c33b1b`)
+`git rev-parse HEAD` printed the pinned commit. `git status --short`, run before the rerun, listed only the four untracked log files `s1-*.log` left by the first run (no modified
+tracked file). Results: lib 101 passed (exit 0 0 0); `pq_hotstuff_engine` 187 passed, 2 ignored, 509.23 s (exit 0 0 0); `pq_hotstuff_engine_fips204` 187 passed, 2 ignored, 211.91 s
+(exit 0 0 0); node live: v2 1 passed (34.43 s) and v3 4 passed (186.79 s) (exit 0 0 0). A read-only Defender query immediately afterwards printed `AntivirusEnabled : False`,
+`RealTimeProtectionEnabled : False` (exclusions were not queried; no other scanner was checked). This closes the three gaps above **for this second run**; it describes this run's
+state, not the first run's, which remains unrecorded. Both runs passed with identical counts.
+
 ## PROPOSED resource budgets for S-2 (owner review; derived from this code, not yet decided or implemented)
 Derived quantities (n = 4; ML-DSA-65 signature envelope 3,323 B): QC <= 13.4 KB; TC <= 26.8 KB; largest legal header ~43.6 KB (typical, one 3-signature QC: ~14 KB).
 | Bound | Proposal for the devnet | Basis |
