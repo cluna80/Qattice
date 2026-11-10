@@ -100,7 +100,7 @@ fn donor_of(net: &DNet) -> Arc<Donor> {
     let genesis_id = d0.engine().genesis_id();
     Arc::new(Donor { headers, ids, hq, snaps, by_ref, refs, genesis_id })
 }
-fn tlim() -> RequesterLimits { RequesterLimits { headers_per_request: 16, max_accumulated_headers: 10_000, max_staging_bytes: 1 << 20, max_outstanding: 4, per_peer_outstanding: 2, request_timeout_ms: 200, overall_timeout_ms: 120_000 } }
+fn tlim() -> RequesterLimits { RequesterLimits { headers_per_request: 16, max_accumulated_headers: 10_000, max_accumulated_bytes: 64 << 20, max_staging_bytes: 1 << 20, max_outstanding: 4, per_peer_outstanding: 2, request_timeout_ms: 200, overall_timeout_ms: 120_000 } }
 fn serve_cfg() -> ServeConfig { ServeConfig { limit: net::MAX_MESSAGE_SIZE, burst: 2 * net::MAX_MESSAGE_SIZE, refill_per_s: net::MAX_MESSAGE_SIZE / 2, aggregate_per_s: net::MAX_MESSAGE_SIZE * 8, max_concurrent: 16, per_peer_outstanding: 8, min_spacing_ms: 0, chunk_size: 64 } }
 fn provider(d: &Arc<Donor>, mode: Mode, now: u64) -> Provider<Peer> { Provider::new(Peer { d: d.clone(), mode }, ServeGate::new(serve_cfg(), now).unwrap(), rl()) }
 
@@ -316,13 +316,23 @@ fn unsolicited_late_duplicate_and_wrong_peer_responses_change_nothing() {
 }
 
 #[test]
-fn the_accumulated_header_bound_is_enforced_and_never_exceeded() {
+fn a_chain_beyond_the_evidence_bounds_reports_evidence_limit_exceeded_exactly_at_the_boundary_and_changes_nothing() {
     let d = donor();
-    let mut lim = tlim(); lim.max_accumulated_headers = 6; lim.headers_per_request = 4;
-    let mut r = rig_with(&d, &[Mode::Honest], lim, false);
-    r.run(500);
-    assert!(r.done().is_none() && r.saved.borrow().is_empty() && r.req.sink().pointer().is_none(), "a chain longer than the local bound cannot be installed");
-    assert!(r.req.stats.headers_rejected >= 1);
+    let n = d.headers.len();
+    let total: u64 = d.headers.iter().map(|h| chain_forge_consensus::pq_hotstuff::netmsg::encode_header(h).len() as u64).sum();
+    let run = |count: usize, bytes: u64| { let mut l = tlim(); l.max_accumulated_headers = count; l.max_accumulated_bytes = bytes; l.headers_per_request = 4; let mut r = rig_with(&d, &[Mode::Honest, Mode::Honest], l, false); r.run(3_000); r };
+    // exactly at the bounds: the transfer completes (no off-by-one in either bound)
+    assert!(run(n, total).done().is_some(), "count = chain length and bytes = chain bytes is supported");
+    // one header or one byte short: EvidenceLimitExceeded, nothing installed, nothing persisted, nobody blamed, the node's own files untouched
+    for (label, r) in [("one header short", run(n - 1, total)), ("one byte short", run(n, total - 1)), ("count 6", run(6, total))] {
+        match r.req.phase() { TPhase::EvidenceLimitExceeded { headers, bytes } => assert!(*headers > 0 && *bytes > 0, "{label}"), other => panic!("{label}: {other:?}") }
+        assert!(r.saved.borrow().is_empty() && r.req.sink().pointer().is_none(), "{label}: nothing installed or persisted");
+        assert_eq!(r.req.stats.peers_suppressed, 0, "{label}: no peer is blamed for an honest chain that does not fit");
+        assert!(r.req.stats.evidence_limit_exceeded >= 1);
+        assert!(r.sent.iter().all(|(_, m)| !matches!(m, RecoveryMsg::ManifestReq { .. } | RecoveryMsg::ChunkReq { .. })), "{label}: no snapshot was requested on evidence that could not be authenticated");
+        assert_eq!(extras_view(&r.req.sink().fs), { let mut x = MemTreeFs::new(tfaults()); extras(&mut x); extras_view(&x) }, "{label}: local files untouched");
+        assert!(r.sent.len() < 200, "{label}: bounded requests");
+    }
 }
 
 #[test]
