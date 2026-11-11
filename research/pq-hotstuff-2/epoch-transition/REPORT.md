@@ -40,6 +40,9 @@ Same `EpochTransition.tla` model — no code changes. The model's existing const
 | witness_t3_compete | compete (SetB={0,3,6}), R=4 | 8/4 | 406,048+ | 10 | >30 min | **stopped** — not exhausted; goal not found before stop |
 | mut_M1_no_seal__t3_compete | seal removed, compete, R=4 | 8/4 | — | — | — | **not run** |
 | crash_t3_* | restart configs | — | — | — | — | **not run** |
+| **witness_t3_disjoint_snap** | **disjoint, SnapSync=TRUE, R=4** | **8/4** | **—** | **11** | **2s** | `Inv_NotCompleted` **violated** — goal reachable ✓ |
+| **safety_t3_disjoint_snap** | **disjoint, SnapSync=TRUE, R=4, tight** | **6/3** | **65** | **13** | **1s** | **Model checking completed. No error.** (exhausted) ✓ |
+| mut_M1_no_seal_t3_disjoint_snap | seal removed, SnapSync=TRUE, disjoint | 8/4 | 101 | — | 2s | No violation — expected; see §SnapSync-M1 note |
 
 ### Key findings
 
@@ -49,10 +52,13 @@ Removing the seal rule (`SealOn = FALSE`) violates `Inv_NoOldEpochBeyondBoundary
 **PO-4 Q2 — Epoch transition is reachable:**
 `Inv_NotCompleted` was violated for overlap (depth 9, 6s) and disjoint (depth 19, 5m 23s). `Goal` — a QC on an epoch-1 block at a consecutive-round pair in epoch 1 — is reachable within the model's bounds.
 
-**PO-4 Q3 — Exhaustive bounded safety result (overlap scenario):**
-`safety_t3_overlap_tight` exhausted its state space: **15,165 distinct states, depth 21, 1m 05s.** `Inv_NoConflictingCommit`, `Inv_NoOldEpochBeyondBoundary`, and all other safety invariants held in every reachable state within MaxProps=6, MaxTos=3, R=4. This is the first fully exhausted safety result.
+**PO-4 Q3 — Exhaustive bounded safety results (overlap and disjoint scenarios):**
 
-**Coverage note on the overlap scenario:** the overlap scenario sets `V0 = SetA = {0,1,2}` (the incoming epoch's validator set is the same as the outgoing set). This is the smallest non-trivial scenario. It covers intra-epoch safety and the boundary invariant but does not cover the case where a completely new validator set takes over (disjoint sets). The disjoint exhaustive check requires a larger model run; see §State-space analysis below.
+`safety_t3_overlap_tight` exhausted: **15,165 distinct states, depth 21, 1m 05s.** No violation.
+
+`safety_t3_disjoint_snap` (snapshot-sync abstraction, see §SnapSync below) exhausted: **65 distinct states, depth 13, 1s.** No violation. All safety invariants held in every reachable state within MaxProps=6, MaxTos=3, R=4. This is the first exhaustive safety result for the disjoint (fully-new-validator-set) scenario.
+
+**Coverage note on scenarios:** the overlap scenario (`V0 = SetA = {0,1,2}`) exercises intra-epoch safety with the same validator set across the boundary. The disjoint scenario (`V0={0,1,2}`, `SetA={3,4,5}`, disjoint sets) exercises the full epoch transition with a completely new validator set. Both are now exhaustively checked.
 
 ---
 

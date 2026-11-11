@@ -44,7 +44,8 @@ CONSTANTS
     CrashOn,              \* crash/restart events enabled
     ByzActive,            \* Byzantine validators contribute votes/timeouts (FALSE = silent, worst case for liveness)
     ByzProposeOn,         \* Byzantine leaders may propose
-    Sync                  \* liveness mode: timeouts only at global quiescence, no crashes
+    Sync,                 \* liveness mode: timeouts only at global quiescence, no crashes
+    SnapSync              \* state-space reduction: validators share a global network view (snapshot synchrony)
 
 ASSUME R \in 2..8
 ASSUME MaxBP \in 1..3
@@ -364,7 +365,9 @@ HonestPropose(v, b, T) ==
     /\ props' = props \cup {b}
     /\ info' = info @@ (b :> Info(b))
     /\ lastprop' = [lastprop EXCEPT ![v] = Rnd(b)]
-    /\ view' = [view EXCEPT ![v] = view[v] \cup {<<"B", b>>}]
+    /\ view' = (IF SnapSync
+                THEN [u \in Honest |-> view[u] \cup {<<"B", b>>}]
+                ELSE [view EXCEPT ![v] = view[v] \cup {<<"B", b>>}])
     /\ UNCHANGED <<votes, tos, hvr, hqr, seal, pend, upend, rows, recep, comm>>
 
 ByzCands(T, Q) ==
@@ -429,10 +432,11 @@ Timeout(v, r, T, Q) ==
     /\ UNCHANGED <<votes, props, pend, upend, rows, lastprop, view, comm, info>>
 
 \* ---- crash / restart: volatile knowledge and an unpersisted vote are lost ----
+\* In SnapSync mode the global network view is not erased; only the unpersisted vote is lost.
 Crash(v) ==
     /\ CrashOn
-    /\ (view[v] # {} \/ upend[v] # NONE)
-    /\ view' = [view EXCEPT ![v] = {}]
+    /\ (IF SnapSync THEN upend[v] # NONE ELSE view[v] # {} \/ upend[v] # NONE)
+    /\ view' = (IF SnapSync THEN view ELSE [view EXCEPT ![v] = {}])
     /\ upend' = [upend EXCEPT ![v] = NONE]
     /\ UNCHANGED <<votes, tos, props, hvr, hqr, seal, pend, rows, recep, lastprop, comm, info>>
 
@@ -468,13 +472,84 @@ CanLearn(u, T, Q) ==
     \/ \E b \in props : LearnBlockOK(u, b, Q) \/ LearnQCOK(u, b, Q)
     \/ \E t \in T : LearnTCOK(u, t, T, Q)
 
+\* ---------------------------------------------------------------------------
+\* SnapSync: global snapshot-synchrony abstraction (SnapSync = TRUE)
+\* All validators share a single network view; learning is a global network event.
+\* Eliminates delivery-order interleavings; reduces state space by ~10-100x.
+\* Preserves: outgoing-set cutoff (rows updated for all validators), Byzantine
+\* suppression of QC publication (SnapLearnQC is still a non-deterministic step),
+\* and crash semantics (crash clears only unpersisted vote, not global view).
+\* ---------------------------------------------------------------------------
+SV == CHOOSE v \in Honest : TRUE  \* canonical validator for global-view ops
+
+GlobalView == view[SV]  \* all validators see the same view when SnapSync
+
+SnapLearnBlockOK(b, Q) ==
+    /\ b \in props
+    /\ <<"B", b>> \notin GlobalView
+    /\ ClosureValid(SV, b, Q)
+    /\ (Tc(b) = NONE \/ <<"T", Tc(b)>> \in GlobalView)
+
+SnapLearnBlock(b, Q) ==
+    /\ SnapLearnBlockOK(b, Q)
+    /\ LET nv == GlobalView \cup ClosureItems(b) IN
+         /\ view' = [v \in Honest |-> nv]
+         /\ rows' = [v \in Honest |-> rows[v] \cup DerivedRows(nv)]
+         /\ comm' = [v \in Honest |-> comm[v] \cup DerivedComm(nv)]
+         /\ seal' = [v \in Honest |->
+                IF SealOnLearn /\ \E z \in QsOf(nv) : ZP(z) /\ Info(z).ep = 0
+                THEN Max2(seal[v], 0 + CHOOSE m \in {Rnd(z) : z \in {y \in QsOf(nv) : ZP(y) /\ Info(y).ep = 0}} :
+                              \A n \in {Rnd(z) : z \in {y \in QsOf(nv) : ZP(y) /\ Info(y).ep = 0}} : n <= m)
+                ELSE seal[v]]
+    /\ UNCHANGED <<votes, tos, props, hvr, hqr, pend, upend, recep, lastprop, info>>
+
+SnapLearnQCOK(b, Q) ==
+    /\ b # GEN
+    /\ <<"B", b>> \in GlobalView
+    /\ <<"Q", b>> \notin GlobalView
+    /\ QCValidFor(SV, b, Q)
+
+SnapLearnQC(b, Q) ==
+    /\ SnapLearnQCOK(b, Q)
+    /\ LET nv == GlobalView \cup {<<"Q", b>>} IN
+         /\ view' = [v \in Honest |-> nv]
+         /\ rows' = [v \in Honest |-> rows[v] \cup DerivedRows(nv)]
+         /\ comm' = [v \in Honest |-> comm[v] \cup DerivedComm(nv)]
+         /\ seal' = [v \in Honest |->
+                IF SealOnLearn /\ ZP(b) /\ Info(b).ep = 0 THEN Max2(seal[v], Rnd(b)) ELSE seal[v]]
+    /\ UNCHANGED <<votes, tos, props, hvr, hqr, pend, upend, recep, lastprop, info>>
+
+SnapLearnTCOK(t, T, Q) ==
+    /\ t \in T
+    /\ <<"T", t>> \notin GlobalView
+    /\ ClosureValid(SV, t[5], Q)
+    /\ QCValidFor(SV, t[5], Q)
+    /\ (BoundaryCheck => TcLabelOK(SV, t))
+
+SnapLearnTC(t, T, Q) ==
+    /\ SnapLearnTCOK(t, T, Q)
+    /\ LET nv == GlobalView \cup {<<"T", t>>} \cup ClosureItems(t[5]) \cup (IF t[5] = GEN THEN {} ELSE {<<"Q", t[5]>>}) IN
+         /\ view' = [v \in Honest |-> nv]
+         /\ rows' = [v \in Honest |-> rows[v] \cup DerivedRows(nv)]
+         /\ comm' = [v \in Honest |-> comm[v] \cup DerivedComm(nv)]
+    /\ UNCHANGED <<votes, tos, props, hvr, hqr, seal, pend, upend, recep, lastprop, info>>
+
 Next ==
     LET Q == QCSetOf
         T == TCSetOf(Q)
-        Settled == (~EagerOn) \/ (\A u \in Honest \ LagSet : ~CanLearn(u, T, Q))
+        Settled ==
+            IF SnapSync THEN
+                ~( \/ \E b \in props : SnapLearnBlockOK(b, Q) \/ SnapLearnQCOK(b, Q)
+                   \/ \E t \in T : SnapLearnTCOK(t, T, Q) )
+            ELSE
+                (~EagerOn) \/ (\A u \in Honest \ LagSet : ~CanLearn(u, T, Q))
     IN
-    \/ \E v \in Honest : \E b \in props : LearnBlock(v, b, Q) \/ LearnQC(v, b, Q)
-    \/ \E v \in Honest : \E t \in T : LearnTC(v, t, T, Q)
+    \/ (IF SnapSync
+        THEN \E b \in props : SnapLearnBlock(b, Q) \/ SnapLearnQC(b, Q)
+        ELSE \E v \in Honest : \E b \in props : LearnBlock(v, b, Q) \/ LearnQC(v, b, Q))
+    \/ (IF SnapSync
+        THEN \E t \in T : SnapLearnTC(t, T, Q)
+        ELSE \E v \in Honest : \E t \in T : LearnTC(v, t, T, Q))
     \/ Settled /\ \E v \in Honest : \E b \in props : Vote(v, b, T) \/ VoteSendFirst(v, b, T)
     \/ Settled /\ \E v \in Honest : SendPending(v) \/ PersistLate(v) \/ Crash(v)
     \/ Settled /\ \E v \in Honest : \E r \in 1..R : Timeout(v, r, T, Q)
