@@ -1,5 +1,61 @@
 # Qattice — Public Testnet Alpha: ML-DSA-65 + PQ-HotStuff Launch Plan
 
+## PO-4 complete + CF-C1 open — 2026-11-11 (documentation-only; append-only)
+
+> **Documentation only.** No merge or deployment authorized by this section.
+
+**PO-4 (epoch-transition formal model check) is substantively complete.**
+
+| PO-4 item | Result |
+|---|---|
+| Epoch transition reachable (witness, overlap + disjoint) | Confirmed |
+| Seal rule load-bearing — M1 violation (overlap + disjoint) | Confirmed |
+| Safety exhaustive — overlap (15,165 states) | No violation |
+| Safety exhaustive — disjoint via SnapSync (65 states) | No violation |
+| Crash/restart safety — disjoint via SnapSync (65 states) | No violation |
+| BoundaryCheck load-bearing — M3 (inconclusive; not blocking) | Noted |
+
+**Dynamic-membership formal blocker lifted.** The "dynamic membership remains disabled pending PO-4" restriction is removed. Epoch validator sets and ML-DSA-only admission may be implemented under CF-C1.
+
+**QAT-07 is NOT closed by PO-4 alone.** The remaining QAT-07 deliverables (epoch validator sets, restart anti-equivocation over TCP, revocation, key rotation, personhood power caps) all require CF-C1 to exist first. QAT-07 remains open.
+
+**CF-C1 is now open.** CF-C1 = native PQ-HotStuff-2 `ConsensusEngine` implementation in `chain-forge-consensus/src/pq_hotstuff/engine.rs`. Minimum scope:
+1. `PqHotStuffEngine` struct implementing `ConsensusEngine` trait
+2. `ConsensusVariant::PqHotStuff` variant
+3. Two-chain commit rule (spec §3.3–3.5): `locked_qc`, `high_qc`, consecutive-round commit
+4. ML-DSA-65 vote aggregation using existing `fips204_adapter` (feature-gated)
+5. Pacemaker (exponential-backoff timeout, `on_timeout`)
+6. Epoch-transition hook: `on_commit` calls `seal_round` on the safety store when committing an epoch-change block
+
+No network activation. Feature flag `pq-hotstuff` only. No merge without owner-run Windows confirmation.
+
+## Owner direction — 2026-11-11: Tendermint testing retired for Qattice (LOCKED)
+
+> **Documentation only.** No code change, merge, or deployment authorized by this section.
+
+**Qattice is PQ-HotStuff-2 only going forward. No further Tendermint testing is planned or authorized for the Qattice network.**
+
+This reinforces and finalizes the 2026-11-07 PQ-HotStuff-2-native direction:
+
+- **Chain Forge:** Tendermint remains a selectable consensus engine option. It is not removed from the builder. Chain Forge Tendermint support is unaffected.
+- **Qattice:** The Tendermint devnet (`genesis-4node-mldsa.json`) has served its purpose (ML-DSA-65 key validation). It is retired as a testing target. No new Tendermint-based acceptance tests are to be written or prioritized for Qattice. Backend D Tendermint crash/fencing tests (production counter durability) are explicitly deprioritized — that work validates a storage layer under a consensus engine Qattice is replacing.
+- **Critical path:** Complete PO-4 formal model checks → QAT-07 gate → CF-C1 (native PQ-HotStuff-2 engine implementation) → PQ-HotStuff-2 devnet. That sequence, not any further Tendermint work, is the path to Phase 0 completion and Phase 0.5 chain hardening.
+
+## Prior art note — 2026-11-11 (documentation-only; append-only)
+
+> **Documentation only.** No code, merge, gate, or deployment is authorized by this section.
+
+To the best of current public knowledge, Qattice's combination of **ML-DSA-65 (FIPS 204) as the BFT consensus signature scheme with HotStuff-2** is novel in the blockchain space. Existing HotStuff-2 implementations (LibraBFT/DiemBFT, Aptos, Sui, edgedlt/hotstuff2 and others) use classical schemes: Ed25519, BLS12-381, or secp256k1. Post-quantum blockchain research to date has focused on transaction and wallet signatures, not the consensus layer. NIST standardized ML-DSA in August 2024; no production or publicly documented system is known to use it as a BFT consensus signing primitive.
+
+The novel architecture is the full stack, not ML-DSA in isolation:
+
+- **ML-DSA-65 as the validator consensus key scheme** (n separate signatures per QC, no BLS aggregation — a deliberate tradeoff for FIPS 204 compliance and hardware-anchor compatibility).
+- **HotStuff-2 two-chain commit rule** adapted for ML-DSA QC structure.
+- **Epoch-transition seal rule (EC-6)** — the outgoing-set signing cutoff whose safety is being formally verified in PO-4. No prior HotStuff-2 variant includes this.
+- **Formally verified handoff** (PO-4 TLA+ model, `EpochTransition.tla`): the first TLA+ safety proof of an ML-DSA-keyed BFT epoch transition.
+
+This note is recorded as context for future publication and attribution. It does not constitute a novelty claim for patent or academic priority purposes; independent verification of prior art is the owner's responsibility before any such claim is made.
+
 ## PQ-HotStuff-2 implementation status — 2026-11-09 (newest status; documentation-only; append-only)
 
 > **Status supersession, not gate completion.** This section records what the draft PR stack #133–#144 (plus one PR still to be opened) implements and which of it the owner has Windows-confirmed. It removes nothing: earlier sections, including the locked 2026-11-08 pruning requirements and the 2026-11-06 status below, stay as written. It changes no code, authorizes no merge, activation or deployment, and **marks no QAT gate complete**. Per `CLAUDE.md`, a sandbox/CI run never counts as confirmation, so **no ✅ is used here**: nothing below is merged, and the legend's ✅ means shipped.
