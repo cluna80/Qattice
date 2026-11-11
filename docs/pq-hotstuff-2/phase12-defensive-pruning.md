@@ -1,7 +1,8 @@
 # PQ-HotStuff-2 — Defensive Pruning Watermark (gated prototype)
 
-**Status: Windows-confirmed `d9c9f93` (P1–P9). Feature `pq-anchored-evidence`, OFF by default.
-No network wiring. No real-application acceptance. QAT-06 open. PR unmerged.**
+**Status: Windows-confirmed `d9c9f93` (P1–P9). Restart-after-pruning bug fixed `2b46807`.
+Live devnet test sandbox-passing; Windows confirmation pending.
+Feature `pq-anchored-evidence`, OFF by default. No real-application acceptance. QAT-06 open. PR unmerged.**
 
 Branch: `feat/pq-hotstuff-2-anchored-evidence-an3`
 
@@ -44,6 +45,40 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 243 filtered out; fi
 ```
 
 2026-11-11, krizz@BossKing MINGW64. 1 passed / 0.01s.
+
+### Live devnet test — sandbox (commit `2b46807`)
+
+```
+running 1 test
+  [ 13.0s] all four execute height 70: heights [70, 71, 70, 70]
+  heights after steady state: [70, 71, 70, 70]
+  pruned_watermark per node: [6, 7, 6, 6]
+  node 0: height=70, watermark=6, blk-* files=67
+  node 1: height=71, watermark=7, blk-* files=67
+  node 2: height=70, watermark=6, blk-* files=66
+  node 3: height=70, watermark=6, blk-* files=67
+  [ 10.2s] three nodes finalize 4 more after crash: heights [75, 75, 70, 75]
+  [  4.6s] restarted node recovers past its last height: heights [75, 75, 75, 75]
+final heights [75, 75, 75, 75]; watermarks [11, 11, 11, 11]
+test pruning_watermark_advances_payloads_are_deleted_and_restart_recovers ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 27.91s
+```
+
+Linux sandbox, `cargo test --release -p chain-forge-node --features pq-anchored-evidence --test pq_pruning_devnet_live -- --nocapture`. **Windows confirmation pending.**
+
+### Restart-after-pruning bug fix (`2b46807`)
+
+**Root cause:** `Driver::start` called `engine.restore()` with the full committed list (heights 1..tip)
+but the blk-* files for heights < watermark were deleted. The block AT watermark height failed `accept()`
+because its parent (height wm-1, deleted) was not in the in-memory tree. The first committed entry above
+the watermark then caused restore to fail: `"committed block at height N is missing or damaged"`.
+
+**Fix:** Added `Engine::set_pruned_base(id, height, round)` which registers the watermark block id in
+`pruned_base: Option<(BlockId, u64, u64)>`. `height_of()` and `round_of()` check `pruned_base`, so the
+first block above the watermark can resolve its parent. `committed_tip` is primed to the watermark entry
+so `commit_through` stops there correctly. `Driver::start` filters `restore_committed` to heights > watermark
+and calls `set_pruned_base` with the watermark block (looked up from `loaded.blocks` and verified by id).
 
 ### Mutation campaign (Linux sandbox, all killed)
 
