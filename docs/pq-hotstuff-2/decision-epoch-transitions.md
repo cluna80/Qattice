@@ -40,6 +40,63 @@ QC with a fake `round` field; it depends on the stored block rounds.
 
 ---
 
+## Handoff trace: block-by-block disposition
+
+The following trace resolves the height conflict in the previous draft (which put
+`B_child` and the first new-epoch block at the same height).
+
+```
+Height | Round    | Epoch | Block      | Certifying set | Disposition
+-------|----------|-------|------------|----------------|------------------------------------
+h      | r_ec     | e     | B_ec       | S_e            | Epoch-change block; payload = S_{e+1}
+       |          |       |            |                | Not yet committed when first proposed
+h+1    | r_ec+1   | e     | B_child    | S_e            | Extends B_ec; commits B_ec when
+       |          |       |            |                |   QC(B_child) is processed
+       |          |       |            |                | Still epoch e; S_{e+1} known but not
+       |          |       |            |                |   yet active
+h+2    | 1        | e+1   | B_{e+1,1}  | S_{e+1}        | First block of new epoch; parent =
+       |          |       |            |                |   B_child.block_id; round resets to 1
+```
+
+**What commits `B_ec`:** a QC on `B_child` satisfying the acceptance condition (stored
+round consecutive, `parent_id = B_ec.block_id`, supermajority of `S_e`). When that QC is
+processed, `commit_through(B_ec.block_id)` fires.
+
+**When `S_{e+1}` becomes active:** after `B_ec` is committed, before any block at height
+`h+2` is accepted. The engine loads `S_{e+1}` from `B_ec.payload`, verifies the set hash,
+and replaces `self.valset_hash` with `S_{e+1}.validator_set_hash()`. All subsequent
+certificates must carry that hash.
+
+**`B_child`'s disposition:** `B_child` is an ordinary epoch-`e` block at height `h+1`. It
+carries no special type flag in the current design. Its only role is to provide the
+consecutive-round QC that triggers the commit of `B_ec`. It may carry empty payload.
+
+**Open question for owner decision:** should `B_child` have an explicit "epoch boundary"
+block type, or is an ordinary epoch-`e` block at round `r_ec+1` sufficient? An explicit
+type would make it unambiguous to external observers and simplify the activation rule (the
+engine transitions on commit of an epoch-change block, not on commit of any block at that
+height). Without an explicit type, the activation is triggered solely by the payload
+content of the committed block (`B_ec.payload` contains `S_{e+1}`), which is equivalent
+but requires the engine to inspect payload on every commit.
+
+**Timeout certificates in epoch `e` during the transition window:** a TC formed at round
+`r_ec` or `r_ec+1` in epoch `e` carries `valset_hash = S_e.validator_set_hash()` and no
+block height. Its activation rule follows the SSI eligibility condition using the round,
+not the block height: a TC is eligible if `S_e` was the active set for the rounds at which
+it was formed. Because the epoch transition takes effect after `B_ec` is committed (between
+height `h+1` and `h+2`), any TC at rounds ≤ `r_ec+1` in epoch `e` is verified against
+`S_e`. TCs at round 1 of epoch `e+1` are verified against `S_{e+1}`.
+
+**Retention for cold-start authentication after pruning:** a cold-start node that has
+pruned below `B_ec.height` cannot recover `S_{e+1}` from the block store. It requires
+either: (a) the checkpoint record carries `S_{e+1}` bytes (not just the hash), or (b) a
+separate epoch-set store persists `(epoch, valset_hash) → EpochSet bytes` and survives
+pruning. Option (a) is simpler; option (b) decouples set storage from the checkpoint
+format. This is the unresolved Q3 from the previous draft — the owner must choose before
+the checkpoint type is extended.
+
+---
+
 ## Exact acceptance condition: epoch-change handoff
 
 After `B_ec` is committed:

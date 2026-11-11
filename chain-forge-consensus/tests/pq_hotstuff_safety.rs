@@ -683,6 +683,38 @@ fn a_file_one_ahead_of_the_counter_is_the_crash_window_and_completes_the_counter
     assert_eq!(ctr2.value, ctr.value, "open completes the counter advance");
 }
 
+// §7.1.1 Case A: equal-counter open where the file's digest does not match the counter's digest.
+// The counter is authoritative; a mismatch means a different record was committed at this
+// counter value under the same binding — a fork.  Fail closed, nothing opened.
+#[test]
+fn equal_counter_with_wrong_digest_is_a_fork_and_fails_closed() {
+    let mut w = World::new();
+    let (st, ctr) = w.prior().into_parts();
+    // Counter at (value == file.counter) but with a digest that is not the file's digest.
+    let fork_ctr = TestCounter::with_state(CounterState { value: ctr.value, digest: [0xff; 32] }, w.f.clone());
+    assert_eq!(
+        open_err(&w, &st, &fork_ctr),
+        OpenError::Fork { counter: ctr.value },
+        "equal-counter with wrong digest must be Fork, not a valid open",
+    );
+}
+
+// §7.1.1 Case B: one-step-ahead open where the file's prev_digest does not match the counter's
+// digest.  The file is a candidate recovery record but cannot be the successor of the committed
+// record — another record was committed before the crash.  Fail closed, nothing opened.
+#[test]
+fn one_step_ahead_with_wrong_prev_digest_is_a_different_records_successor_and_fails_closed() {
+    let mut w = World::new();
+    let (st, ctr) = w.prior().into_parts();
+    // Counter at (value == file.counter - 1) but with a digest that is not file.prev_digest.
+    let wrong_prev = TestCounter::with_state(CounterState { value: ctr.value - 1, digest: [0xff; 32] }, w.f.clone());
+    assert_eq!(
+        open_err(&w, &st, &wrong_prev),
+        OpenError::SuccessorOfAnotherRecord { counter: ctr.value },
+        "one-step-ahead with wrong prev_digest must be SuccessorOfAnotherRecord",
+    );
+}
+
 #[test]
 fn a_counter_inconsistent_by_more_than_one_is_refused() {
     let mut w = World::new();

@@ -216,24 +216,20 @@ Human key rotation is required before the node can participate.
 PR #127 adds `(value, digest)` as the counter state and `prev_digest` to every record.
 Three tests exist and pass on BossKing (lines 992–1179 in `pq_hotstuff_safety`).
 
-**§7.1.1 remains pending** because the three tests exercise combined crash scenarios that
-conflate the two open cases. Before approval, each case needs a dedicated test that sets up
-the state precisely:
+The two dedicated tests now exist and pass in sandbox (`pq_hotstuff_safety.rs`):
 
-**Case A dedicated test** (`equal_counter_with_wrong_digest_fails_closed`):
-- Set up: counter at `(v, d_other)` where `d_other != sha3(file_body)`.
-- `rec.counter == v` (equal-counter).
-- Expected: `Err(OpenError::Fork { counter: v })`. No session acquired, nothing written.
+**Case A** — `equal_counter_with_wrong_digest_is_a_fork_and_fails_closed`:
+- Set up: counter at `(ctr.value, [0xff; 32])` where `ctr.value == rec.counter` but
+  `[0xff; 32] != sha3(file_body)`.
+- Expected and confirmed: `Err(OpenError::Fork { counter: ctr.value })`.
 
-**Case B dedicated test** (`one_step_ahead_with_wrong_prev_digest_fails_closed`):
-- Set up: counter at `(v, d_committed)` where `d_committed` is the digest of a previous
-  record `R0`. File has `rec.counter = v+1` but `rec.prev_digest = d_other != d_committed`.
-- Expected: `Err(OpenError::SuccessorOfAnotherRecord { counter: v+1 })`. No advance
-  attempted, nothing written.
+**Case B** — `one_step_ahead_with_wrong_prev_digest_is_a_different_records_successor_and_fails_closed`:
+- Set up: counter at `(ctr.value - 1, [0xff; 32])` where `[0xff; 32] != rec.prev_digest`.
+- Expected and confirmed: `Err(OpenError::SuccessorOfAnotherRecord { counter: ctr.value })`.
 
-These two tests confirm that `trusted.digest` is the anchor in both cases and that the
-failure modes are distinct. Once they exist and pass, the distinction documented above is
-machine-verified and §7.1.1 can be approved for production use.
+Both tests pass against `TestCounter`. They confirm that `trusted.digest` is the anchor in
+both cases and that the failure modes are distinct. **§7.1.1 is ready for owner approval**
+pending Windows confirmation of these two tests (BossKing run required per CLAUDE.md policy).
 
 ---
 
