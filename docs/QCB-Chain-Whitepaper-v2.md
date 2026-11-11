@@ -1,3 +1,5 @@
+> **Historical draft — superseded.** This copy is retained as historical context, not the current protocol or monetary policy. Read the [authoritative Qattice whitepaper](../QCB-Chain-Whitepaper-v2.md). QRC is retired; Qattice targets fresh-genesis PQ-HotStuff-2 with FIPS 204 ML-DSA-65-only protocol signing and `pqc-native` user accounts. References below to optional QRC, resource burns or other consensus/signature choices are historical, not active commitments.
+
 QCB Chain Whitepaper
 
 QuarkCharmBit — A Sovereign, Ground-Up Layer-1 for Charm-Based Agent Economies
