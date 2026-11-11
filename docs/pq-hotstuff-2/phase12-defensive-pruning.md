@@ -1,7 +1,7 @@
 # PQ-HotStuff-2 — Defensive Pruning Watermark (gated prototype)
 
 **Status: Windows-confirmed `d9c9f93` (P1–P9). Restart-after-pruning bug fixed `2b46807`.
-Live devnet test sandbox-passing; Windows confirmation pending.
+Live devnet test Windows-confirmed `4621ddc` (pq_pruning_devnet_live, 27.13s).
 Feature `pq-anchored-evidence`, OFF by default. No real-application acceptance. QAT-06 open. PR unmerged.**
 
 Branch: `feat/pq-hotstuff-2-anchored-evidence-an3`
@@ -65,7 +65,34 @@ test pruning_watermark_advances_payloads_are_deleted_and_restart_recovers ... ok
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 27.91s
 ```
 
-Linux sandbox, `cargo test --release -p chain-forge-node --features pq-anchored-evidence --test pq_pruning_devnet_live -- --nocapture`. **Windows confirmation pending.**
+Linux sandbox, `cargo test --release -p chain-forge-node --features pq-anchored-evidence --test pq_pruning_devnet_live -- --nocapture`.
+
+### Windows evidence (pq_pruning_devnet_live, commit `4621ddc`)
+
+```
+krizz@BossKing MINGW64 /c/Dev/an3-m3-recheck (feat/pq-hotstuff-2-anchored-evidence-an3)
+$ git pull origin feat/pq-hotstuff-2-anchored-evidence-an3 && cargo test --release \
+  -p chain-forge-node --features pq-anchored-evidence --test pq_pruning_devnet_live \
+  -- --nocapture
+
+running 1 test
+  [ 15.3s] all four execute height 70: heights [70, 71, 70, 70]
+  heights after steady state: [70, 71, 70, 70]
+  pruned_watermark per node: [6, 7, 6, 6]
+  node 0: height=70, watermark=6, blk-* files=68
+  node 1: height=71, watermark=7, blk-* files=67
+  node 2: height=70, watermark=6, blk-* files=68
+  node 3: height=70, watermark=6, blk-* files=68
+  [ 10.6s] three nodes finalize 4 more after crash: heights [75, 75, 70, 75]
+  [  0.8s] restarted node recovers past its last height: heights [75, 75, 76, 75]
+final heights [75, 75, 76, 75]; watermarks [11, 11, 12, 11]
+test pruning_watermark_advances_payloads_are_deleted_and_restart_recovers ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 27.13s
+```
+
+2026-11-11, krizz@BossKing MINGW64. 1 passed / 27.13s. Restarted n2 (height 70, watermark 6)
+recovered to height 76 and advanced its watermark to 12.
 
 ### Restart-after-pruning bug fix (`2b46807`)
 
