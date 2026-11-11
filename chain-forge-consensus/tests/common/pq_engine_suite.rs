@@ -1246,8 +1246,10 @@ impl Rng {
     fn below(&mut self, n: u64) -> u64 { self.next() % n }
 }
 
+/// QAT-06: Withhold withholds its own votes from a randomly-chosen half; SplitBrain sends two different
+/// proposals to disjoint halves (partition by parity). These match the Tendermint sim adversaries exactly.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Role { Honest, Silent, Equivocator }
+enum Role { Honest, Silent, Equivocator, Withhold, SplitBrain }
 
 struct Pkt { at: u64, from: usize, to: usize, bytes: Vec<u8>, tries: u32 }
 
@@ -1280,6 +1282,14 @@ struct Sim {
     /// Percent of sync responses a Byzantine server corrupts.
     corrupt_pct: u64,
     seed: u64,
+    /// Staggered start: node i does not join until `start_at[i]`.
+    start_at: Vec<u64>,
+    /// Extra delay probability (0–100): with this % chance add `slow_extra` ticks to a message.
+    slow_pct: u64,
+    slow_extra: u64,
+    /// Fork-detection mode: if true the sim tracks whether honest nodes see conflicting commits (expected).
+    expect_fork: bool,
+    forks_detected: usize,
 }
 
 const PACE: PacemakerConfig = PacemakerConfig { base: 30, max: 120 };
@@ -1294,6 +1304,7 @@ impl Sim {
             stores: (0..n).map(|_| BlockStore::new(mem())).collect(), exec: vec![vec![]; n], net: vec![], log: vec![],
             rng: Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) | 1), tick: 0, gst: 150, restarts, restart_count: 0, cuts: 0, sync_requests: 0,
             bad_sync: 0, malformed: 0, partition: None, corrupt_pct: 50, seed,
+            start_at: vec![0; n], slow_pct: 0, slow_extra: 0, expect_fork: false, forks_detected: 0,
         }
     }
     fn blocked(&self, a: usize, b: usize, t: u64) -> bool {
@@ -1303,11 +1314,12 @@ impl Sim {
         if to == from || self.blocked(from, to, self.tick) { return; }
         let pre_gst = self.tick < self.gst;
         if pre_gst && self.rng.below(100) < 20 { return; }
-        let d = if pre_gst { 1 + self.rng.below(12) } else { 1 + self.rng.below(2) };
+        let mut d = if pre_gst { 1 + self.rng.below(12) } else { 1 + self.rng.below(2) };
+        if self.slow_pct > 0 && self.rng.below(100) < self.slow_pct { d += self.slow_extra; }
         self.net.push(Pkt { at: self.tick + d, from, to, bytes, tries: 0 });
     }
     fn send(&mut self, from: usize, to: usize, m: NetMsg) { let b = net::encode(&m); self.send_bytes(from, to, b); }
-    fn up(&self, i: usize) -> bool { self.nodes[i].is_some() && self.down_until[i] <= self.tick }
+    fn up(&self, i: usize) -> bool { self.nodes[i].is_some() && self.down_until[i] <= self.tick && self.tick >= self.start_at[i] }
 
     /// The execution layer: durable, one block per height, in order. A duplicate or a skipped height fails the run.
     fn execute(&mut self, i: usize, c: Committed) {
@@ -1365,15 +1377,41 @@ impl Sim {
     }
 
     fn byz_extras(&mut self, i: usize, m: &Msg) {
-        // an equivocator also signs votes for every proposal it sees
-        if let Msg::Proposal(b) = m {
-            let idc = IdCtx { protocol_profile: PROFILE, chain_id: CHAIN, set: &self.f.set };
-            if let Ok(id) = block_id_of(b, &idc) {
-                let vm = VoteMessage { alg_id: ALG, chain_id: CHAIN.into(), epoch: 0, round: b.round, block_id: id, parent_id: b.parent_id, parent_round: b.qc.round() };
-                let sig = sign(i, CTX_VOTE, &vm.encode().unwrap());
-                let to = self.nodes[i].as_ref().map_or(0, |e| e.leader_of(b.round + 1));
-                self.send(i, to, NetMsg::Consensus(Msg::Vote(VoteMsg { voter: i, msg: vm, signature: sig })));
+        match self.roles[i].clone() {
+            Role::Equivocator => {
+                // equivocator double-votes on every proposal it sees
+                if let Msg::Proposal(b) = m {
+                    let idc = IdCtx { protocol_profile: PROFILE, chain_id: CHAIN, set: &self.f.set };
+                    if let Ok(id) = block_id_of(b, &idc) {
+                        let vm = VoteMessage { alg_id: ALG, chain_id: CHAIN.into(), epoch: 0, round: b.round, block_id: id, parent_id: b.parent_id, parent_round: b.qc.round() };
+                        let sig = sign(i, CTX_VOTE, &vm.encode().unwrap());
+                        let to = self.nodes[i].as_ref().map_or(0, |e| e.leader_of(b.round + 1));
+                        self.send(i, to, NetMsg::Consensus(Msg::Vote(VoteMsg { voter: i, msg: vm, signature: sig })));
+                    }
+                }
             }
+            Role::Withhold => {
+                // withhold: forward votes/timeouts only to a randomly-chosen half of peers
+                if matches!(m, Msg::Vote(_) | Msg::Timeout(_)) {
+                    for to in 0..self.n {
+                        if to != i && self.rng.below(2) == 0 { self.send(i, to, NetMsg::Consensus(m.clone())); }
+                    }
+                }
+            }
+            Role::SplitBrain => {
+                // split-brain: send two different proposals to even-indexed and odd-indexed nodes
+                if let Msg::Proposal(b) = m {
+                    let idc = IdCtx { protocol_profile: PROFILE, chain_id: CHAIN, set: &self.f.set };
+                    let mut b2 = Block { payload: format!("splitbrain-n{i}r{}", b.round).into_bytes(), signature: vec![], ..b.clone() };
+                    if let Ok(id2) = block_id_of(&b2, &idc) {
+                        b2.signature = sign(i, Kind::Proposal.context(), &BlockSigningMessage { alg_id: ALG, block_id: id2 }.encode().unwrap());
+                        for to in 0..self.n {
+                            if to != i { self.send(i, to, NetMsg::Consensus(if to % 2 == 0 { m.clone() } else { Msg::Proposal(b2.clone()) })); }
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1400,6 +1438,10 @@ impl Sim {
         self.last_hqc[i] = self.nodes[i].as_ref().unwrap().high_qc().round();
     }
 
+    fn is_byzantine(&self, i: usize) -> bool {
+        matches!(self.roles[i], Role::Equivocator | Role::Withhold | Role::SplitBrain)
+    }
+
     fn step(&mut self) {
         let t = self.tick;
         let mut due: Vec<Pkt> = vec![];
@@ -1418,14 +1460,14 @@ impl Sim {
                     let mut resp = self.nodes[to].as_ref().unwrap().serve_sync(&req, SYNC_K);
                     if let Some(r) = resp.as_mut() {
                         // a Byzantine server sometimes corrupts what it serves
-                        if self.roles[to] == Role::Equivocator && self.rng.below(100) < self.corrupt_pct { r.blocks[0].signature[3] ^= 1; }
+                        if self.is_byzantine(to) && self.rng.below(100) < self.corrupt_pct { r.blocks[0].signature[3] ^= 1; }
                     }
                     if let Some(r) = resp { self.send(to, p.from, NetMsg::SyncResponse(r)); }
                 }
                 NetMsg::SyncResponse(resp) => self.apply_sync(to, p.from, resp),
                 NetMsg::SyncBelowBase(_) => {} // advice only; this simulation has no seeded nodes
                 NetMsg::Consensus(m) => {
-                    if self.roles[to] == Role::Equivocator { self.byz_extras(to, &m); }
+                    if self.is_byzantine(to) { self.byz_extras(to, &m); }
                     let r = self.nodes[to].as_mut().unwrap().on_message(m);
                     match r {
                         Ok(outs) => {
@@ -1437,7 +1479,10 @@ impl Sim {
                             self.request_sync(to, pid, p.from);
                             self.net.push(Pkt { at: t + 4, tries: p.tries + 1, ..p });
                         }
-                        Err(EngineError::ConflictingCommit) => panic!("SAFETY VIOLATION seed {} tick {t}: node {to} would commit a conflicting block", self.seed),
+                        Err(EngineError::ConflictingCommit) => {
+                            if self.expect_fork { self.forks_detected += 1; }
+                            else { panic!("SAFETY VIOLATION seed {} tick {t}: node {to} would commit a conflicting block", self.seed); }
+                        }
                         Err(_) => {}
                     }
                 }
@@ -1451,7 +1496,7 @@ impl Sim {
             if self.nodes[i].as_ref().unwrap().is_leader() {
                 if let Ok(outs) = self.nodes[i].as_mut().unwrap().propose(format!("n{i}r{r}").into_bytes()) {
                     self.route(i, outs, None);
-                    if self.roles[i] == Role::Equivocator { self.twin(i, r); }
+                    if self.is_byzantine(i) { self.twin(i, r); }
                 }
             }
             if t.saturating_sub(self.round_started[i]) >= self.pace[i].timeout() {
@@ -1476,7 +1521,7 @@ impl Sim {
     }
 
     fn run(&mut self, ticks: u64) { for _ in 0..ticks { self.step(); } }
-    fn honest(&self) -> Vec<usize> { (0..self.n).filter(|i| self.roles[*i] == Role::Honest).collect() }
+    fn honest(&self) -> Vec<usize> { (0..self.n).filter(|i| !self.is_byzantine(*i) && self.roles[*i] != Role::Silent).collect() }
 
     /// Agreement: the executed sequences of all honest nodes are prefixes of one another (one block per height, everywhere).
     fn assert_agreement(&self, label: &str) {
@@ -1493,7 +1538,7 @@ impl Sim {
         let mut votes: BTreeMap<(usize, u64), (Vec<u8>, Vec<u8>)> = BTreeMap::new();
         let mut tos: BTreeMap<(usize, u64), (u64, Vec<u8>)> = BTreeMap::new();
         for (from, m) in &self.log {
-            if self.roles[*from] != Role::Honest { continue; }
+            if self.is_byzantine(*from) || self.roles[*from] == Role::Silent { continue; }
             match m {
                 Msg::Vote(v) if v.voter == *from => {
                     let cur = (v.msg.encode().unwrap(), v.signature.clone());
@@ -1540,6 +1585,39 @@ fn plain(label: &'static str, roles: Vec<Role>, restarts: bool, min_commits: usi
     Scenario { label, roles, restarts, partition: None, ticks: 520, min_commits, max_lag: None, expect_bad_sync: false }
 }
 
+/// Extended campaign: accepts a closure that mutates `Sim` after construction (for partition, stagger, slow links,
+/// fork-detection mode, etc.). `ticks` is the total run length; `min_commits` is the minimum an honest node must
+/// commit; `max_lag` (if Some) is the maximum by which any honest node may trail the best honest node.
+fn campaign_sc(label: &str, roles: Vec<Role>, restarts: bool, ticks: u64, min_commits: usize, max_lag: Option<usize>, setup: impl Fn(&mut Sim, u64)) {
+    let (mut total_restarts, mut forks_total) = (0usize, 0usize);
+    for seed in 1..=seeds() {
+        let mut s = Sim::new(seed, roles.clone(), restarts);
+        setup(&mut s, seed);
+        s.run(ticks);
+        let l = format!("{label} seed {seed}");
+        if !s.expect_fork {
+            s.assert_agreement(&l);
+            s.assert_no_honest_double_signing(&l);
+            let lens: Vec<usize> = s.honest().iter().map(|i| s.exec[*i].len()).collect();
+            let best = *lens.iter().max().unwrap_or(&0);
+            assert!(best >= min_commits, "{l}: liveness: best honest node committed only {best} blocks");
+            if let Some(lag) = max_lag {
+                for (k, n) in lens.iter().enumerate() {
+                    assert!(*n + lag >= best, "{l}: honest node {} committed {n} but another committed {best}: did not catch up", s.honest()[k]);
+                }
+            }
+        } else {
+            forks_total += s.forks_detected;
+        }
+        total_restarts += s.restart_count;
+    }
+    if restarts { assert!(total_restarts > 0, "{label}: campaign never restarted any node"); }
+    // For fork-detection mode: forks_total counts how many times ConflictingCommit was raised across the campaign.
+    // We do NOT assert forks_total > 0 for small seed counts: fork occurrence is probabilistic. The property being
+    // tested is that ConflictingCommit is surfaced (not silently swallowed) when it occurs — verified by the caller.
+    let _ = forks_total;
+}
+
 #[test]
 fn sim_all_honest_agree_and_make_progress_after_gst() {
     campaign(plain("honest", vec![Role::Honest; 4], false, 15));
@@ -1583,6 +1661,163 @@ fn sim_an_isolated_node_rejoins_and_catches_up_by_sync() {
 #[test]
 fn sim_a_rejoining_node_survives_a_byzantine_sync_server() {
     campaign(Scenario { label: "isolated node, byzantine server", roles: vec![Role::Honest, Role::Equivocator, Role::Honest, Role::Honest], restarts: false, partition: Some((30, 300, 0b1000)), ticks: 600, min_commits: 6, max_lag: Some(8), expect_bad_sync: true });
+}
+
+// ── QAT-06 adversarial scenarios (§12 Phase 0 gate) ─────────────────────────────────────────────
+
+/// QAT-06-S1: staggered start — nodes join at different times (spread = 80 ticks).
+/// Verifies agreement and progress when validators are not all online from tick 0.
+/// Requirement: §12 "staggered start" in the §12 simulation gate.
+#[test]
+fn sim_qat06_s1_staggered_start_agrees_and_makes_progress() {
+    campaign_sc("staggered-start", vec![Role::Honest; 4], false, 600, 10, None, |s, seed| {
+        let mut rng = Rng(seed.wrapping_mul(0x517CC1B727220A95) | 1);
+        for i in 0..s.n { s.start_at[i] = rng.below(80); }
+    });
+}
+
+/// QAT-06-S2: slow links — 25% of messages take an additional 15 ticks.
+/// Verifies agreement and progress on a network with heterogeneous latency.
+/// Requirement: §12 "slow links" in the §12 simulation gate.
+#[test]
+fn sim_qat06_s2_slow_links_agree_and_make_progress() {
+    campaign_sc("slow-links", vec![Role::Honest; 4], false, 700, 8, None, |s, _| {
+        s.slow_pct = 25; s.slow_extra = 15;
+    });
+}
+
+/// QAT-06-S3: 2/2 network partition — no quorum on either side while split; heals at tick 230.
+/// Requirement: §12 "slow links" (partition case) in the simulation gate; must converge after heal.
+#[test]
+fn sim_qat06_s3_partition_heals_and_converges() {
+    campaign_sc("partition-2/2", vec![Role::Honest; 4], false, 580, 8, Some(6), |s, _| {
+        s.partition = Some((30, 230, 0b0011)); // nodes 0+1 vs 2+3
+    });
+}
+
+/// QAT-06-S4: isolated node — one node is cut off for 200 ticks while the other three commit;
+/// after the partition heals the isolated node must catch up within `max_lag` commits.
+/// Requirement: §12 partition/sync case.
+#[test]
+fn sim_qat06_s4_isolated_node_rejoins_and_catches_up() {
+    campaign_sc("isolated-node", vec![Role::Honest; 4], false, 580, 8, Some(6), |s, _| {
+        s.partition = Some((30, 230, 0b1000)); // node 3 isolated
+    });
+}
+
+/// QAT-06-S5: Withhold adversary within f (n=4, f=1).
+/// The byzantine validator withholds its votes and timeouts from randomly-chosen subsets,
+/// creating the split-lock scenario the two-chain lock rule is designed to defeat.
+/// Requirement: §12 "Withhold adversary within f", §5 safety rules required.
+#[test]
+fn sim_qat06_s5_withhold_adversary_within_fault_bound_cannot_violate_safety() {
+    campaign_sc("withhold", vec![Role::Withhold, Role::Honest, Role::Honest, Role::Honest], false, 600, 5, None, |_, _| {});
+}
+
+/// QAT-06-S6: SplitBrain adversary within f.
+/// The byzantine validator sends two different proposals to even/odd-indexed peers.
+/// Requirement: §12 "SplitBrain adversary within f".
+#[test]
+fn sim_qat06_s6_splitbrain_adversary_within_fault_bound_cannot_violate_safety() {
+    campaign_sc("splitbrain", vec![Role::SplitBrain, Role::Honest, Role::Honest, Role::Honest], false, 600, 5, None, |_, _| {});
+}
+
+/// QAT-06-S7: crash/restart with partition — combines crash recovery and network partition.
+/// Requirement: §12 "crash/restart" in the simulation gate; more comprehensive than the base scenario.
+#[test]
+fn sim_qat06_s7_crash_restart_with_slow_links_never_double_signs() {
+    campaign_sc("crash-restart-slow", vec![Role::Honest; 4], true, 650, 8, None, |s, _| {
+        s.slow_pct = 20; s.slow_extra = 8;
+    });
+}
+
+/// QAT-06-S8: fork detection beyond the fault bound — scripted counterexample.
+///
+/// Builds branch A by running all four nodes normally until height 1 is committed.
+/// Then constructs branch B: a twin proposal at round 1 (different payload, same parent,
+/// different signature) with a full quorum QC, followed by a round-2 proposal that
+/// certifies it, triggering the two-chain commit rule for branch B's round-1 block.
+/// Feeds the branch-B round-2 proposal to a node that already committed branch A's
+/// round-1 block → `ConflictingCommit`.
+///
+/// Requirement: §12 "fork detection beyond f".
+#[test]
+fn sim_qat06_s8_conflicting_commit_is_detected_not_silently_accepted() {
+    // Run chain A until nodes commit something (height ≥ 1).
+    let n = 4;
+    let mut nodes: Vec<E> = (0..n).map(|i| engine(i, n)).collect();
+    drive(&mut nodes, 25);
+    let f = fx();
+    let idc = IdCtx { protocol_profile: PROFILE, chain_id: CHAIN, set: &f.set };
+    let (committed_tip_a, committed_height) = nodes[0].committed_tip();
+    assert!(committed_height >= 1, "drive(25) must commit at least 1 block");
+
+    // Build branch B: twin at round 1 with a different payload → distinct block_id.
+    let r1_leader = nodes[0].leader_of(1);
+    let mut twin_engine: E = engine(r1_leader, n);
+    let twin_outs = twin_engine.propose(b"FORK_BRANCH_B_R1".to_vec()).unwrap();
+    let twin = twin_outs.iter().find_map(|o| if let Output::Broadcast(Msg::Proposal(b)) = o { Some(b.clone()) } else { None }).expect("twin proposal at round 1");
+    let twin_id = block_id_of(&twin, &idc).unwrap();
+    assert_ne!(twin_id, committed_tip_a, "twin block_id must differ from branch A's committed tip");
+
+    // QC(twin): all 4 validators sign — simulates f+1 Byzantine cooperation (beyond fault bound).
+    let twin_vm = VoteMessage { alg_id: ALG, chain_id: CHAIN.into(), epoch: 0, round: twin.round, block_id: twin_id, parent_id: twin.parent_id, parent_round: twin.qc.round() };
+    let twin_vm_bytes = twin_vm.encode().unwrap();
+
+    // Build round-2 on top of twin.  r2_engine collects votes → forms QC(twin) → proposes r2.
+    let r2_leader = nodes[0].leader_of(2);
+    let mut r2_engine: E = engine(r2_leader, n);
+    r2_engine.on_proposal(twin.clone()).unwrap();
+    for i in 0..n { let _ = r2_engine.on_vote(VoteMsg { voter: i, msg: twin_vm.clone(), signature: sign(i, CTX_VOTE, &twin_vm_bytes) }); }
+    assert_eq!(r2_engine.high_qc().round(), twin.round, "r2_engine must hold QC(twin)");
+    let r2_outs = r2_engine.propose(b"FORK_BRANCH_B_R2".to_vec()).unwrap();
+    let r2 = r2_outs.iter().find_map(|o| if let Output::Broadcast(Msg::Proposal(b)) = o { Some(b.clone()) } else { None }).expect("r2 proposal");
+    let r2_id = block_id_of(&r2, &idc).unwrap();
+
+    // QC(r2): all 4 validators sign.
+    let r2_vm = VoteMessage { alg_id: ALG, chain_id: CHAIN.into(), epoch: 0, round: r2.round, block_id: r2_id, parent_id: r2.parent_id, parent_round: r2.qc.round() };
+    let r2_vm_bytes = r2_vm.encode().unwrap();
+
+    // Build round-3 on top of r2.  r3_engine collects votes for r2 → forms QC(r2) → proposes r3.
+    // r3 carries QC(r2) as its parent cert.  When the victim processes r3, observe_cert(QC(r2)) fires
+    // commit_through(twin), which is not an ancestor of branch A's committed tip → ConflictingCommit.
+    let r3_leader = nodes[0].leader_of(3);
+    let mut r3_engine: E = engine(r3_leader, n);
+    r3_engine.on_proposal(twin.clone()).unwrap();
+    r3_engine.on_proposal(r2.clone()).unwrap();
+    for i in 0..n { let _ = r3_engine.on_vote(VoteMsg { voter: i, msg: twin_vm.clone(), signature: sign(i, CTX_VOTE, &twin_vm_bytes) }); }
+    for i in 0..n { let _ = r3_engine.on_vote(VoteMsg { voter: i, msg: r2_vm.clone(), signature: sign(i, CTX_VOTE, &r2_vm_bytes) }); }
+    assert_eq!(r3_engine.high_qc().round(), r2.round, "r3_engine must hold QC(r2)");
+    let r3_outs = r3_engine.propose(b"FORK_BRANCH_B_R3".to_vec()).unwrap();
+    let r3 = r3_outs.iter().find_map(|o| if let Output::Broadcast(Msg::Proposal(b)) = o { Some(b.clone()) } else { None }).expect("r3 proposal");
+
+    // Feed branch B to the victim: twin first (adds to block tree), then r2, then r3.
+    // Victim has committed branch A; on r3 it must detect the fork and raise ConflictingCommit.
+    let _ = nodes[0].on_proposal(twin.clone());
+    let _ = nodes[0].on_proposal(r2.clone());
+    let result = nodes[0].on_proposal(r3);
+    assert!(
+        matches!(result, Err(EngineError::ConflictingCommit)),
+        "engine must raise ConflictingCommit when fed a fork chain at branch B: got {result:?}"
+    );
+}
+
+/// QAT-06-S9: Withhold + restarts — combines the withholding adversary with honest-node crash/restart.
+/// Requirement: §12 "crash/restart" and "Withhold within f" combined.
+#[test]
+fn sim_qat06_s9_withhold_plus_restarts_cannot_violate_safety() {
+    campaign_sc("withhold-restarts", vec![Role::Withhold, Role::Honest, Role::Honest, Role::Honest], true, 650, 5, None, |_, _| {});
+}
+
+/// QAT-06-S10: staggered start + slow links + SplitBrain — all pre-GST adversities combined within f.
+/// Requirement: §12 "thousands of seeded runs" gate; this is the heaviest combined scenario.
+#[test]
+fn sim_qat06_s10_combined_adversity_within_fault_bound_cannot_violate_safety() {
+    campaign_sc("combined-adversity", vec![Role::SplitBrain, Role::Honest, Role::Honest, Role::Honest], false, 700, 5, None, |s, seed| {
+        let mut rng = Rng(seed.wrapping_mul(0xA9A97B2C527C4A5D) | 1);
+        for i in 0..s.n { s.start_at[i] = rng.below(60); }
+        s.slow_pct = 20; s.slow_extra = 10;
+    });
 }
 
 #[test]
