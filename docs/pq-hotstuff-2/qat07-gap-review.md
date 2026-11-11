@@ -87,7 +87,7 @@
 
 | Gap ID | Req | Description | Priority |
 |--------|-----|-------------|----------|
-| G7-W | R7-1 through R7.1.1 | **Safety store Windows confirmation** — `pq_hotstuff_safety` tests (~80 tests) pass on Linux only. The spec requires "fresh Linux and Windows validation" (§7, item 6 in the PR #127 change list). | **High** — required by spec; no Windows evidence exists for the safety store itself |
+| G7-W | R7-1 through R7.1.1 | **Safety store Windows confirmation** — ✅ **Closed 2026-11-11**: `pq_hotstuff_safety` 76/76 (53.81 s) + `pq_hotstuff_safety_fips204` 11/11 (2.26 s), krizz@BossKing MINGW64. | **Closed** |
 | G7-F | R7-4 | Fault injection at every write/fsync/rename step: `a_storage_or_counter_failure_at_any_step_latches_the_store` exists but only on Linux; Windows fsync/rename semantics differ (NTFS directory flush) | High |
 | G7-S | R7-8 | Stale file test (`stale_file_is_refused_or_forces_abstain`) — partial coverage via `a_key_that_already_participated_cannot_be_initialized_fresh`; dedicated stale-file open test needed | Medium |
 | G8-P | R8-1 | Personhood power cap: `apply_personhood_cap` / `gate_voting_power` pipeline — no PQ-HotStuff tests; Tendermint has tests but the PQ-HotStuff engine takes power as input from above | Medium — required for Phase 1 gate |
@@ -120,14 +120,13 @@
 
 Based on the gap table, QAT-07 work splits into three tracks:
 
-### Track A — Safety store Windows confirmation (prerequisite)
-Run `pq_hotstuff_safety` on BossKing (all ~80 tests, real FIPS 204 for `pq_hotstuff_safety_fips204`).  
-No code changes required; this is evidence collection only.  
-Command:
-```
-cargo test -p chain-forge-consensus --features pq-hotstuff --test pq_hotstuff_safety -- --nocapture
-cargo test -p chain-forge-consensus --features pq-hotstuff-fips204 --test pq_hotstuff_safety_fips204 -- --nocapture
-```
+### Track A — Safety store Windows confirmation ✅ closed
+
+**Windows-confirmed 2026-11-11 (krizz@BossKing MINGW64), branch `feat/pq-hotstuff-2-qat06-merge-an3` @ `5f1d289`:**
+- `pq_hotstuff_safety`: **76/76 pass in 53.81 s** (non-crypto doubles, debug)
+- `pq_hotstuff_safety_fips204`: **11/11 pass in 2.26 s** (real FIPS 204 ML-DSA-65, debug)
+
+**G7-W closed.** All §7 safety-store requirements now have Windows evidence.
 
 ### Track B — §8 epoch transitions and admission (new implementation)
 Requires owner approval before implementation begins. Scope:
@@ -147,7 +146,7 @@ No Track C work until the owner approves §7.1.
 
 ## Recommendation
 
-**Immediate:** confirm Track A (Windows safety store) on BossKing. It is prerequisite evidence for QAT-07 and requires no new code.
+**Track A complete** (G7-W closed 2026-11-11): 76/76 + 11/11 on BossKing. No further action needed on Track A.
 
 **Before Track B implementation begins:** owner approval of §8 scope and the Phase 1 gate definition (the spec lists "a restarted validator never signs a conflicting vote or timeout" and "the node refuses non-ML-DSA keys" as Phase 1 gates; epoch transitions and revocation are listed but marked as requiring separate review).
 
