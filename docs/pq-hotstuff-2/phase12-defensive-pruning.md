@@ -1,11 +1,11 @@
 # PQ-HotStuff-2 — Defensive Pruning Watermark (gated prototype)
 
-**Status: Windows-confirmed `f49aa06`. Feature `pq-anchored-evidence`, OFF by default.
+**Status: Windows-confirmed `d9c9f93` (P1–P9). Feature `pq-anchored-evidence`, OFF by default.
 No network wiring. No real-application acceptance. QAT-06 open. PR unmerged.**
 
 Branch: `feat/pq-hotstuff-2-anchored-evidence-an3`
 
-### Windows evidence (P1–P8)
+### Windows evidence (P1–P8, commit `f49aa06`)
 
 ```
 krizz@BossKing MINGW64 /c/Dev/an3-m3-recheck (feat/pq-hotstuff-2-anchored-evidence-an3)
@@ -27,7 +27,34 @@ test driver_prune_below_succeeds_after_gate_clears ... ok
 test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 235 filtered out; finished in 34.93s
 ```
 
-Commit `f49aa06`, 2026-11-11, krizz@BossKing MINGW64. 8 passed / 34.93s.
+2026-11-11, krizz@BossKing MINGW64. 8 passed / 34.93s.
+
+### Windows evidence (P9, commit `d9c9f93`)
+
+```
+krizz@BossKing MINGW64 /c/Dev/an3-m3-recheck (feat/pq-hotstuff-2-anchored-evidence-an3)
+$ git pull origin feat/pq-hotstuff-2-anchored-evidence-an3 && cargo test -p chain-forge-consensus \
+  --features pq-hotstuff-fips204,pq-anchored-evidence --test pq_hotstuff_engine_fips204 \
+  -- fs_backed_damaged_watermark_is_refused_not_silently_reset --nocapture
+
+running 1 test
+test fs_backed_damaged_watermark_is_refused_not_silently_reset ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 243 filtered out; finished in 0.01s
+```
+
+2026-11-11, krizz@BossKing MINGW64. 1 passed / 0.01s.
+
+### Mutation campaign (Linux sandbox, all killed)
+
+| ID | Mutation | Killed by |
+|---|---|---|
+| M-P1 | Idempotency guard removed (`prune_payloads`) | P1 FAILED |
+| M-P2 | Stale watermark check removed | P3 FAILED |
+| M-P3 | Watermark write skipped entirely | P1/P2/P3/P4/P5 FAILED |
+| M-P4 | Anchor gate removed from `prune_below` | P7 FAILED |
+
+No surviving mutations.
 
 ---
 
