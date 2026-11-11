@@ -86,6 +86,10 @@ pub enum DriverError {
     #[cfg(feature = "pq-anchored-evidence")]
     #[error("anchor reconciliation failed: {0}")]
     AnchorInconsistent(RestartError),
+    /// Defensive pruning: a prune_below call was refused because the anchor audit gate is still up.
+    #[cfg(feature = "pq-anchored-evidence")]
+    #[error("prune_below refused: anchor audit is pending; signing and pruning are blocked until advance_anchor returns Ready")]
+    AnchorPending,
 }
 
 /// Something to send: to one validator, or (`to == None`) to all the others.
@@ -348,6 +352,14 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
     /// Whether the driver is currently pending an anchor audit (signing stays disabled until `advance_anchor` returns `Ready`).
     #[cfg(feature = "pq-anchored-evidence")]
     pub fn anchor_pending(&self) -> bool { self.anchor.is_some() }
+
+    /// Delete payloads for committed blocks below `below`. Refused while the anchor audit is
+    /// pending. Returns the number of `blk-*` files deleted.
+    #[cfg(feature = "pq-anchored-evidence")]
+    pub fn prune_below(&mut self, below: u64) -> Result<usize, DriverError> {
+        if self.anchor.is_some() { return Err(DriverError::AnchorPending); }
+        Ok(self.store.prune_payloads(below)?)
+    }
 
     pub fn engine(&self) -> &Engine<S, C, G, V> { &self.engine }
 
