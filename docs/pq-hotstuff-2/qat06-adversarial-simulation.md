@@ -1,10 +1,10 @@
 # QAT-06 — Adversarial Simulation Campaign
 
-**Status: Windows-confirmed 2026-11-11 — krizz@BossKing MINGW64, `feat/pq-hotstuff-2-qat06-merge-an3` @ `8f15a7c`.**
-- **10-seed run:** 10/10 pass in 197.39 s (release, real FIPS 204 ML-DSA-65)
+**Status: QAT-06 CLOSED — Windows-confirmed 2026-11-11 — krizz@BossKing MINGW64.**
+- **10-seed run:** 10/10 pass in 197.39 s, `feat/pq-hotstuff-2-qat06-merge-an3` @ `8f15a7c` (release, real FIPS 204 ML-DSA-65)
 - **1000-seed soak:** `PQHS_SEEDS=1000`, 10/10 pass in 3555.34 s (59.3 min), EXIT 0
-- **Mutation campaign:** 10/10 killed — M-A1/A3/B1/B3 by sim; M-A2 (`commits_parent→true`) and M-B2 (`safe_to_vote qc_round weakened`) by new boundary unit tests `mut_a2`/`mut_b2`
-- **Open:** M-C1/C2/C3/C4 (`commit_through` guard paths) require scripted on_sync_block fork-chain tests; tracked as follow-up before final gate closure
+- **Mutation campaign: 10/10 killed** — M-A1/A3/B1/B3 by sim; M-A2 by `mut_a2` boundary unit test; M-B2 by `mut_b2` boundary unit test; M-C1/M-C2/M-C4 by scripted `on_sync_block` fork-chain tests (`mut_c1`/`mut_c2`/`mut_c4`); M-C3 documented as dead code (line 435 unreachable with well-formed blocks, confirmed by `mut_c3` invariant test)
+- **M-C1–C4 Windows-confirmed 2026-11-11:** 4/4 pass in 64.48 s (non-crypto doubles), commit `180554f`
 
 Branch: `feat/pq-hotstuff-2-qat06-adversarial-sim` (stacked on `feat/pq-hotstuff-2-real-crypto` / PR #135)
 
