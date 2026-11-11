@@ -1,5 +1,20 @@
 # Qattice — Public Testnet Alpha: ML-DSA-65 + PQ-HotStuff Launch Plan
 
+## Prior art note — 2026-11-11 (documentation-only; append-only)
+
+> **Documentation only.** No code, merge, gate, or deployment is authorized by this section.
+
+To the best of current public knowledge, Qattice's combination of **ML-DSA-65 (FIPS 204) as the BFT consensus signature scheme with HotStuff-2** is novel in the blockchain space. Existing HotStuff-2 implementations (LibraBFT/DiemBFT, Aptos, Sui, edgedlt/hotstuff2 and others) use classical schemes: Ed25519, BLS12-381, or secp256k1. Post-quantum blockchain research to date has focused on transaction and wallet signatures, not the consensus layer. NIST standardized ML-DSA in August 2024; no production or publicly documented system is known to use it as a BFT consensus signing primitive.
+
+The novel architecture is the full stack, not ML-DSA in isolation:
+
+- **ML-DSA-65 as the validator consensus key scheme** (n separate signatures per QC, no BLS aggregation — a deliberate tradeoff for FIPS 204 compliance and hardware-anchor compatibility).
+- **HotStuff-2 two-chain commit rule** adapted for ML-DSA QC structure.
+- **Epoch-transition seal rule (EC-6)** — the outgoing-set signing cutoff whose safety is being formally verified in PO-4. No prior HotStuff-2 variant includes this.
+- **Formally verified handoff** (PO-4 TLA+ model, `EpochTransition.tla`): the first TLA+ safety proof of an ML-DSA-keyed BFT epoch transition.
+
+This note is recorded as context for future publication and attribution. It does not constitute a novelty claim for patent or academic priority purposes; independent verification of prior art is the owner's responsibility before any such claim is made.
+
 ## PQ-HotStuff-2 implementation status — 2026-11-09 (newest status; documentation-only; append-only)
 
 > **Status supersession, not gate completion.** This section records what the draft PR stack #133–#144 (plus one PR still to be opened) implements and which of it the owner has Windows-confirmed. It removes nothing: earlier sections, including the locked 2026-11-08 pruning requirements and the 2026-11-06 status below, stay as written. It changes no code, authorizes no merge, activation or deployment, and **marks no QAT gate complete**. Per `CLAUDE.md`, a sandbox/CI run never counts as confirmation, so **no ✅ is used here**: nothing below is merged, and the legend's ✅ means shipped.
