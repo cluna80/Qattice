@@ -1,5 +1,17 @@
 # Qattice — Public Testnet Alpha: ML-DSA-65 + PQ-HotStuff Launch Plan
 
+## Owner direction — 2026-11-11: Tendermint testing retired for Qattice (LOCKED)
+
+> **Documentation only.** No code change, merge, or deployment authorized by this section.
+
+**Qattice is PQ-HotStuff-2 only going forward. No further Tendermint testing is planned or authorized for the Qattice network.**
+
+This reinforces and finalizes the 2026-11-07 PQ-HotStuff-2-native direction:
+
+- **Chain Forge:** Tendermint remains a selectable consensus engine option. It is not removed from the builder. Chain Forge Tendermint support is unaffected.
+- **Qattice:** The Tendermint devnet (`genesis-4node-mldsa.json`) has served its purpose (ML-DSA-65 key validation). It is retired as a testing target. No new Tendermint-based acceptance tests are to be written or prioritized for Qattice. Backend D Tendermint crash/fencing tests (production counter durability) are explicitly deprioritized — that work validates a storage layer under a consensus engine Qattice is replacing.
+- **Critical path:** Complete PO-4 formal model checks → QAT-07 gate → CF-C1 (native PQ-HotStuff-2 engine implementation) → PQ-HotStuff-2 devnet. That sequence, not any further Tendermint work, is the path to Phase 0 completion and Phase 0.5 chain hardening.
+
 ## Prior art note — 2026-11-11 (documentation-only; append-only)
 
 > **Documentation only.** No code, merge, gate, or deployment is authorized by this section.
