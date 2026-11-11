@@ -1,0 +1,25 @@
+Picked up JAVA_TOOL_OPTIONS: -Djavax.net.ssl.trustStore=/etc/ssl/certs/java/cacerts -Djavax.net.ssl.trustStoreType=JKS -Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort=37781 -Dhttp.nonProxyHosts=localhost|127.0.0.1|::1|127.*|0.*|::|169.254.*|api.anthropic.com|api-staging.anthropic.com|api-pr-preview.anthropic.com|mcp-proxy.anthropic.com|mcp-proxy-staging.anthropic.com|registry.npmjs.org|jsr.io|npm.jsr.io|pypi.org|files.pythonhosted.org|index.crates.io|proxy.golang.org|host.docker.internal|10.*|172.16.*|172.17.*|172.18.*|172.19.*|172.20.*|172.21.*|172.22.*|172.23.*|172.24.*|172.25.*|172.26.*|172.27.*|172.28.*|172.29.*|172.30.*|172.31.*|192.168.*|100.64.0.0/10|*.svc.cluster.local|*.svc.cluster.local -Djdk.http.auth.tunneling.disabledSchemes= -Djdk.http.auth.proxying.disabledSchemes=
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Running breadth-first search Model-Checking with fp 41 and seed 6135626419135158885 with 4 workers on 4 cores with 5461MB heap and 64MB offheap memory [pid: 2650] (Linux 6.18.44-fc-v310 amd64, Ubuntu 21.0.12.1 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file /home/user/chain-forge-engine/research/pq-hotstuff-2/epoch-transition/EpochTransition.tla
+Parsing file /tmp/Integers.tla
+Parsing file /tmp/FiniteSets.tla
+Parsing file /tmp/Sequences.tla
+Parsing file /tmp/TLC.tla
+Parsing file /tmp/Naturals.tla
+Semantic processing of module Naturals
+Semantic processing of module Integers
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module EpochTransition
+Starting... (2026-11-07 16:24:21)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-11-07 16:24:21.
+Progress(10) at 2026-11-07 16:24:24: 16,034 states generated (16,034 s/min), 5,479 distinct states found (5,479 ds/min), 2,623 states left on queue.
+Progress(15) at 2026-11-07 16:25:24: 336,766 states generated (320,732 s/min), 88,387 distinct states found (82,908 ds/min), 38,387 states left on queue.
+Progress(16) at 2026-11-07 16:26:24: 606,319 states generated (269,553 s/min), 156,122 distinct states found (67,735 ds/min), 68,304 states left on queue.
+Progress(16) at 2026-11-07 16:27:24: 853,829 states generated (247,510 s/min), 220,090 distinct states found (63,968 ds/min), 98,815 states left on queue.
+Progress(17) at 2026-11-07 16:28:24: 1,094,279 states generated (240,450 s/min), 279,169 distinct states found (59,079 ds/min), 124,783 states left on queue.
+Progress(17) at 2026-11-07 16:29:24: 1,331,174 states generated (236,895 s/min), 339,965 distinct states found (60,796 ds/min), 157,453 states left on queue.
+Progress(17) at 2026-11-07 16:30:24: 1,552,465 states generated (221,291 s/min), 398,323 distinct states found (58,358 ds/min), 184,403 states left on queue.
