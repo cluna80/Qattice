@@ -97,6 +97,141 @@ the checkpoint type is extended.
 
 ---
 
+## Extended handoff trace: finalization, incoming-block evidence, restart tip, TCs
+
+### Block-by-block trace
+
+`B.qc` certifies `B.parent_id` (`engine.rs:395`). The two-chain rule commits the
+**parent of the block being certified**, not the certified block itself.
+
+```
+Step | Block       | h    | Round    | Epoch | .qc certifies       | certifying set | Chain action on accept           | Committed tip
+-----|-------------|------|----------|-------|---------------------|----------------|----------------------------------|---------------
+1    | B_ec        | h    | r_ec     | e     | B_ec's parent (S_e) | S_e            | Stored; prior ancestors may      | ≤ h-1
+     |             |      |          |       |                     |                | commit via standard two-chain    |
+2    | B_child     | h+1  | r_ec+1   | e     | B_ec (S_e)          | S_e            | Stored; observe_cert(QC_B_ec):   | h-1 or less
+     |             |      |          |       |                     |                | cr=r_ec, pr=r_ec-1 → may commit  |
+     |             |      |          |       |                     |                | B_ec's parent if consecutive     |
+3    | B_{e+1,1}   | h+2  | 1        | e+1   | B_child (S_e) [★]   | S_e via SSI    | observe_cert(QC_B_child):        | h ← B_ec
+     |             |      |          |       |                     |                | cr=r_ec+1, pr=r_ec,              | committed
+     |             |      |          |       |                     |                | commits_parent(r_ec, r_ec+1)=T   |
+     |             |      |          |       |                     |                | → commit_through(B_ec);          |
+     |             |      |          |       |                     |                | engine loads S_{e+1} from        |
+     |             |      |          |       |                     |                | B_ec.payload; self.valset_hash   |
+     |             |      |          |       |                     |                | ← S_{e+1}                        |
+4    | B_{e+1,2}   | h+3  | 2        | e+1   | B_{e+1,1} (S_{e+1}) | S_{e+1}        | observe_cert(QC_B_{e+1,1}):      | h (no change)
+     |             |      |          |       |                     |                | cr=1, pr=r_ec+1,                 |
+     |             |      |          |       |                     |                | commits_parent(r_ec+1, 1)=FALSE  |
+     |             |      |          |       |                     |                | (round gap — no commit)          |
+5    | B_{e+1,3}   | h+4  | 3        | e+1   | B_{e+1,2} (S_{e+1}) | S_{e+1}        | observe_cert(QC_B_{e+1,2}):      | h+2 ← B_{e+1,1}
+     |             |      |          |       |                     |                | cr=2, pr=1,                      | B_child (h+1)
+     |             |      |          |       |                     |                | commits_parent(1, 2)=TRUE        | committed as
+     |             |      |          |       |                     |                | → commit_through(B_{e+1,1}):     | ancestor
+     |             |      |          |       |                     |                | commits B_child (h+1) first,     |
+     |             |      |          |       |                     |                | then B_{e+1,1} (h+2)             |
+```
+
+**[★] Cross-epoch QC:** `B_{e+1,1}.qc` certifies B_child and was signed by S_e validators
+(`valset_hash = S_e`). At step 3, the engine has transitioned to epoch e+1
+(`self.valset_hash = S_{e+1}`). The existing single-hash check
+(`Q.valset_hash != self.valset_hash`) would reject this QC. **The SSI map is required:**
+the engine must look up `Q.valset_hash` in the map to find S_e and verify against it.
+This is the first mandatory use of the SSI map in the transition sequence.
+
+### What finalizes B_child
+
+B_child (height h+1) is **never directly committed** by its own two-chain evidence. It is
+committed as an **uncommitted ancestor** in step 5 when `commit_through(B_{e+1,1})` walks
+backwards from B_{e+1,1} (height h+2) and finds B_child at h+1 above the current
+committed tip (B_ec at h).
+
+B_child has no special commit rule. Its finalization is a consequence of the first normal
+two-chain commit in epoch e+1 (rounds 1 and 2 consecutive, triggering commit at round 3).
+
+**Implication for `B_child`'s type:** because B_child is committed transitively rather
+than directly, it needs no special commit rule. An explicit "epoch-boundary" block type
+is still useful for execution and sync verification (nodes can identify B_child as the
+boundary marker without inspecting B_ec.payload), but it does not change the commit path.
+Owner recommendation accepted: use an explicit epoch-boundary type. See decision needed §4.
+
+### What evidence B_{e+1,1} carries
+
+```
+B_{e+1,1} = Block {
+    epoch:     e+1,
+    round:     1,
+    height:    h+2,
+    parent_id: B_child.block_id,
+    qc:        QC { block_id: B_child.block_id,
+                    round: r_ec+1,          // B_child's round
+                    parent_id: B_ec.block_id,
+                    parent_round: r_ec,
+                    epoch: e,               // the epoch of the QC, not of this block
+                    valset_hash: S_e.validator_set_hash() },  // ← cross-epoch
+    ...
+}
+```
+
+The QC inside B_{e+1,1} is an epoch-e certificate carrying `epoch = e` and
+`valset_hash = S_e`. The block itself is epoch e+1. The engine must accept a block in
+epoch e+1 that carries a QC from epoch e — this is the cross-epoch evidence that proves
+the outgoing set authorized the transition.
+
+### Restarting node's committed tip
+
+A node that restarts between step 3 and step 5 (after B_ec is committed but before
+B_child and B_{e+1,1} are committed) has:
+- `committed_tip = B_ec.block_id`, `committed_height = h`
+- `high_qc = QC_B_child` (round r_ec+1, epoch e, valset_hash = S_e) or higher if
+  B_{e+1,2} has arrived before the restart
+- Epoch is e+1 (the transition completed at step 3)
+- Resume round = `max(high_qc.round, high_tc.round) + 1` within epoch e+1
+
+**Round resumption at the boundary:** if `high_qc` is the epoch-e QC_B_child at round
+r_ec+1, the engine must not resume at round r_ec+2 — it must resume at round 2 of epoch
+e+1 (since round 1 is already in the block store). The round-resumption rule must handle
+the epoch boundary: after the epoch transitions, rounds in the new epoch are independent
+of the old epoch's round numbers. `next_round` after B_child's QC (from epoch e) must
+return round 1 of epoch e+1 if the transition has occurred, not r_ec+2.
+
+---
+
+### TC activation: `(epoch, round) → eligible set`
+
+The eligible set for a TC is determined by its `valset_hash` via the SSI map, combined
+with an epoch+round consistency check to prevent a delayed epoch-e TC from being
+processed as an epoch-e+1 TC.
+
+**Rule:** a TC is eligible if and only if:
+1. `TC.valset_hash` is in the SSI map (the set is known and was active at some point)
+2. `TC.epoch` is consistent with the activation range of the matching SSI entry
+
+```
+TC event                       | Epoch | Round    | valset_hash    | SSI lookup     | Eligible set
+-------------------------------|-------|----------|----------------|----------------|---------------
+Last outgoing TC at r_ec+1     | e     | r_ec+1   | S_e            | SSI[k] = S_e   | S_e (valid; activation range includes rounds in epoch e)
+First incoming TC at round 1   | e+1   | 1        | S_{e+1}        | SSI[k+1]=S_{e+1}| S_{e+1}
+Delayed outgoing TC at r_ec    | e     | r_ec     | S_e            | SSI[k] = S_e   | S_e (valid until SSI[k] evicted)
+Delayed outgoing TC after      | e     | r_ec+1   | S_e            | SSI[k] = S_e   | S_e; accepted by node in epoch e+1
+restart in epoch e+1           |       |          |                |                | if SSI[k] is retained; must not
+                               |       |          |                |                | advance the engine past round 1 of e+1
+```
+
+**Derivability requirement:** the `(epoch, round) → eligible set` mapping must produce
+identical results on every node given the same authenticated transition history. The SSI
+map is built from committed blocks (the epoch-change block commits the new S_{e+1}; each
+revocation/rotation block commits an SSI update). Every correct node that has processed
+the same committed blocks holds the same SSI map. A cold-start node reconstructs the map
+from the epoch-set store (see retention rule, Q3).
+
+**Retention rule for epoch-e SSI:** SSI[k] (S_e) may be evicted when no pending certificate
+from epoch e can affect safety. Under the two-chain rule, all epoch-e certificates are
+finalized when B_child (the last epoch-e block) is committed in step 5. After step 5,
+SSI[k] = S_e may be evicted. Until then, it must be retained to verify cross-epoch
+evidence (the [★] QC in step 3 and any delayed TCs).
+
+---
+
 ## Exact acceptance condition: epoch-change handoff
 
 After `B_ec` is committed:
