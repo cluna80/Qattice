@@ -150,6 +150,17 @@ All 5 tests run individually — each reported `test result: ok. 1 passed; 0 fai
 **Windows result — T19 assertion fix** (commit `dcae423`, 2026-11-11, MINGW64 krizz@BossKing, release mode, real FIPS 204 ML-DSA-65):
 - T19 `on_bytes_with_consensus_msg_while_anchor_pending_produces_no_signing_outbound`: `test result: ok. 1 passed; 0 failed` (0.75s)
 
+**Windows result — T20/T20b/T21/T22 reconciliation + gate suppression + FS restart** (commit `3eb572e`, 2026-11-11, MINGW64 krizz@BossKing, debug mode, real FIPS 204 ML-DSA-65):
+```
+cargo test -p chain-forge-consensus --features pq-hotstuff-fips204,pq-anchored-evidence --test pq_hotstuff_engine_fips204 -- advance_anchor_reaches_ready_with_matching_executor_state advance_anchor_returns_reconcile_failed_on_executor_mismatches anchor_pending_suppresses_try_complete_recovery_until_gate_clears fs_backed_restart_preserves_signing_floors_and_prevents_duplicate_execution --nocapture
+```
+- T20 `advance_anchor_reaches_ready_with_matching_executor_state`: ok
+- T20b `advance_anchor_returns_reconcile_failed_on_executor_mismatches`: ok (ran >60 s — second Eng3 simulation with real ML-DSA-65 is slow)
+- T21 `anchor_pending_suppresses_try_complete_recovery_until_gate_clears`: ok
+- T22 `fs_backed_restart_preserves_signing_floors_and_prevents_duplicate_execution`: ok
+
+`test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 231 filtered out; finished in 63.66s`
+
 | # | Test name | What it tests |
 |---|---|---|
 | T1 | `off_mode_is_the_default_and_no_ring_or_verification_runs` | `AnchorMode::default() == Off`; mode enum is wired |
@@ -171,6 +182,10 @@ All 5 tests run individually — each reported `test result: ok. 1 passed; 0 fai
 | T17 | `audit_watermark_bypass_is_closed_full_reverification_required` | `audited_height == anchor.height` → first `advance` call returns `NeedHeaders` (bypass closed) |
 | T18 | `tick_with_anchor_pending_produces_no_outbound` | `tick` while audit pending produces zero outbound messages (no propose, no timeout) |
 | T19 | `on_bytes_with_consensus_msg_while_anchor_pending_produces_no_signing_outbound` | Injecting real peer consensus bytes while audit pending produces no broadcast (signing) outbound |
+| T20 | `advance_anchor_reaches_ready_with_matching_executor_state` | Node0 engine from real chain (matching block IDs + state roots) → `advance_anchor` returns `Ready`; gate clears |
+| T20b | `advance_anchor_returns_reconcile_failed_on_executor_mismatches` | Executor behind anchor height, wrong block_id (independent Eng3 simulation), wrong state_root → each returns `ReconcileFailed`; gate stays up |
+| T21 | `anchor_pending_suppresses_try_complete_recovery_until_gate_clears` | Five ticks while gate is up produce zero consensus outbound; after `Ready`, deferred contains ≥1 consensus message |
+| T22 | `fs_backed_restart_preserves_signing_floors_and_prevents_duplicate_execution` | FsStorage safety+app+blockstore: second-run executor cursor matches pre-drop cursor; `Driver::start` succeeds; no duplicate execution |
 
 **Audit-watermark bypass (closed):** `Audit::new_from` set `checked_anchor = true` when
 `audited_height == anchor.height`, which made `advance` return `Ready` after a single header window
@@ -264,4 +279,13 @@ cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204,pq-
 
 Each command should report `test result: ok. 1 passed; 0 failed`.
 
-Per CLAUDE.md, the milestone is NOT marked ✅ until these pass on Windows.
+**Reconciliation, gate suppression, FS restart (T20/T20b/T21/T22) — ✅ PASSED on Windows (commit `3eb572e`, 2026-11-11):**
+
+```bash
+git pull origin feat/pq-hotstuff-2-anchored-evidence-an3
+cargo test -p chain-forge-consensus --features pq-hotstuff-fips204,pq-anchored-evidence --test pq_hotstuff_engine_fips204 -- advance_anchor_reaches_ready_with_matching_executor_state advance_anchor_returns_reconcile_failed_on_executor_mismatches anchor_pending_suppresses_try_complete_recovery_until_gate_clears fs_backed_restart_preserves_signing_floors_and_prevents_duplicate_execution --nocapture
+```
+
+Expected (confirmed): `test result: ok. 4 passed; 0 failed; finished in 63.66s`
+
+All AN-3 tests (T1–T22) have passed on Windows/MINGW64. Milestone is ✅.
