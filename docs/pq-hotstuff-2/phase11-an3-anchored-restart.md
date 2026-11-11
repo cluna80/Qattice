@@ -147,6 +147,9 @@ All 5 tests run individually — each reported `test result: ok. 1 passed; 0 fai
 - T18 `tick_with_anchor_pending_produces_no_outbound`: `test result: ok. 1 passed; 0 failed` (0.57s)
 - T19 `on_bytes_with_consensus_msg_while_anchor_pending_produces_no_signing_outbound`: `test result: ok. 1 passed; 0 failed` (0.62s)
 
+**Windows result — T19 assertion fix** (commit `dcae423`, 2026-11-11, MINGW64 krizz@BossKing, release mode, real FIPS 204 ML-DSA-65):
+- T19 `on_bytes_with_consensus_msg_while_anchor_pending_produces_no_signing_outbound`: `test result: ok. 1 passed; 0 failed` (0.75s)
+
 | # | Test name | What it tests |
 |---|---|---|
 | T1 | `off_mode_is_the_default_and_no_ring_or_verification_runs` | `AnchorMode::default() == Off`; mode enum is wired |
