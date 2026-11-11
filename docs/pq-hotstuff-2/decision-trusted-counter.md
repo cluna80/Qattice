@@ -1,6 +1,6 @@
 # Decision Request: §7.1 Trusted Monotonic Counter (G7.1-P, G7.1.1-P)
 
-**Date:** 2026-11-11  
+**Date:** 2026-11-11 (revised 2026-11-11 — owner review round 1)  
 **Gate:** QAT-07 / PQHS-P1  
 **Status:** Pending owner decision — no implementation authorized.  
 **Track:** Track C (§7.1 counter backend)  
@@ -10,147 +10,183 @@
 
 ## Current state
 
-The `MonotonicCounter` trait (`safety/mod.rs:210`) and the `SafetyStore` are fully
-implemented. `TestCounter` (an in-memory counter used in all existing tests) satisfies the
-trait for testing but is **explicitly not production-ready**: it provides no durability
-guarantee and no hardware fencing.
+The `MonotonicCounter` trait (`safety/mod.rs:210`) is fully specified. All 87 safety-store
+tests (76 + 11, BossKing-confirmed 2026-11-11) pass against `TestCounter`. `TestCounter` is
+an in-memory counter: it provides no durability guarantee and no hardware fencing. It
+establishes the correctness baseline for the store's protocol logic, not for any backend.
 
-The store's open/init logic depends on counter reads and advances to prevent rollback. All
-§7.1 unit tests (76/76 + 11/11, BossKing-confirmed 2026-11-11) pass against `TestCounter`.
-
-The `TestCounter` backend is acceptable for the PQ-HotStuff simulator and unit tests. It
-is not acceptable for a validator running against a live chain, because a process restart
-returns the counter to its initial value, defeating the rollback protection.
-
-§7.1.1 (digest-bound counter commits) is also draft only: PR #127 has the design and
-tests; it is not merged.
+A production backend must implement the full contract before it can replace `TestCounter` in
+any evidence that closes G7.1-P.
 
 ---
 
-## The interface
+## The full counter contract
+
+The existing trait already specifies more than a hardware increment. `advance` is a
+**compare-and-advance on `(value, digest)` together**:
 
 ```rust
+pub struct CounterState {
+    pub value:  u64,
+    pub digest: [u8; 32],
+}
+
 pub trait MonotonicCounter {
-    fn binding(&self) -> &CounterBinding;           // (public_key, instance_id)
-    fn read(&mut self) -> Result<CounterState, CounterError>;   // current (value, digest)
+    fn binding(&self) -> &CounterBinding;   // bound to (public_key, instance_id)
+    fn read(&self)    -> Result<CounterState, CounterError>;
     fn advance(
         &mut self,
-        expected: &CounterState,                    // compare-and-advance
+        expected:   &CounterState,   // succeeds only if current == (expected.value, expected.digest)
         new_digest: [u8; 32],
-        session: &Session,                          // fencing token
-    ) -> Result<(), CounterError>;
+        session:    &Session,        // fencing token; stale session → fail closed
+    ) -> Result<(), CounterError>;   // on failure: nothing changes, store latches
 }
 ```
 
-`CounterBinding` ties the counter to one `(public_key, instance_id)` pair. A counter bound
-to a different identity is refused at both init and open. The `Session` token is acquired
-once during `open` and must be presented on every subsequent `advance`; a stale session
-causes the advance to fail, latching the store.
+A backend that provides only a hardware increment (TPM NV counter `TPM2_NV_Increment`) does
+**not** satisfy this contract: it advances the integer but cannot atomically bind the new
+digest. That leaves the digest half of the compare unproven and creates a window where the
+counter value advances but the record's digest is never committed.
+
+**Consequence:** any backend evaluation must demonstrate atomicity over both `value` and
+`digest` together, not `value` alone.
 
 ---
 
-## Proposed rules (spec §7.1)
+## Backend evaluation criteria
 
-### R7.1-1 — Compare-and-advance, fail closed on mismatch
+Owner review (2026-11-11) requires each candidate to be evaluated against three axes:
 
-`advance(expected, new_digest, session)` succeeds only if the counter's current
-`(value, digest)` equals `expected`. On mismatch — counter was advanced by another writer
-or rolled back — the call fails and the store latches. No retry; no repair.
-
-**When it takes effect:** at every signature commit. The store already enforces this
-through `TestCounter`; the production backend must provide the same atomic compare-and-swap.
-
-### R7.1-2 — Rollback and reset detection on open
-
-On `open`, the counter is read **before** the file is inspected:
-- `file_counter < trusted_counter`: rollback detected → fail closed, latch.
-- `file_counter > trusted_counter + 1`: counter was reset or is from a different instance
-  → fail closed, latch.
-- `file_counter == trusted_counter + 1`: recovery window (advance did not complete) → gate
-  stays up until the advance is confirmed (R7.1-3).
-- `file_counter == trusted_counter`: normal open.
-
-### R7.1-3 — Recovery advance gates the open
-
-When `file_counter == trusted_counter + 1` the counter advance did not complete (crash
-between file write and counter advance). The store must complete the advance before
-returning any record. If the advance fails (race: another writer moved the counter), the
-store fails closed and returns nothing.
-
-### R7.1-4 — Session fencing
-
-The `Session` token is acquired once at `open`. Every `advance` presents it. A second
-concurrent `open` acquires a different session; when that second store tries to advance, the
-first store's session is stale and all further advances from it fail, latching it.
-
-### R7.1-5 — Bound to one (key, instance_id); value 0 at init; never re-initialized
-
-The counter is bound to exactly one `(public_key, instance_id)` pair for its lifetime.
-Value starts at 0 (initialization). `initialize_fresh` is refused if any counter value
-other than 0 exists for that binding. Re-initialization for a key that has participated
-(counter > 0) is refused.
+| Criterion | What it requires |
+|-----------|-----------------|
+| **Atomic compare-and-advance of (value, digest)** | The transition from `(v, d)` to `(v+1, d')` is indivisible: a concurrent reader sees either the old state or the new state, never a half-written `(v+1, d_old)` or `(v, d_new)`. |
+| **Session fencing** | Only the holder of the current session can advance; a concurrent `open` acquires a new session and invalidates all prior sessions' advances. |
+| **Rollback resistance** | The counter value never decreases across process restarts, power loss, or hardware failure. A `read` after restart returns a value ≥ the last successfully advanced value. |
 
 ---
 
-## §7.1.1 — Digest-bound counter commits (R7.1.1-1)
+## Candidate backends
 
-This extension, described in PR #127, stores `(value, digest)` as the counter state and
-requires `prev_digest` in every record. On open, a mismatch between the file's
-`prev_digest` and the counter's stored `digest` is a fork indicator (another record
-committed at the same counter value with a different digest) → fail closed.
+### A — TPM 2.0 NV counter
 
-**Status:** draft design; tests exist in `pq_hotstuff_safety.rs` lines 992–1179 (3 tests,
-BossKing-confirmed). No production backend. Requires a separate approval before merging.
+A TPM 2.0 NV index of type `TPM_NT_COUNTER` supports a hardware increment that survives
+power loss. Rollback resistance: **yes** (TPM internal NV). Session fencing: **yes** (NV
+authorization policy, PolicyPCR or PolicySigned). Atomic `(value, digest)`:
+**no** — `TPM2_NV_Increment` advances the integer only. To bind the digest, a combined
+sequence (`TPM2_NV_Increment` + `TPM2_NV_Write` in one TPM policy session) is required, or
+a separate NV index holds the digest.
+
+**Gap:** define and verify the combined increment+digest write as a single TPM policy
+transaction. Without that, the digest half of the contract is not covered by hardware
+atomicity.
+
+**Portability:** requires a physical or firmware TPM 2.0. Not available in all cloud VMs.
+Suitable for validator hardware; not suitable for a software-only devnet node.
+
+### B — HSM counter
+
+A hardware security module with a monotonic counter API can provide hardware-enforced
+atomic state. Rollback resistance: **yes**. Session fencing: **yes** (HSM session handle or
+key-usage policy). Atomic `(value, digest)`: **depends on HSM vendor API** — must confirm
+the HSM supports a CAS write of `(integer, 32-byte blob)` as a single transaction.
+
+**Gap:** vendor-specific; needs a concrete API review before this column can be marked
+satisfied.
+
+**Portability:** HSM presence required; high setup cost; not suitable for devnet.
+
+### C — Remote counter service (single-writer log / CRDT)
+
+A remote service (e.g. a linearizable key-value store with compare-and-swap, or a
+Raft-replicated log) can provide software-enforced CAS over arbitrary state including
+`(value, digest)`. Rollback resistance: **conditional** — depends on the service's
+durability guarantees (leader lease + fsync). Session fencing: **yes** (session lease token
+per open). Atomic `(value, digest)`: **yes** if the service provides a CAS primitive over
+the full state.
+
+**Gap:** introduces a network liveness dependency. If the service is unavailable, the
+validator cannot sign — this is fail-closed by design, but it ties validator liveness to
+the counter service. Needs a liveness analysis before approval.
+
+**Portability:** cloud-portable; suitable for devnet and mainnet with appropriate SLA.
+
+### D — Software file counter (devnet only)
+
+An atomic file-based counter using kernel-level write ordering + fsync + rename approximates
+the guarantee on POSIX and NTFS. Rollback resistance: **conditional** — survives process
+restart and OS crash, but not hardware failure (disk loss). Session fencing: **yes** (file
+lock or advisory lock). Atomic `(value, digest)`: **yes** via rename: write `(v+1, d')` to
+a new file, fsync, rename over the old file, fsync directory.
+
+**Classification:** devnet only. This is an improvement over `TestCounter` (which is
+in-memory and loses state on process exit) but does not meet the full contract for
+production. A node using this backend must be explicitly configured as devnet-only and must
+refuse to initialize without that flag.
+
+**Portability:** Linux, macOS, NTFS (Windows). No hardware dependency. Fast to implement.
 
 ---
 
-## Production backend options
+## Evidence required for a production backend (not `TestCounter`)
 
-The spec lists three candidate backends. The owner must choose one (or designate a priority
-order) before Track C work can begin:
+The 87 BossKing passes establish the **store protocol** with `TestCounter`. A production
+backend must present its own evidence for three scenarios that `TestCounter` cannot simulate:
 
-| Backend | Property | Complexity | Portability |
-|---------|----------|------------|-------------|
-| **TPM 2.0 NV counter** | Hardware-enforced monotonic; survives power loss | Medium (TPM 2.0 API) | Linux/Windows TPM stack required; not available in all cloud VMs |
-| **HSM counter** | Hardware-enforced; supports high-throughput signing | High (HSM vendor API) | Requires HSM presence; not suitable for a software-only devnet |
-| **Remote counter service** | Software-enforced via CRDT or single-writer log; fencing via session lease | High (network dependency) | Cloud-portable; adds a liveness dependency |
+| Scenario | Required test |
+|----------|--------------|
+| **Crash recovery** | Kill the process after `fsync` but before `advance` returns (or simulate power loss after the counter's underlying write but before the acknowledge). On restart, `open` must either find the counter at `v+1` (recovery path: advance completes) or at `v` (no-op: re-advance succeeds). It must never open a store whose `digest` does not match the counter's stored digest. |
+| **Concurrent writers** | Two concurrent `open` calls acquire different sessions. The first to call `advance` succeeds; the second's advance is rejected with a stale session, latching the second store. Neither writer sees a partial state. |
+| **Reset handling** | If the counter's backing storage is destroyed (simulate by wiping the counter state), `read` on restart returns either an error or value 0. If value 0 is returned and the safety store file is present and has `counter > 0`, `open` returns `Rollback` and fails closed. The node does not sign anything until a human operator performs key rotation. |
 
-A **software fallback** using an atomic file-based counter (kernel-level write ordering +
-fsync + rename) can approximate the guarantee on Linux and NTFS, but does not survive
-hardware failure. It is suitable for a devnet-only "durable counter" that improves on
-`TestCounter` without requiring a TPM.
+These three scenarios must be demonstrated with the production backend before G7.1-P closes.
+The existing 87 tests are the protocol baseline and continue to run against the production
+backend as a regression suite; they are not sufficient alone.
 
 ---
 
-## Tests that would demonstrate each rule
+## §7.1.1 — Digest-bound counter commits: open question
 
-All tests target the `MonotonicCounter` trait plus `SafetyStore`; they are backend-agnostic
-once the production backend implements the trait.
+PR #127 adds digest-bound commits. Three tests exist in `pq_hotstuff_safety` (lines
+992–1179, BossKing-confirmed) that exercise fork detection via digest mismatch.
 
-| Test name (proposed) | What it asserts |
-|----------------------|-----------------|
-| `production_counter_advance_is_atomic_compare_and_swap` | A concurrent advance with a stale `expected` value is rejected; the counter value does not change. |
-| `production_counter_advance_with_stale_session_latches_the_store` | After a second `open` acquires a new session, the first store's advance fails and the first store is latched. |
-| `production_counter_rollback_is_detected_on_open_and_fails_closed` | A counter whose file-level value is behind the stored value causes `open` to return `Err(Rollback)` and creates no store. |
-| `production_counter_recovery_advance_gates_the_open` | A counter at `f == t+1` (crash window) completes the advance on `open` before returning any record. |
-| `production_counter_bound_to_another_identity_is_refused` | A counter initialized for `(key_A, id_A)` refuses `open` with `(key_B, id_A)`. |
-| `production_counter_cannot_be_reinitialized_once_used` | `initialize_fresh` on a binding with `counter > 0` returns an error. |
+**Owner review (2026-11-11):** §7.1.1 remains pending until the document distinguishes two
+cases that the current draft conflates:
 
-The existing `pq_hotstuff_safety` tests (R7.1-1 through R7.1.5, BossKing-confirmed)
-already pass against `TestCounter` and serve as the acceptance suite: a production backend
-passes G7.1-P when these same tests pass with the production backend substituted.
+**Case A — equal-counter open (`file_counter == trusted_counter`):**
+The file's `prev_digest` is compared to the counter's stored `digest`. A mismatch means a
+different record was committed at the same counter value under a different session (a fork).
+The store fails closed.
+
+**Case B — one-step-ahead recovery (`file_counter == trusted_counter + 1`):**
+The advance did not complete (crash between file write and counter advance). The file is
+valid; the counter just needs to catch up. The comparison here is: does the file's
+`prev_digest` match the digest that was current before the advance? If yes, complete the
+advance; if no, a different record was committed before the crash (a fork in the recovery
+window). Fail closed on the second case only.
+
+**What the current draft does not make explicit:** the digest check in Case B is not the
+same check as in Case A. In Case A, the counter is authoritative and the file is suspect.
+In Case B, the file is authoritative (write + fsync completed) and the counter's missing
+advance is the gap to close. The document must state which side is trusted in each case
+before the design can be approved.
+
+**§7.1.1 remains pending** until this distinction is documented and both cases have
+dedicated tests that set up the state precisely (not via a combined crash scenario).
 
 ---
 
 ## Decision needed
 
-1. **Approve §7.1 as a Phase 1 required interface** (Track C begins) or **designate §7.1
-   as Phase 2 / devnet-optional** (Track C remains blocked).
-2. If approved for Phase 1: **choose the production counter backend** (TPM, HSM, remote
-   service, or software-fallback for devnet only).
-3. **Approve §7.1.1 (digest-bound commits)** as an additional Phase 1 requirement, or
-   hold at draft.
-4. If backend is approved: authorize implementation of the backend adapter, the
-   `MonotonicCounter` impl, and the integration tests listed above.
+1. **Approve one or more backends for a concrete evaluation:** choose from A (TPM), B
+   (HSM), C (remote service), or D (software file counter, devnet only), or add a backend
+   not listed here.
+2. **For the chosen backend(s):** confirm that the atomic `(value, digest)` CAS can be
+   satisfied (or identify the gap and authorize gap work to close it).
+3. **Approve §7.1 as a Phase 1 required interface** (Track C begins with the chosen
+   backend) or **designate §7.1 as Phase 2 / devnet-optional**.
+4. If approved for Phase 1: authorize the backend adapter implementation and the three
+   crash-recovery / concurrent-writer / reset-handling tests listed above.
+5. **§7.1.1:** once the Case A / Case B distinction is documented (can be a revision to
+   this document or a separate PR), approve or defer §7.1.1 for Phase 1.
 
 No implementation begins until this decision is recorded here.
