@@ -207,7 +207,28 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
         // left out (a missing root only costs a vote or a deferral, never a guess)
         let interval = engine.config().checkpoint.filter(|_| super::checkpoint::is_v3(&engine.config().protocol_profile)).map(|c| c.params.interval);
         if let Some(k) = interval { for (h, r) in store.load_roots(k)?.roots { engine.record_root(h, r)?; } }
-        engine.restore(loaded.blocks, &loaded.committed, loaded.high_qc, loaded.high_tc)?;
+        // After pruning, blk-* payload files at heights < pruned_watermark are deleted; the block AT the watermark
+        // height is kept. Its parent chain is gone, so accept() cannot link it. We set it as the committed base so
+        // height_of(wm_id) resolves for blocks above the watermark, and committed_tip is correctly primed.
+        // restore_committed is filtered to heights > watermark so restore() never checks the deleted zone.
+        let restore_committed: Vec<(u64, _)> = if loaded.pruned_watermark > 0 {
+            let wm = loaded.pruned_watermark;
+            if let Some(&(_, wm_id)) = loaded.committed.iter().find(|(h, _)| *h == wm) {
+                // The block file at wm_height is kept; find it to get the round.
+                let idc = IdCtx { protocol_profile: &engine.config().protocol_profile, chain_id: &engine.config().chain_id, set: &engine.config().set };
+                if let Some(wm_block) = loaded.blocks.iter().find(|b| b.height == wm) {
+                    if let Ok(computed_id) = block_id_of(wm_block, &idc) {
+                        if computed_id == wm_id {
+                            engine.set_pruned_base(wm_id, wm, wm_block.round);
+                        }
+                    }
+                }
+            }
+            loaded.committed.iter().copied().filter(|(h, _)| *h > wm).collect()
+        } else {
+            loaded.committed.clone()
+        };
+        engine.restore(loaded.blocks, &restore_committed, loaded.high_qc, loaded.high_tc)?;
         // commit markers a crash lost are written again (the engine re-derived them from the certificates it recovered)
         for c in engine.committed_after(loaded.seeded_height + loaded.committed.len() as u64) { store.put_commit(c.height, &c.id)?; }
 
