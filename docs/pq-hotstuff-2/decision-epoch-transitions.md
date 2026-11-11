@@ -491,27 +491,36 @@ Dynamic membership remains disabled until PO-4 returns.
 
 ## PO-4 partial results (2026-11-11, TLC 1.8.0, 4 cores)
 
-Branch `research/pq-hotstuff-2-epoch-transition-model` commit `08949ce`. Full table in `REPORT.md`.
+Branch `research/pq-hotstuff-2-epoch-transition-model` commit `9bafb8e`. Full table in `REPORT.md`.
 
 ### Key findings
 
 **Outgoing-set cutoff is load-bearing (M1, two scenarios confirmed):**
-Removing the seal rule (`SealOn = FALSE`) violates `Inv_NoOldEpochBeyondBoundary` in both the overlap scenario (depth 11, 7,032 distinct states, 29s) and the disjoint scenario (depth 19, 128,084 distinct states, 11m 36s). The baseline (`SealOn = TRUE`) did not violate this invariant in any completed run. The seal rule is a necessary condition for the outgoing-set cutoff.
+Removing the seal rule (`SealOn = FALSE`) violates `Inv_NoOldEpochBeyondBoundary` in both the overlap scenario (depth 11, 7,032 distinct states, 29s) and the disjoint scenario (depth 19, 128,084 distinct states, 11m 36s).
 
 **Epoch transition is reachable (witness, two scenarios confirmed):**
-`Inv_NotCompleted` was violated for the overlap scenario (depth 9, 2,741 distinct states, 6s) and the disjoint scenario (depth 19, 126,366 distinct states, 5m 23s). The handoff trace is reachable within the model's bounds.
+`Inv_NotCompleted` was violated for the overlap scenario (depth 9, 2,741 distinct states, 6s) and the disjoint scenario (depth 19, 126,366 distinct states, 5m 23s).
+
+**Exhaustive bounded safety result (overlap scenario, MaxProps=6, MaxTos=3, R=4):**
+`safety_t3_overlap_tight` exhausted its state space — **15,165 distinct states, depth 21, 1m 05s** — with no violation of `Inv_NoConflictingCommit`, `Inv_NoOldEpochBeyondBoundary`, or any other safety invariant. First fully exhausted safety check.
+
+**On baseline runs that did not complete:** where a run was stopped by timeout or manually, the correct statement is that **no violation was observed in the explored states before the run stopped.** This applies to: the disjoint tight safety run (84,691 distinct states in 5 min, stopped by timeout), and all round-2 baseline runs.
+
+### State-space: why disjoint exhaustion is out of reach here
+
+Overlap (2 honest validators) exhausts at ~15K distinct states in 1 minute. Disjoint (4 honest validators — 2 per epoch, completely separate) generates ~260K states per minute at the same bounds and does not exhaust in 5 minutes. Exhaustion requires a snapshot-synchronization abstraction or dedicated hardware with 16+ cores.
 
 ### What is not yet confirmed
 
-- **`Inv_NoConflictingCommit` (S1) exhaustively verified:** neither the disjoint nor the overlap safety check exhausted its state space. No violation was found, but no exhaustive confirmation was obtained.
+- **`Inv_NoConflictingCommit` exhaustively verified for disjoint sets:** 84,691 states explored, no violation observed in explored states before timeout.
 - **Compete scenario (SetB — third competing epoch-change candidate):** witness reached 406K+ states at depth 10 in 30 min without finding the goal; stopped. The M1 compete check was not run.
-- **Crash/restart configs:** not run. Required for PO-4 scope item 4 (restarts on both sides of epoch boundary).
+- **Crash/restart configs (CrashOn=TRUE):** not run.
 
 ### Remaining PO-4 runs required before Track B
 
 | Priority | Run | Why |
 |---|---|---|
-| 1 | `mut_M1_no_seal__t3_compete` | Demonstrates outgoing-set cutoff failure with competing candidates |
-| 2 | `safety_t3_disjoint` with R=3 | Baseline safety at reduced depth |
+| 1 | Disjoint safety exhaustion | Snapshot-sync abstraction or dedicated hardware |
+| 2 | `mut_M1_no_seal__t3_compete` | Outgoing-set cutoff failure with competing candidates |
 | 3 | `crash_t3_disjoint` | Restart-on-both-sides-of-boundary |
-| 4 | `mut_M3_no_boundary_check__t3_compete` | Validates SSI eligibility check is load-bearing |
+| 4 | `mut_M3_no_boundary_check__t3_disjoint` | SSI eligibility check load-bearing evidence |
