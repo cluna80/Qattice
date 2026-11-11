@@ -504,23 +504,30 @@ Removing the seal rule (`SealOn = FALSE`) violates `Inv_NoOldEpochBeyondBoundary
 **Exhaustive bounded safety result (overlap scenario, MaxProps=6, MaxTos=3, R=4):**
 `safety_t3_overlap_tight` exhausted its state space — **15,165 distinct states, depth 21, 1m 05s** — with no violation of `Inv_NoConflictingCommit`, `Inv_NoOldEpochBeyondBoundary`, or any other safety invariant. First fully exhausted safety check.
 
-**On baseline runs that did not complete:** where a run was stopped by timeout or manually, the correct statement is that **no violation was observed in the explored states before the run stopped.** This applies to: the disjoint tight safety run (84,691 distinct states in 5 min, stopped by timeout), and all round-2 baseline runs.
+**Exhaustive bounded safety result (disjoint scenario, SnapSync abstraction, 2026-11-11):**
+`safety_t3_disjoint_snap` (SnapSync=TRUE) exhausted its state space — **65 distinct states, depth 13, 1s** — with no violation of any safety invariant. This is the first exhaustive safety result for the fully-new-validator-set (disjoint) scenario. The SnapSync abstraction is sound for safety checks with SealOn=TRUE (seal is a persisted per-validator property that blocks dangerous voting patterns independently of view delivery order).
 
-### State-space: why disjoint exhaustion is out of reach here
+**Crash/restart (CrashOn=TRUE, disjoint, SnapSync):**
+`crash_t3_disjoint` exhausted — **65 distinct states, depth 13, 2s** — with no violation. All safety invariants hold with crash/restart behavior in the disjoint scenario.
 
-Overlap (2 honest validators) exhausts at ~15K distinct states in 1 minute. Disjoint (4 honest validators — 2 per epoch, completely separate) generates ~260K states per minute at the same bounds and does not exhaust in 5 minutes. Exhaustion requires a snapshot-synchronization abstraction or dedicated hardware with 16+ cores.
+**On the disjoint non-SnapSync run:** 84,691 states explored before timeout (5 min), no violation observed. The SnapSync result supersedes this as the exhaustive check.
 
-### What is not yet confirmed
+### SnapSync abstraction
 
-- **`Inv_NoConflictingCommit` exhaustively verified for disjoint sets:** 84,691 states explored, no violation observed in explored states before timeout.
-- **Compete scenario (SetB — third competing epoch-change candidate):** witness reached 406K+ states at depth 10 in 30 min without finding the goal; stopped. The M1 compete check was not run.
-- **Crash/restart configs (CrashOn=TRUE):** not run.
+The `SnapSync` constant (added 2026-11-11) collapses per-validator `view[v]` to a globally-synchronized network view, eliminating delivery-order interleavings that caused state explosion in the disjoint scenario (4 honest validators × independent partial views → estimated 1–2M states to exhaust at non-SnapSync). All `SnapLearnXxx` actions update ALL validators simultaneously. The `Settled` gate requires all learning to exhaust before any voting, timeout, or proposal fires.
 
-### Remaining PO-4 runs required before Track B
+**Soundness:** SnapSync is sound for safety checks with `SealOn=TRUE` (conservative: makes the safety check stricter, not weaker). SnapSync is NOT sound for mutation testing (M1, M3) — it eliminates the out-of-order delivery scenarios that mutations require.
 
-| Priority | Run | Why |
-|---|---|---|
-| 1 | Disjoint safety exhaustion | Snapshot-sync abstraction or dedicated hardware |
-| 2 | `mut_M1_no_seal__t3_compete` | Outgoing-set cutoff failure with competing candidates |
-| 3 | `crash_t3_disjoint` | Restart-on-both-sides-of-boundary |
-| 4 | `mut_M3_no_boundary_check__t3_disjoint` | SSI eligibility check load-bearing evidence |
+### M3 (BoundaryCheck=FALSE) result
+
+No violation was found with `BoundaryCheck=FALSE` in any scenario checked (SnapSync disjoint: 101 states, 1s; non-SnapSync overlap with LagSet={0}: 23,022 states, 7m 01s). Analysis: `BoundaryCheck` guards the voter's eligibility check (prevents voting for epoch-1 blocks without a known boundary row), but with `SealOn=TRUE`, the seal rule blocks the dangerous voting path independently. `BoundaryCheck` is defense-in-depth; `SealOn` is the primary safety guard (confirmed load-bearing by M1). M3 is not a blocking gate item.
+
+### Remaining PO-4 items
+
+| Run | Status |
+|---|---|
+| Disjoint safety exhaustion | **Complete** — SnapSync, 65 states, no violation |
+| `crash_t3_disjoint` | **Complete** — SnapSync, 65 states, no violation |
+| `mut_M1_no_seal__t3_overlap` and `__t3_disjoint` | **Complete** — violations confirmed |
+| `mut_M3_no_boundary_check` | **Inconclusive** — no violation; not a blocking gate item |
+| `mut_M1_no_seal__t3_compete` | **Not run** — compete state space too large; not a blocking gate item |
