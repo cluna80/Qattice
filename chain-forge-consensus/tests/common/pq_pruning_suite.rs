@@ -5,6 +5,7 @@
 // All in-scope items come from the surrounding test file via include! and use tree_doubles::*.
 // ============================================================================================================================
 use chain_forge_consensus::pq_hotstuff::blockstore::StoreError as PruneStoreError;
+use chain_forge_consensus::pq_hotstuff::safety::FsStorage;
 
 // Helper: build a BlockStore populated with committed blocks from a DNet.
 // Returns (BlockStore, tip_height).
@@ -126,6 +127,44 @@ fn damaged_watermark_round_trip_clean() {
     let bs2 = BlockStore::new(bs.into_inner());
     assert_eq!(bs2.pruned_watermark().unwrap(), 10,
         "watermark must round-trip correctly through a re-open");
+}
+
+// P9: FsStorage-backed blockstore: damaged watermark file is refused, not silently reset.
+// Writes a valid watermark to disk, then overwrites the prune-* file with garbage bytes,
+// and verifies that pruned_watermark() returns WatermarkDamaged (not 0 or a stale value).
+#[test]
+fn fs_backed_damaged_watermark_is_refused_not_silently_reset() {
+    let pid = std::process::id();
+    let store_dir = std::env::temp_dir()
+        .join(format!("cf-prune-p9-{pid}-{}", line!()));
+    let _ = std::fs::remove_dir_all(&store_dir);
+    std::fs::create_dir_all(&store_dir).unwrap();
+
+    // Write a valid watermark at height 10.
+    let fs = FsStorage::new(&store_dir).unwrap();
+    let mut bs = BlockStore::new(fs);
+    bs.prune_payloads(10).unwrap();
+    assert_eq!(bs.pruned_watermark().unwrap(), 10, "valid watermark must round-trip");
+    drop(bs);
+
+    // Corrupt the prune-* file: overwrite with random non-sealed bytes.
+    let wm_path = store_dir.join(format!("prune-{:020}", 10u64));
+    std::fs::write(&wm_path, b"this is not a sealed watermark").unwrap();
+
+    // Re-open and verify WatermarkDamaged is returned.
+    let fs2 = FsStorage::new(&store_dir).unwrap();
+    let bs2 = BlockStore::new(fs2);
+    match bs2.pruned_watermark() {
+        Err(PruneStoreError::WatermarkDamaged) => {}
+        other => panic!("expected WatermarkDamaged after corruption; got {other:?}"),
+    }
+    // load() must also fail (not silently ignore the damaged watermark).
+    match bs2.load() {
+        Err(PruneStoreError::WatermarkDamaged) => {}
+        other => panic!("load() must propagate WatermarkDamaged; got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(&store_dir);
 }
 
 // P7: driver prune_below is refused while anchor audit is pending.
