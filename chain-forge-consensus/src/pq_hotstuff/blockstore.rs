@@ -21,6 +21,7 @@ const K_HQC: u8 = b'Q';
 const K_HTC: u8 = b'T';
 const K_ROOT: u8 = b'O';
 const K_SEED: u8 = b'S';
+const K_PRUNE: u8 = b'P';
 
 /// A [`Storage`] that can also list its files (needed to find the blocks and commit markers on restart).
 pub trait BlockFiles: Storage {
@@ -49,6 +50,10 @@ pub enum StoreError {
     RootConflict(u64),
     #[error("a stored checkpoint root was written for interval {found}, this chain uses {expected}")]
     RootIntervalMismatch { expected: u64, found: u64 },
+    #[error("pruning watermark request {requested} is below the already-stored watermark {have}")]
+    StaleWatermark { have: u64, requested: u64 },
+    #[error("the pruning watermark file is damaged; it must not be silently reset")]
+    WatermarkDamaged,
 }
 impl From<StorageError> for StoreError { fn from(e: StorageError) -> Self { StoreError::Storage(e.0) } }
 
@@ -57,6 +62,8 @@ impl From<StorageError> for StoreError { fn from(e: StorageError) -> Self { Stor
 pub struct Loaded {
     /// Height of the newest stored seed evidence (0 = none): commit markers at or below it belong to history this node no longer holds and are not required.
     pub seeded_height: u64,
+    /// Highest height whose payload (`blk-*`) files have been pruned (0 = none). Block files absent at or below this height are expected, not damage.
+    pub pruned_watermark: u64,
     pub blocks: Vec<Block>,
     /// Commit markers `(height, id)`, contiguous from height 1.
     pub committed: Vec<(u64, BlockId)>,
@@ -203,6 +210,54 @@ impl<S: BlockFiles> BlockStore<S> {
     pub fn put_high_qc(&mut self, c: &Cert) -> Result<(), StoreError> { self.put("hqc", K_HQC, &c.encode()) }
     pub fn put_high_tc(&mut self, t: &Tc) -> Result<(), StoreError> { self.put("htc", K_HTC, &t.encode()) }
 
+    /// The highest height whose payload files have been pruned (0 = none). A damaged file is an error — the watermark must not be silently reset.
+    pub fn pruned_watermark(&self) -> Result<u64, StoreError> {
+        // find the single prune-* file (there should be at most one)
+        let mut best = 0u64;
+        for name in self.s.names()? {
+            if name.ends_with(".tmp") { continue; }
+            let Some(h) = name.strip_prefix("prune-").and_then(|h| h.parse::<u64>().ok()) else { continue };
+            let Some(bytes) = self.s.read(&name)? else { continue };
+            match unseal(&bytes, K_PRUNE) {
+                Some(b) if b.len() == 8 && u64::from_be_bytes(b.try_into().unwrap()) == h => { if h > best { best = h; } }
+                _ => return Err(StoreError::WatermarkDamaged),
+            }
+        }
+        Ok(best)
+    }
+
+    /// Write the pruning watermark at `below` and delete all `blk-*` files for committed blocks with height < `below`.
+    /// Idempotent: same `below` is a no-op. A lower `below` than the stored watermark is refused.
+    /// The watermark is written BEFORE deletion: a crash mid-deletion is safe on restart (re-call deletes remaining files).
+    /// Commit markers (`cmt-*`) and root-log files (`root-*`) are never deleted.
+    /// Returns the number of block files removed.
+    pub fn prune_payloads(&mut self, below: u64) -> Result<usize, StoreError> {
+        let have = self.pruned_watermark()?;
+        if below < have { return Err(StoreError::StaleWatermark { have, requested: below }); }
+        if below == have { return Ok(0); }
+        // write new watermark FIRST — crash after this but before full deletion is safe on retry
+        self.put(&format!("prune-{below:020}"), K_PRUNE, &below.to_be_bytes())?;
+        // remove any older watermark file (monotonically increasing; at most one old file)
+        if have > 0 {
+            self.s.remove(&format!("prune-{have:020}"))?;
+            self.s.sync_dir()?;
+        }
+        // decode each blk-* file to find its height, then remove those below the watermark
+        let mut to_delete: Vec<String> = vec![];
+        for name in self.s.names()? {
+            if name.ends_with(".tmp") || !name.starts_with("blk-") { continue; }
+            if let Some(bytes) = self.s.read(&name)? {
+                if let Some(b) = unseal(&bytes, K_BLOCK).and_then(|b| super::netmsg::decode_block(b).ok()) {
+                    if b.height < below { to_delete.push(name); }
+                }
+            }
+        }
+        let count = to_delete.len();
+        for name in to_delete { self.s.remove(&name)?; }
+        self.s.sync_dir()?;
+        Ok(count)
+    }
+
     /// Apply a durable-state request from the engine; every other output is ignored. The driver calls this IN ORDER, before it
     /// sends or executes anything that follows the request in the same output list.
     pub fn apply(&mut self, o: &Output, id_of: &dyn Fn(&Block) -> Option<BlockId>) -> Result<(), StoreError> {
@@ -240,6 +295,7 @@ impl<S: BlockFiles> BlockStore<S> {
         }
         markers.sort_by_key(|m| m.0);
         out.seeded_height = self.seed_heights()?.last().copied().unwrap_or(0);
+        out.pruned_watermark = self.pruned_watermark()?;
         // history at or below a seeded checkpoint is not held here: its markers are ignored, and the rest must run on from the checkpoint without a gap
         markers.retain(|m| m.0 > out.seeded_height);
         for (i, (height, id)) in markers.iter().enumerate() {

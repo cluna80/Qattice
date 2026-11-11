@@ -113,6 +113,7 @@ impl DevnetConfig {
         DriverConfig {
             max_sync_blocks: self.max_sync_blocks, pace: PacemakerConfig { base: self.pacemaker_base_ms, max: self.pacemaker_max_ms },
             sync_ttl: 3 * self.pacemaker_base_ms, sync_outstanding: 8, min_propose_gap: self.min_propose_gap_ms, park_capacity: 32, park_ttl: 6 * self.pacemaker_base_ms, recent: 64, exec_per_tick: None,
+            #[cfg(feature = "pq-anchored-evidence")] anchor: None,
         }
     }
 

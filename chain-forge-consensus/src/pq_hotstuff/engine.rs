@@ -114,6 +114,10 @@ pub struct Engine<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: Consen
     base: Option<Base>,
     /// The authenticated reference of the base (set by `seed`); its state root is what a below-base answer names.
     base_ref: Option<CheckpointRef>,
+    /// Set by [`Engine::set_pruned_base`] when restarting from a pruned store: the committed block at the pruning
+    /// watermark whose blk-* file is kept but whose ancestors are gone. Lets `height_of` resolve the watermark id
+    /// without the full `Base` machinery (no checkpoint evidence, no reference state).
+    pruned_base: Option<(BlockId, u64, u64)>,  // (id, height, round)
     /// While true the engine signs NOTHING (no proposal, vote or timeout, and no re-send of a stored one).
     recovering: bool,
     blocks: BTreeMap<BlockId, Stored>,
@@ -162,7 +166,7 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
         let genesis = GenesisCert { protocol_profile: cfg.protocol_profile.clone(), chain_id: cfg.chain_id.clone(), genesis_hash, valset_hash };
         let genesis_id = genesis.block_id();
         Ok(Self {
-            valset_hash, genesis_id, base: None, base_ref: None, recovering: false, high_qc: Cert::Genesis(genesis.clone()), genesis, cfg, store, signer, verifier,
+            valset_hash, genesis_id, base: None, base_ref: None, pruned_base: None, recovering: false, high_qc: Cert::Genesis(genesis.clone()), genesis, cfg, store, signer, verifier,
             blocks: BTreeMap::new(), high_tc: None, round: 1, committed_tip: genesis_id, committed_height: 0,
             votes: BTreeMap::new(), voted: BTreeSet::new(), timeouts: BTreeMap::new(), proposed: 0,
             roots: BTreeMap::new(), executed_height: 0, deferred: BTreeSet::new(), final_refs: BTreeMap::new(), certified_refs: BTreeMap::new(), alarm: None, evidence: vec![], omit_until: 0, proposed_ref_round: None, proposed_ref_block: None, omit_streak: 0,
@@ -176,6 +180,7 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
     pub fn genesis_id(&self) -> BlockId { self.genesis_id }
     pub fn config(&self) -> &EngineConfig { &self.cfg }
     pub fn store(&self) -> &SafetyStore<S, C> { &self.store }
+    pub fn verifier(&self) -> &V { &self.verifier }
     pub fn into_parts(self) -> (SafetyStore<S, C>, G, V) { (self.store, self.signer, self.verifier) }
     /// The payload-free headers of the chain this node holds, from the block after `after` up to the block its high QC certifies: at most `max`, the height of the last
     /// header of the whole path, and whether the slice reaches it. `None` when `after` is not on this node's chain (including anything below a seeded base).
@@ -199,8 +204,8 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
         VerifyCtx { chain_id: &self.cfg.chain_id, set: &self.cfg.set, valset_hash: self.valset_hash, genesis: &self.genesis, verifier: &self.verifier }
     }
     fn idctx(&self) -> IdCtx<'_> { IdCtx { protocol_profile: &self.cfg.protocol_profile, chain_id: &self.cfg.chain_id, set: &self.cfg.set } }
-    fn height_of(&self, id: &BlockId) -> Option<u64> { if *id == self.genesis_id { Some(0) } else if self.base.as_ref().map_or(false, |b| b.id == *id) { self.base.as_ref().map(|b| b.height) } else { self.blocks.get(id).map(|s| s.height) } }
-    fn round_of(&self, id: &BlockId) -> Option<Round> { if *id == self.genesis_id { Some(0) } else if self.base.as_ref().map_or(false, |b| b.id == *id) { self.base.as_ref().map(|b| b.round) } else { self.blocks.get(id).map(|s| s.round) } }
+    fn height_of(&self, id: &BlockId) -> Option<u64> { if *id == self.genesis_id { Some(0) } else if self.base.as_ref().map_or(false, |b| b.id == *id) { self.base.as_ref().map(|b| b.height) } else if self.pruned_base.as_ref().map_or(false, |(pid, _, _)| pid == id) { self.pruned_base.map(|(_, h, _)| h) } else { self.blocks.get(id).map(|s| s.height) } }
+    fn round_of(&self, id: &BlockId) -> Option<Round> { if *id == self.genesis_id { Some(0) } else if self.base.as_ref().map_or(false, |b| b.id == *id) { self.base.as_ref().map(|b| b.round) } else if self.pruned_base.as_ref().map_or(false, |(pid, _, _)| pid == id) { self.pruned_base.map(|(_, _, r)| r) } else { self.blocks.get(id).map(|s| s.round) } }
     fn is_base(&self, id: &BlockId) -> bool { self.base.as_ref().map_or(false, |b| b.id == *id) }
     fn voter_state(&self) -> VoterState {
         let r = self.store.record();
@@ -677,6 +682,18 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier> 
 
     pub fn is_recovering(&self) -> bool { self.recovering }
     pub fn base(&self) -> Option<&Base> { self.base.as_ref() }
+
+    /// Set the pruning watermark block as the committed base for a restart from a pruned store.
+    /// Call this before `restore` when `loaded.pruned_watermark > 0`. The watermark block's payload
+    /// file is kept (height == watermark is not deleted), so the block is in `loaded.blocks` and can be
+    /// accepted normally, but its parent chain is gone. This registers its id so `height_of` resolves it
+    /// (allowing the first block above the watermark to link to it) and sets committed_tip/height so
+    /// `commit_through` stops at the watermark correctly.
+    pub fn set_pruned_base(&mut self, id: BlockId, height: u64, round: u64) {
+        self.pruned_base = Some((id, height, round));
+        self.committed_tip = id;
+        self.committed_height = height;
+    }
 
     /// Why the engine may not sign yet, or `None` when every condition holds: the high QC's block is known (so its ancestry down to the base is), and the
     /// engine has seen at least the highest QC round it ever voted on (the SafetyStore's `hqr`), so it never proposes or votes on a view older than its own record.

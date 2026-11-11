@@ -195,6 +195,15 @@ impl Audit {
         if seg == 0 { return Err(SegmentError::ZeroSegment); }
         Ok(Audit { anchor: rec.anchor.clone(), cur: Start::Genesis, next_height: 1, audited: 0, seg, checked_anchor: false })
     }
+
+    /// Start an audit from genesis but carry forward the durable watermark stored in `rec.audited_height`. The
+    /// audit still re-verifies from height 1 (it does not skip: the resume `Start` for an arbitrary mid-chain
+    /// position is not stored in the ring); but `audited` is seeded from the persisted value so that the caller's
+    /// `ring.set_audited` calls never go backwards. When `rec.audited_height == 0` this is equivalent to `new`.
+    pub fn new_from(rec: &AnchorRecord, seg: usize) -> Result<Audit, SegmentError> {
+        if seg == 0 { return Err(SegmentError::ZeroSegment); }
+        Ok(Audit { anchor: rec.anchor.clone(), cur: Start::Genesis, next_height: 1, audited: rec.audited_height, seg, checked_anchor: rec.audited_height >= rec.anchor.height })
+    }
     /// The height the next fed header must have.
     pub fn next_height(&self) -> u64 { self.next_height }
     /// The carried verification state (an anchor at the last block the audit finalized, or genesis), for a caller that wants to persist it later.

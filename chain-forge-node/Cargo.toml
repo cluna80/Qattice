@@ -68,6 +68,9 @@ real-network = []
 pq-devnet = ["chain-forge-consensus/pq-hotstuff-fips204", "dep:sha3"]
 # S-2b: snapshot capture and serving for the PQ devnet node. OFF by default; a node additionally needs the explicit `--serve-snapshots` flag. Installation stays operator-initiated.
 pq-snapshot-transfer = ["pq-devnet", "chain-forge-consensus/pq-snapshot-transfer"]
+# Defensive pruning watermark for the PQ devnet node. OFF by default. Requires pq-devnet.
+# With this feature the run loop calls prune_below after each finalized anchor and prints the watermark.
+pq-anchored-evidence = ["pq-devnet", "chain-forge-consensus/pq-anchored-evidence"]
 # TEST-ONLY: forwards to chain-forge-execution/signing-v2 (node-level v2 tests). Not enabled by default; no activation path.
 signing-v2 = ["chain-forge-execution/signing-v2"]
 # Public-alpha release bundle: implies signing-v2 (and with it the conformant FIPS 204 backend). The general development build keeps these feature-gated.
@@ -118,6 +121,11 @@ required-features = ["pq-devnet"]
 name = "pq_devnet_live_v3"
 path = "tests/pq_devnet_live_v3.rs"
 required-features = ["pq-devnet"]
+
+[[test]]
+name = "pq_pruning_devnet_live"
+path = "tests/pq_pruning_devnet_live.rs"
+required-features = ["pq-anchored-evidence"]
 
 [[test]]
 name = "adversarial_gossip"
