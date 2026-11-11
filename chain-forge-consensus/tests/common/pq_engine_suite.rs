@@ -18,7 +18,7 @@ use chain_forge_consensus::pq_hotstuff::pacemaker::{Pacemaker, PacemakerConfig, 
 use chain_forge_consensus::pq_hotstuff::sync::{check_response, SyncClient, SyncError, SyncRequest, SyncResponse};
 use chain_forge_consensus::pq_hotstuff::rules::{commits_parent, safe_to_vote, BlockHeader, VoterState};
 use chain_forge_consensus::pq_hotstuff::safety::*;
-use chain_forge_consensus::pq_hotstuff::types::{EpochSet, ValidatorEntry};
+use chain_forge_consensus::pq_hotstuff::types::{EpochSet, SetError, ValidatorEntry};
 use chain_forge_consensus::pq_hotstuff::wire::*;
 use doubles::*;
 
@@ -447,6 +447,29 @@ fn engine_construction_checks_the_key_and_the_limits() {
     assert!(E::new(c, fresh_store(1, f.clone()), TestSigner::new(2), TestVerifier).is_err(), "message limit below the largest proposal");
     let mut c = cfg(1, 4); c.my_index = 9;
     assert!(E::new(c, fresh_store(1, f), TestSigner::new(2), TestVerifier).is_err());
+}
+
+// G8-A: ML-DSA-only admission is enforced at the EpochSet type boundary (spec §8, R8-8).
+// Engine::new() never receives a validator set with a wrong-length key because EpochSet::new()
+// rejects it first.  A key that is not 1952 bytes cannot be constructed into the set at all.
+#[test]
+fn g8a_epoch_set_refuses_a_non_ml_dsa_key_length_and_accepts_1952_byte_keys() {
+    // Negative: 32-byte key (Ed25519 length) is refused with BadKeyLength.
+    let short_key = vec![1u8; 32];
+    let err = EpochSet::new(0, vec![
+        ValidatorEntry { address: "v0".into(), public_key: short_key, power: 1 },
+    ]).unwrap_err();
+    assert!(
+        matches!(err, SetError::BadKeyLength(32)),
+        "expected BadKeyLength(32), got {err:?}",
+    );
+
+    // Positive: a standard 1952-byte ML-DSA-65 key passes through to a working engine.
+    let f = faults();
+    assert!(
+        E::new(cfg(0, 4), fresh_store(0, f.clone()), TestSigner::new(1), TestVerifier).is_ok(),
+        "valid 1952-byte validator set must start the engine",
+    );
 }
 
 // ---- engine rules that need a crafted, validly signed block (signed outside the store, as an adversary could) ----
