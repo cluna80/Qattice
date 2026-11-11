@@ -1,6 +1,10 @@
 # QAT-06 — Adversarial Simulation Campaign
 
-**Status: Windows-confirmed 2026-11-11 — krizz@BossKing MINGW64, `feat/pq-hotstuff-2-qat06-merge-an3`, 10/10 pass in 197.39 s (release, real FIPS 204 ML-DSA-65). 1000-seed soak and mutation campaign pending for final gate closure.**
+**Status: Windows-confirmed 2026-11-11 — krizz@BossKing MINGW64, `feat/pq-hotstuff-2-qat06-merge-an3` @ `8f15a7c`.**
+- **10-seed run:** 10/10 pass in 197.39 s (release, real FIPS 204 ML-DSA-65)
+- **1000-seed soak:** `PQHS_SEEDS=1000`, 10/10 pass in 3555.34 s (59.3 min), EXIT 0
+- **Mutation campaign:** 10/10 killed — M-A1/A3/B1/B3 by sim; M-A2 (`commits_parent→true`) and M-B2 (`safe_to_vote qc_round weakened`) by new boundary unit tests `mut_a2`/`mut_b2`
+- **Open:** M-C1/C2/C3/C4 (`commit_through` guard paths) require scripted on_sync_block fork-chain tests; tracked as follow-up before final gate closure
 
 Branch: `feat/pq-hotstuff-2-qat06-adversarial-sim` (stacked on `feat/pq-hotstuff-2-real-crypto` / PR #135)
 
