@@ -125,8 +125,8 @@ Run `pq_hotstuff_safety` on BossKing (all ~80 tests, real FIPS 204 for `pq_hotst
 No code changes required; this is evidence collection only.  
 Command:
 ```
-cargo test -p chain-forge-consensus --features pq-hotstuff --test pq_hotstuff_safety --nocapture
-cargo test -p chain-forge-consensus --features pq-hotstuff-fips204 --test pq_hotstuff_safety_fips204 --nocapture
+cargo test -p chain-forge-consensus --features pq-hotstuff --test pq_hotstuff_safety -- --nocapture
+cargo test -p chain-forge-consensus --features pq-hotstuff-fips204 --test pq_hotstuff_safety_fips204 -- --nocapture
 ```
 
 ### Track B — §8 epoch transitions and admission (new implementation)
