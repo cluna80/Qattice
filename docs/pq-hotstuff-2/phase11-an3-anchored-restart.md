@@ -189,6 +189,18 @@ feeding one header to a fully-persisted record must return `NeedHeaders`, not `R
   or failed audit provides no additional trust (trust rule from AN-2 carries forward).
 - The mutation campaign for AN-3 should use a disposable worktree.
 
+## Driver gate mutation campaign (signing-gate tests T18–T19, worktree `/tmp/claude-0/an3-mutants`)
+
+Three gate sites in `driver.rs` under `#[cfg(feature = "pq-anchored-evidence")]`:
+
+| # | Gate site | Mutation | Kill signal | Time |
+|---|---|---|---|---|
+| M6 | Tick gate (line 586): `if self.anchor.is_some() { return Ok(out); }` | Remove the early-return block entirely | T18 `tick_with_anchor_pending_produces_no_outbound`: FAILED | 19.35 s |
+| M7 | Deliver gate (lines 494–505): `if self.anchor.is_some() { return match ... route_anchor_pending ... }` + `try_complete_recovery` gate (line 275) | Remove both blocks | T19 `on_bytes_with_consensus_msg_while_anchor_pending_produces_no_signing_outbound`: FAILED | 19.73 s |
+| M8 | `route_anchor_pending` Broadcast suppression | Defense-in-depth; `Output::Broadcast` through the deliver path would only appear if the anchor-pending driver collects 2f+1 votes and forms a TC — which requires the full chain history not present in a fresh-start T19 driver. Not independently testable with current DNet infrastructure. | (n/a — architectural defense-in-depth) | — |
+
+**T19 assertion fix (commit in this session):** The original assertion `o.to.is_some()` could not detect votes because votes are unicast `Output::Send { to: Some(leader) }` (non-None) rather than `Output::Broadcast`. The assertion was replaced with `net::decode(&o.bytes, &mlim())` checked against `NetMsg::Consensus(_)`, which catches votes, proposals, and timeouts correctly. M7 is now killed by T19 in 19.73 s.
+
 ## Mutation campaign (`anchor_restart.rs`, component tests, commit `2516600`)
 
 Five mutations, all killed. M3 was re-verified against `2516600` (with the iteration guard) on

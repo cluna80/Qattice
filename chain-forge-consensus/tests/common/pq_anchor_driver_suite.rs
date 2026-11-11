@@ -144,9 +144,10 @@ fn tick_with_anchor_pending_produces_no_outbound() {
 }
 
 // T19: on_bytes with a consensus message while anchor pending must NOT produce a signing (broadcast) outbound.
-// A parallel DNet is ticked to generate real proposal/vote/timeout bytes; those bytes are fed to the
-// anchor-pending driver (node 0). The driver may emit sync requests (unicast, to: Some(_)) but must
-// never broadcast (to: None), because a broadcast means the driver voted or proposed while signing was gated.
+// The DNet uses the SAME checkpoint config as start_anchor_node (cc3(4, 8)) so they share a genesis hash and
+// the engine accepts the proposals rather than rejecting them as foreign. Node 0 is silent in the DNet so that
+// it is not the proposer; with seed=0, round-1 leader = (1+0)%4 = 1, so net.sent[1] carries a valid round-1
+// proposal that the anchor-pending driver (node 0) would vote on if the deliver gate were absent.
 #[test]
 fn on_bytes_with_consensus_msg_while_anchor_pending_produces_no_signing_outbound() {
     let (rec, _, _, _) = an3_setup();
@@ -156,20 +157,31 @@ fn on_bytes_with_consensus_msg_while_anchor_pending_produces_no_signing_outbound
     let mut ring = AnchorRing::open(MemTreeFs::new(tfaults()), alim(), abind()).unwrap();
     ring.publish(rec).unwrap();
     let sm = AnchorRestart::open(&ring, &abind(), &p, &TestVerifier, &alim(), 6).unwrap();
+    // Anchor-pending driver is node 0.
     let (mut drv, _) = start_anchor_node(0, 4, sm, "bytes-gate", 1).unwrap();
     assert!(drv.anchor_pending());
 
-    // Build a parallel DNet (same genesis), run several steps so every peer sends at least proposals/timeouts.
-    let mut net = DNet::new(4, &[], "bytes-gate-net");
+    // DNet with matching genesis (cc3(4,8)) and node 0 silent: nodes 1-3 run consensus.
+    // With seed=0, round-1 leader = (1+0)%4 = 1, so net.sent[1] carries the round-1 proposal.
+    // The anchor-pending driver (node 0, not the leader) would vote on that proposal if the deliver
+    // gate were absent — this DNet setup ensures the bytes are genuinely valid for the engine.
+    let mut net = DNet::new_cp(4, &[0], "bytes-gate-net", Some(cc3(4, 8)));
     for _ in 0..8 { net.step(); }
-    // Feed bytes from every peer (1–3) into the anchor-pending driver (node 0).
+    // Feed bytes from peers 1-3 (the active DNet nodes) into the anchor-pending driver (node 0).
     let mut fed = 0usize;
+    let lim = mlim();
     for peer in 1..4usize {
         for bytes in net.sent[peer].clone() {
             let outs = drv.on_bytes(peer, &bytes, 1).unwrap();
             for o in &outs {
-                assert!(o.to.is_some(),
-                    "anchor-pending driver must not broadcast (sign/vote/propose) from peer {peer}; got to=None outbound");
+                // Decode each outbound byte slice and reject any consensus (signing) message.
+                // Votes are unicast (Output::Send { to: Some(_) }) so o.to.is_some() cannot
+                // distinguish them from sync replies — decode is the only reliable check.
+                match net::decode(&o.bytes, &lim) {
+                    Ok(NetMsg::Consensus(_)) => panic!(
+                        "anchor-pending driver produced a consensus (signing) outbound for peer {peer}; must not sign while audit is pending"),
+                    _ => {}
+                }
             }
             fed += 1;
         }
