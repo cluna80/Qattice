@@ -1,6 +1,6 @@
 # QAT-06 — Adversarial Simulation Campaign
 
-**Status: sandbox compile-verified. Windows confirmation required before ✅.**
+**Status: Windows-confirmed 2026-11-11 — krizz@BossKing MINGW64, `feat/pq-hotstuff-2-qat06-merge-an3`, 10/10 pass in 197.39 s (release, real FIPS 204 ML-DSA-65). 1000-seed soak and mutation campaign pending for final gate closure.**
 
 Branch: `feat/pq-hotstuff-2-qat06-adversarial-sim` (stacked on `feat/pq-hotstuff-2-real-crypto` / PR #135)
 
