@@ -156,6 +156,16 @@ fn run(args: &[String]) -> Result<(), String> {
     let mut resent = drv.engine().is_recovering() && signed_by_me(&lim, me, &first) > 0;
     dispatch(&t, first);
 
+    // Defensive pruning watermark (pq-anchored-evidence, off by default).
+    // PRUNE_KEEP: retain the most recent N committed block payloads; delete everything older.
+    // The anchor gate guards against pruning before genesis-rooted audit completes.
+    #[cfg(feature = "pq-anchored-evidence")]
+    const PRUNE_KEEP: u64 = 64;
+    #[cfg(feature = "pq-anchored-evidence")]
+    let mut pruned_watermark: u64 = drv.block_store().pruned_watermark().map_err(|e| format!("pruned_watermark at start: {e}"))?;
+    #[cfg(feature = "pq-anchored-evidence")]
+    if pruned_watermark > 0 { eprintln!("pq-devnet-node {me}: pruning watermark at startup = {pruned_watermark}"); }
+
     let status_path = dir.join("status.json");
     let mut last_status = Instant::now() - Duration::from_secs(1);
     // runtime monitor: while the engine is Recovering the signing counter must not move. A violation stops the node and is reported.
@@ -182,7 +192,28 @@ fn run(args: &[String]) -> Result<(), String> {
             let m = if violation { "SAFETY: the signing counter moved while recovering" } else { "SAFETY: a message signed by this node was sent while recovering" };
             write_atomic(&status_path, &status_json(&drv, me, Some(m.into()), violation, resent)); return Err(m.into());
         }
-        if last_status.elapsed() >= Duration::from_millis(250) { write_atomic(&status_path, &status_json(&drv, me, None, false, false)); last_status = Instant::now(); }
+        // Advance pruning watermark when finality is ahead of the keep window and the anchor gate is clear.
+        #[cfg(feature = "pq-anchored-evidence")]
+        {
+            let committed = drv.status().committed_height;
+            if committed > pruned_watermark + PRUNE_KEEP && !drv.anchor_pending() {
+                let new_below = committed - PRUNE_KEEP;
+                match drv.prune_below(new_below) {
+                    Ok(deleted) => {
+                        pruned_watermark = new_below;
+                        eprintln!("pq-devnet-node {me}: pruned payloads below height {new_below} ({deleted} files deleted); watermark = {pruned_watermark}");
+                    }
+                    Err(e) => eprintln!("pq-devnet-node {me}: prune_below({new_below}) error: {e}"),
+                }
+            }
+        }
+        if last_status.elapsed() >= Duration::from_millis(250) {
+            #[cfg(feature = "pq-anchored-evidence")]
+            { let mut s = status_json(&drv, me, None, false, false); if let Ok(mut j) = serde_json::from_str::<serde_json::Value>(&s) { j["pruned_watermark"] = pruned_watermark.into(); s = j.to_string(); } write_atomic(&status_path, &s); }
+            #[cfg(not(feature = "pq-anchored-evidence"))]
+            write_atomic(&status_path, &status_json(&drv, me, None, false, false));
+            last_status = Instant::now();
+        }
     }
 }
 
