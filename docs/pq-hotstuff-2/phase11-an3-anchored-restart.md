@@ -175,6 +175,19 @@ publishing so that `checked_anchor = false` and the ancestor/final-height check 
   or failed audit provides no additional trust (trust rule from AN-2 carries forward).
 - The mutation campaign for AN-3 should use a disposable worktree.
 
+## Mutation campaign (`anchor_restart.rs`, component tests, commit `2516600`)
+
+Five mutations, all killed. M3 was re-verified against `2516600` (with the iteration guard) on
+2026-11-11, MINGW64 krizz@BossKing — confirmed fast assertion (0.74 s), not a timeout.
+
+| # | Mutation | Kill signal | Time |
+|---|---|---|---|
+| M1 | Comment out `NoRecord` check in `open` | T3 assertion | fast |
+| M2 | Remove `Foreign` check in `open` | T4 assertion | fast |
+| M3 | Swap `Ready`/`NeedHeaders` arms in `advance` | `drive_restart` iteration-bound panic | 0.74 s (Windows, `2516600`) |
+| M4 | Invert `anchor.height > executor_committed_height` guard in `reconcile` | T9 assertion | fast |
+| M5 | Remove `state_root` check in `reconcile` | T9 assertion | fast |
+
 ---
 
 ## Windows validation request (MINGW64, owner must run)
