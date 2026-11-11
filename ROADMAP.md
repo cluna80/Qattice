@@ -1,5 +1,34 @@
 # Qattice — Public Testnet Alpha: ML-DSA-65 + PQ-HotStuff Launch Plan
 
+## PO-4 complete + CF-C1 open — 2026-11-11 (documentation-only; append-only)
+
+> **Documentation only.** No merge or deployment authorized by this section.
+
+**PO-4 (epoch-transition formal model check) is substantively complete.**
+
+| PO-4 item | Result |
+|---|---|
+| Epoch transition reachable (witness, overlap + disjoint) | Confirmed |
+| Seal rule load-bearing — M1 violation (overlap + disjoint) | Confirmed |
+| Safety exhaustive — overlap (15,165 states) | No violation |
+| Safety exhaustive — disjoint via SnapSync (65 states) | No violation |
+| Crash/restart safety — disjoint via SnapSync (65 states) | No violation |
+| BoundaryCheck load-bearing — M3 (inconclusive; not blocking) | Noted |
+
+**Dynamic-membership formal blocker lifted.** The "dynamic membership remains disabled pending PO-4" restriction is removed. Epoch validator sets and ML-DSA-only admission may be implemented under CF-C1.
+
+**QAT-07 is NOT closed by PO-4 alone.** The remaining QAT-07 deliverables (epoch validator sets, restart anti-equivocation over TCP, revocation, key rotation, personhood power caps) all require CF-C1 to exist first. QAT-07 remains open.
+
+**CF-C1 is now open.** CF-C1 = native PQ-HotStuff-2 `ConsensusEngine` implementation in `chain-forge-consensus/src/pq_hotstuff/engine.rs`. Minimum scope:
+1. `PqHotStuffEngine` struct implementing `ConsensusEngine` trait
+2. `ConsensusVariant::PqHotStuff` variant
+3. Two-chain commit rule (spec §3.3–3.5): `locked_qc`, `high_qc`, consecutive-round commit
+4. ML-DSA-65 vote aggregation using existing `fips204_adapter` (feature-gated)
+5. Pacemaker (exponential-backoff timeout, `on_timeout`)
+6. Epoch-transition hook: `on_commit` calls `seal_round` on the safety store when committing an epoch-change block
+
+No network activation. Feature flag `pq-hotstuff` only. No merge without owner-run Windows confirmation.
+
 ## Owner direction — 2026-11-11: Tendermint testing retired for Qattice (LOCKED)
 
 > **Documentation only.** No code change, merge, or deployment authorized by this section.
