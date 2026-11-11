@@ -1,6 +1,12 @@
 # QATTICE | WHITEPAPER
 
-**Editorial edition — 16 October 2026**
+**Architecture revision — 10 November 2026 (draft)**
+
+> **Current protocol direction:** Qattice mainnet launches from a fresh genesis with **PQ-HotStuff-2** and **FIPS 204 ML-DSA-65** for consensus keys, user accounts, DIS authorization and every protocol signing domain. User accounts are ML-DSA-only: `signature_scheme = "pqc-native"`, with `pqc_algorithm = "ml-dsa"`. Ed25519 is retired from Qattice's protocol; there is no classical-signature fallback. Tendermint is a devnet-only baseline, currently using ML-DSA-65, not the mainnet engine. See [PQ-HOTSTUFF-001](docs/pq-hotstuff-001-spec.md).
+>
+> **Status boundary:** These are target-mainnet architecture decisions, not a claim of production activation or completed integration. The specification, feature-gated implementation slices and their pinned validation records must be read separately. Historical October results below and in the Technical Appendix remain evidence for their original engines and revisions, not acceptance evidence for the new mainnet path. Defensive pruning remains gated and unimplemented in the latest reported work.
+
+**Revision scope:** Consensus selection and protocol signing policy updated; QRC remains retired. The single-QCB monetary policy below is unchanged.
 
 Brand and terminology: Qattice is the ecosystem and Layer-1 network; QCB ($QCB) is the native asset; Chain Forge is the Rust engine. Historical code identifiers, account denominations, transaction types, and citations retain their original spellings.
 
@@ -20,7 +26,7 @@ Editorial integrity: This edition retains Qattice consensus, identity, scientifi
 
 ## Abstract
 
-Qattice is a sovereign Layer-1 blockchain built on Chain Forge, a from-scratch Rust blockchain engine. It proposes personhood-weighted Byzantine Fault Tolerant consensus and native identity, Charm Confinement, Intrinsic Charm, and Charmed Agent capabilities. Grand Challenge research coordinates machine contributions, verification receipts, and treasury-funded Pending uQCB redemption. Qattice does not define a native resource marketplace.
+Qattice is a sovereign Layer-1 blockchain built on Chain Forge, a from-scratch Rust blockchain engine. Its target mainnet uses PQ-HotStuff-2 Byzantine Fault Tolerant consensus, with validator voting influence bounded by verified personhood and authentication using FIPS 204 ML-DSA-65 only. Native identity, Charm Confinement, Intrinsic Charm, and Charmed Agent capabilities remain part of the architecture. Grand Challenge research coordinates machine contributions, verification receipts, and treasury-funded Pending uQCB redemption. Qattice does not define a native resource marketplace.
 
 Qattice does not derive its consensus, its state machine, or its core modules from any other chain's codebase. In this, it follows the lineage of Bitcoin and XRP Ledger — chains with their own original designs — while making a deliberate departure from both: consensus power tied to verified human identity rather than computational work or capital. The chain is self-contained by design: no bridges, no wrapped assets, no interoperability that could allow unverified actors into the system.
 
@@ -66,7 +72,9 @@ Together these explain the historical token name QuarkCharmBit (QCB); the blockc
 
 ---
 
-## What's Been Built: Phase 0 Status (October 2026)
+## Historical Validation: Phase 0 Status (October 2026)
+
+> This section preserves original devnet evidence. Tendermint is not the selected mainnet consensus. These results must be mapped to reused, adapted or replacement acceptance tests for PQ-HotStuff-2; they do not establish completion of the new engine's integrated acceptance or hardening.
 
 > **For full engineering detail, test results, and change-set logs, see the Technical Appendix.**
 
@@ -221,9 +229,15 @@ None of these are predictions. They are possibilities the verification primitive
 
 ### 3.1 The Mechanism
 
+**Selected mainnet engine: PQ-HotStuff-2.** Qattice starts a fresh mainnet from genesis with this engine; no Tendermint history or balance migration is required for a disposable development network. [PQ-HOTSTUFF-001](docs/pq-hotstuff-001-spec.md) specifies the protocol model, canonical signing, quorum and timeout certificates, two-chain commit rule, pacemaker, signing persistence and acceptance gates. The legacy `HotStuffEngine` is not this engine.
+
+The safety model assumes Byzantine voting power strictly below one third of total power; quorum power is `floor(2T/3) + 1`. Liveness relies on partial synchrony and the protocol's leader and recovery conditions. Personhood eligibility and voting-power bounds are supplied by Qattice's identity/validator layer, not inferred from a signature alone. Dynamic validator-set transitions remain disabled until their protocol safety obligations are resolved.
+
+**Development baseline:** the Tendermint devnet uses ML-DSA-65; it does not define mainnet consensus. Chain Forge may retain independently selectable engines for other chains. Qattice's mainnet selection neither removes those engines nor authorizes changes to historical fixtures.
+
 Validator voting power is weighted by verified personhood, not stake. Each verified human can control a bounded amount of validator influence regardless of how much QCB they hold. This directly ties consensus security to the same identity primitive that governs Grand Challenge reward claims and governance votes.
 
-> **Implementation status:** Tendermint-style BFT confirmed operational on a 4-node devnet. HotStuff-style and XRPL-inspired FBA variants also implemented and tested — all three share the same pluggable ConsensusEngine interface. Partition tolerance, liveness slashing, equivocation detection, and adversarial libp2p gossip tests all confirmed on the live devnet. Personhood-weighting overlay is the next Phase 1 milestone.
+> **Validation scope:** October Tendermint, legacy HotStuff and FBA results are historical baseline evidence. PQ-HotStuff-2 has separately developed and tested feature-gated components, but their targeted passes do not establish integrated mainnet readiness. Existing identity, execution, validator and economic behavior must be revalidated through the selected engine.
 
 ### 3.2 Why Not Proof of Work or Plain Proof of Stake
 
@@ -236,6 +250,22 @@ $QCB is the token staked to participate in consensus. Validators bond whole QCB 
 The security of personhood-weighted BFT is bounded by the sybil resistance of the identity layer. If the identity layer can be gamed at scale, an attacker who controls many fraudulent identities can accumulate disproportionate validator power through the same mechanism intended to prevent that outcome.
 
 ---
+
+### 3.4 Checkpoint Recovery and Defensive Pruning — Target Architecture
+
+Payload-free headers preserve signed block identity through the payload hash; headers and their ML-DSA certificates are not fixed-size 72-byte records. The 72-byte structure is a checkpoint reference `(height, block_id, state_root)`. Its acceptance also depends on reference rules, execution-root checks and proof of finality; freshness rule R6 alone does not authenticate a snapshot.
+
+The recovery direction retains genesis as the trust root. Fresh nodes verify from genesis; returning-node anchors must derive from the node's verified history under the reviewed local-storage trust rules. Segmented verification bounds memory and permits resumable work; it does not make fresh-node verification independent of chain length. `AuditFirst` — Windows-confirmed 2026-11-11 (T1–T22, commit `3eb572e`) — enforces that signing cannot resume before genesis-rooted audit and executor reconciliation succeed; signing floors and duplicate-execution prevention survive crash/restart with `FsStorage`.
+
+**Defensive Pruning Watermark (implemented, feature-gated `pq-anchored-evidence`, Windows-confirmed 2026-11-11):** The durable pruning watermark and payload-deletion path are implemented in `BlockStore` and gated behind the `pq-anchored-evidence` feature flag. Finality makes payloads candidates for pruning; the watermark records the highest height whose `blk-*` files have been safely deleted. The atomicity model writes the watermark file _before_ deletion so a crash mid-deletion is safe on restart. The anchor gate (`AuditFirst`) blocks pruning until genesis-rooted audit and executor reconciliation succeed.
+
+Anchored restart after pruning is implemented via `Engine::set_pruned_base(id, height, round)`: the watermark block id is registered as a known parent anchor point so the first block above the watermark can resolve its parent without requiring the full history to be in the in-memory tree. This was validated end-to-end in the `pq_pruning_devnet_live` test: a 4-node ML-DSA-65 devnet runs to height 70, node 2 is SIGKILL'd (watermark = 6, 68 blk-* files), three nodes advance 4 more blocks, and node 2 restarts and catches up past its last height within 120 s — confirmed Windows/MINGW64 2026-11-11 (27.13 s, n2 recovered to height 76, watermark 12). Full evidence in `docs/pq-hotstuff-2/phase12-defensive-pruning.md`.
+
+AN-3 anchored restart (the prerequisite `AuditFirst` gate) was Windows-confirmed at commit `3eb572e`: 22 acceptance tests (T1–T22) cover signing floor preservation, duplicate-execution prevention, and the anchor gate under crash/restart with `FsStorage`. Mutations M6/M7/M8 are killed. Full evidence in `docs/pq-hotstuff-2/phase11-an3-anchored-restart.md`.
+
+The _intended production order_ — finality, authenticated snapshot construction, durable publication, recovery-availability checks, watermark advancement, payload deletion — holds as the gating discipline. What is **not yet** activated: real-application acceptance (QAT-06), production activation, network distribution of pruning decisions, snapshot serving for catch-up. Retain genesis-verification headers for now; header pruning needs a separately reviewed bootstrap design.
+
+Payload pruning does not bound live application state, certificate/header growth or all storage costs. Snapshot production/retention budgets, recovery availability and supported-filesystem durability need explicit validation. Current interim-application recovery tests are not evidence of real Qattice application recovery. Mobile validation, 1,000 validators and sub-three-second finality remain feasibility/performance targets, not established properties.
 
 ## Section 4: Identity: Protocol-Level Proof-of-Personhood
 
@@ -507,23 +537,25 @@ Merchant acceptance, fiat conversion, and payment processing are deferred applic
 
 ## Section 10: Post-Quantum Security
 
-### 10.1 What's Actually at Risk
+### 10.1 Protocol-Wide ML-DSA-65 Policy
 
-**Shor's algorithm** breaks elliptic-curve signatures completely — a direct threat to validator signing and account security. **Grover's algorithm** only provides a quadratic speedup against hash functions — still considered adequate at 256-bit output under current NIST guidance.
+Qattice's target mainnet permits **FIPS 204 ML-DSA-65 only** for protocol signatures: consensus proposals, votes, timeouts and certificates; validator registration and proof of possession; user transactions; and signed DIS, agent and machine authorizations or receipts. User accounts use `signature_scheme = "pqc-native"` and `pqc_algorithm = "ml-dsa"`. Ed25519 is retired from this protocol; no fallback, downgrade or alternate classical account mode is permitted. Domain-specific canonical encodings, chain/replay binding and signing contexts remain mandatory.
 
-QCB's signature scheme is the actual exposure. Its hash functions are not.
+The consensus protocol profile in [PQ-HOTSTUFF-001 §3.1–3.2](docs/pq-hotstuff-001-spec.md) selects the permitted algorithm and rejects mismatches. Its identifiers and contexts are normative for the domains it specifies; this whitepaper does not invent transaction, DIS or receipt encodings for domains whose specifications differ.
 
-### 10.2 The Specific Risk to a Personhood-Weighted Chain
+### 10.2 Security Assumptions and Implementation Boundaries
 
-If validator signatures are forgeable, the personhood-weighting that bounds Sybil influence becomes irrelevant — an attacker who can forge signatures bypasses the identity layer entirely. Additionally, once an account signs a transaction, its public key is visible on-chain and is a standing target for a future CRQC. For a chain designed to still be functioning long after its founders are no longer involved, a multi-decade CRQC risk window is within the design horizon.
+ML-DSA-65 public keys are **1,952 bytes** and signatures **3,309 bytes**. Certificate size grows with the number of included signatures. Resource bounds require checked arithmetic, bounded decoding, memory/disk accounting and rate controls; a frame-size limit alone cannot guarantee DoS resistance or support an arbitrary validator population.
 
-### 10.3 Mitigation: Crypto-Agility as a Constitutional Guarantee
+A sufficiently capable quantum computer threatens classical discrete-logarithm signature systems. Selecting ML-DSA-65 addresses that signature assumption; it does not establish quantum immunity for the whole stack. Identity proofs, hashes, transport, key custody, randomness and dependencies require their own security review. Historical pre-standard Dilithium3 implementations and results must not be represented as FIPS 204 conformance evidence; mainnet requires the actual standardized interface and its validation.
 
-The fix is not simply "use a post-quantum signature algorithm" — algorithm choice alone doesn't survive the next cryptographic break. Section 7.3's interface/implementation split applies here too: what is constitutional is the guarantee that the signature scheme can be replaced without forking the chain, not any specific algorithm.
+The historical Groth16/BLS12-381 personhood prototype is not a post-quantum proof system. An ML-DSA signature on a credential does not make its underlying proof post-quantum. Any privacy-preserving personhood proof enabled on mainnet needs separate proof-system selection and review consistent with the post-quantum objective; that work is not approved by this signing-policy revision.
 
-> **Implementation status:** ML-DSA-65 (CRYSTALS-Dilithium3 / NIST FIPS 204) is already live as the validator signing scheme and the wallet signing scheme. The crypto-agility constitutional guarantee — ensuring the scheme can be replaced under governance — is captured in the whitepaper and roadmap but is not yet protocol-enforced. Pluggable signature scheme support in chain-forge-consensus is a Phase 1 item.
+### 10.3 Cryptographic Agility and Production Gates
 
-The size tradeoff is real and stated plainly: ML-DSA signatures are ~2.4KB against ECDSA's ~64 bytes. There is no PQC option that matches ECDSA's compactness — adopting post-quantum signatures means accepting this cost. Which specific algorithm Qattice adopts at launch versus in reserve, and how the size cost is absorbed, are addressed in Open Question 16.
+ML-DSA-65 is the selected launch signature scheme, not an open algorithm-selection question. Future cryptographic replacement remains an explicit, versioned governance and engineering process, with compatibility, replay protection and downgrade resistance specified before activation. This is not permission to accept Ed25519 or negotiate alternatives in the current profile.
+
+Production key custody, crash-safe signing and signing-state integrity/rollback protection require separate validation. A counter alone is not a complete defense against an attacker rewriting local state. Test keys and devnet counter backends do not establish production custody safety.
 
 ### 10.4 Post-Quantum Verification Services
 
@@ -553,16 +585,16 @@ Qattice's post-quantum stack — ML-DSA-65 validator signing, DIS authentication
 
 | Phase | Milestone | Status |
 |---|---|---|
-| Phase 0 | Chain Forge BFT devnet, PoCD pipeline, cross-machine escrow, adversarial security | ✅ Demonstrated on live devnet |
-| Phase 1 | Personhood-weighted BFT overlay, permissionless validator onboarding, cryptographic security hardening, identity hardening | 🔄 In progress |
+| Historical Phase 0 | Original BFT devnet, PoCD pipeline, cross-machine escrow, adversarial security | Historical passes retained; not PQ-HotStuff-2 acceptance |
+| Phase 1 / native-mainnet integration | PQ-HotStuff-2, personhood-bounded validator participation, ML-DSA-only accounts, execution/DIS/economic integration and hardening | In progress; acceptance gates remain |
 | Phase 2 | Identity pilot (real-world sybil test), Grand Challenge pool mode, community portal | ⬜ Pending Phase 1 |
-| Phase 3 | Merchant API, BME activation | 🔲 Pending Phase 2 identity pilot |
+| Phase 3 (historical proposal) | Merchant integration deferred; BME is not an active monetary mechanism | Re-scope separately; no burn activation implied |
 | Phase 4 | Charmed Agents at scale, 1M verified humans | 🔲 Pending Phase 3 |
 | Phase 5+ | Permissioned EVM, RWA issuance, PoP-preserving interoperability | 🔲 Identity layer must be proven at scale first |
 
-**Phase 0 is complete.** The engineering work described in the "What's Been Built" section above is confirmed on a live, adversarially-tested, cross-machine devnet. Full detail is in the Technical Appendix.
+**Original Phase 0 closeout is historical.** Applicable requirements must be reused, adapted or replaced for PQ-HotStuff-2, followed by integrated acceptance and applicable Phase 0.5 hardening. Snapshot recovery and pruning introduce additional crash, availability and dependency-retention requirements; no new milestone is closed by this revision.
 
-**Phase 1 priorities:** personhood-weighting overlay on TendermintEngine; permissionless validator onboarding via QCB stake bond; cryptographic survivability and migration architecture (QCB-CS-001); DIS Phase B-Privacy (unlinkable authorization research); post-quantum multisig and key lifecycle (QCB-KR-001); Charm Confinement module.
+**Current priorities:** PQ-HotStuff-2 mainnet-path integration; personhood-bounded validator onboarding via QCB stake bond; ML-DSA-65-only user accounts and protocol signing; execution, DIS, rotation/revocation/recovery and economic integration; authenticated snapshot recovery and defensive-pruning validation; cryptographic survivability (QCB-CS-001), DIS privacy research, post-quantum multisig/key lifecycle (QCB-KR-001), and Charm Confinement. Runtime activation, merges and production deployment remain separate decisions.
 
 ---
 
@@ -571,7 +603,7 @@ Qattice's post-quantum stack — ML-DSA-65 validator signing, DIS authentication
 **Calibration questions:**
 
 1. Final identity layer design and pilot targets (sybil rate < 3%, cost < $5/human — both provisional)
-2. Final BFT variant selection for QCB
+2. PQ-HotStuff-2 integrated acceptance, security review and activation gates — engine selection is resolved
 3. Base exemption calibration
 4. Reserve strategy
 5. Jurisdiction and legal entity structure
@@ -588,7 +620,7 @@ Qattice's post-quantum stack — ML-DSA-65 validator signing, DIS authentication
 13. Validator liveness under partial participation — what happens to finality if a large fraction of verified humans go offline
 14. Minimum legitimate participation rate required for governance Sybil-resistance
 15. Absolute minimum voter count for sensitive parameter changes
-16. Post-quantum migration trigger and algorithm choice
+16. Future cryptographic-survivability triggers and versioned replacement process — launch signing is fixed to FIPS 204 ML-DSA-65
 17. Turnout-suppression resistance — mechanism to close the gap against active campaigns to depress legitimate participation
 18–22. **[Archived — merchant settlement layer. Deferred to future phase; no active urgency.]** These questions are archived for reference if merchant integration is introduced as a future-phase extension.
 23. Permissioned EVM design (SponsorID enforcement, SponsorID revocation handling, gas denomination, opcode set)
@@ -629,6 +661,8 @@ Its security comes not from capital or hardware, but from verified humans. Its i
 ---
 
 # TECHNICAL APPENDIX
+
+> **Historical implementation record:** The entries below preserve their original engine names, cryptographic backends, test counts and milestones. They do not authorize Tendermint or Ed25519 on Qattice mainnet, revive QRC, or establish acceptance of the PQ-HotStuff-2 integration. References to legacy Ed25519 tests, three-phase HotStuff, resource markets, BME or prototype proofs must be read in that historical scope. The current architecture and monetary policy above take precedence.
 ## Chain Forge / Qattice — Engineering Roadmap (October 2026)
 
 *How to use this appendix: This is the full engineering reference for what is done, what is next, and what is on the horizon. Cross-reference the whitepaper body above for economic design rationale. This section is the engineering view.*
