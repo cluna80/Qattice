@@ -16,6 +16,7 @@ use chain_forge_consensus::pq_hotstuff::limits::PqLimits;
 use chain_forge_consensus::pq_hotstuff::netmsg::{self as net, MessageLimits, NetLimitError, NetMsg, SYNC_BLOCKS_CEILING};
 use chain_forge_consensus::pq_hotstuff::pacemaker::{Pacemaker, PacemakerConfig, PacemakerError};
 use chain_forge_consensus::pq_hotstuff::sync::{check_response, SyncClient, SyncError, SyncRequest, SyncResponse};
+use chain_forge_consensus::pq_hotstuff::rules::{commits_parent, safe_to_vote, BlockHeader, VoterState};
 use chain_forge_consensus::pq_hotstuff::safety::*;
 use chain_forge_consensus::pq_hotstuff::types::{EpochSet, ValidatorEntry};
 use chain_forge_consensus::pq_hotstuff::wire::*;
@@ -1800,6 +1801,50 @@ fn sim_qat06_s8_conflicting_commit_is_detected_not_silently_accepted() {
         matches!(result, Err(EngineError::ConflictingCommit)),
         "engine must raise ConflictingCommit when fed a fork chain at branch B: got {result:?}"
     );
+}
+
+// ── Mutation-gap closing unit tests (M-A2, M-B2) ───────────────────────────────────────────────
+// M-A2 survivor: `commits_parent` body replaced with `true`.
+// A unit test on the boundary values kills this mutant directly: same-round and gap-of-two must
+// both return false; only consecutive rounds (gap=1) must return true.
+#[test]
+fn mut_a2_commits_parent_exact_boundary_values() {
+    for r in [0u64, 1, 2, 7, 999, u64::MAX - 2] {
+        assert!(!commits_parent(r, r),       "commits_parent({r},{r}) must be false (same round)");
+        assert!(!commits_parent(r, r.wrapping_add(2)), "commits_parent({r},{}) must be false (gap 2)", r.wrapping_add(2));
+        if r < u64::MAX {
+            assert!(commits_parent(r, r + 1), "commits_parent({r},{}) must be true (gap 1)", r + 1);
+        }
+    }
+    // overflow: checked_add(1) would wrap → false, never commits
+    assert!(!commits_parent(u64::MAX, 0), "commits_parent(MAX,0) must be false (overflow)");
+}
+
+// M-B2 survivor: `b.round <= b.qc_round` weakened to `b.round < b.qc_round`.
+// The mutation lets through b.round == b.qc_round when a valid TC is present (the later guards
+// all pass: tc.round==b.round-1 and qc_round>=tc.max_high_qc_round).  The original rule must
+// reject it because b.round == b.qc_round means the block's round is not above its parent's
+// certified round — a structurally invalid block.
+#[test]
+fn mut_b2_safe_to_vote_round_equals_qc_round_is_refused() {
+    use chain_forge_consensus::pq_hotstuff::rules::TcInfo;
+    let st = VoterState { hvr: 0, hqr: 0 };
+
+    // b.round == b.qc_round with a valid TC: the mutation passes this but the rule must refuse it
+    let h = BlockHeader { round: 5, qc_round: 5, tc: Some(TcInfo { round: 4, max_high_qc_round: 0 }) };
+    assert!(safe_to_vote(&st, &h).is_err(), "round == qc_round must be refused even with a valid TC");
+
+    // b.round == b.qc_round without TC: also refused (hits GapWithoutTc under the mutation too)
+    let h = BlockHeader { round: 5, qc_round: 5, tc: None };
+    assert!(safe_to_vote(&st, &h).is_err(), "round == qc_round must be refused");
+
+    // b.round == b.qc_round + 1: accepted (normal consecutive case)
+    let h = BlockHeader { round: 6, qc_round: 5, tc: None };
+    assert!(safe_to_vote(&st, &h).is_ok(), "round == qc_round+1 must be accepted");
+
+    // b.round < b.qc_round: also refused
+    let h = BlockHeader { round: 4, qc_round: 5, tc: None };
+    assert!(safe_to_vote(&st, &h).is_err(), "round < qc_round must be refused");
 }
 
 /// QAT-06-S9: Withhold + restarts — combines the withholding adversary with honest-node crash/restart.
