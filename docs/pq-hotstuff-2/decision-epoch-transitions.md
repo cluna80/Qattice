@@ -1,10 +1,22 @@
 # Decision Request: Epoch Transitions (G8-E, G8-R, G8-K)
 
-**Date:** 2026-11-11 (revised 2026-11-11 — owner review round 2)  
+**Date:** 2026-11-11 (revised 2026-11-11 — owner review round 3)  
 **Gate:** QAT-07 / PQHS-P1  
-**Status:** Pending owner decision — no implementation authorized.  
+**Status:** Direction approved; implementation blocked on PO-4 model check.  
 **Tracks:** Track B (§8 reconfiguration)  
 **Spec refs:** §8, R8-2 through R8-5  
+
+### Owner decisions recorded 2026-11-11 (round 3)
+
+| Item | Decision |
+|------|----------|
+| Two-chain commit evidence and SSI eligibility | **Direction approved.** Exact activation predicate, outgoing-set cutoff and restart handling must be specified (see §Activation predicate and §Outgoing-set cutoff below) before Track B begins. |
+| Q3 — pruned-node set recovery | **Option (a) selected** (checkpoint carries `S_{e+1}` bytes). Checkpoint bytes alone are insufficient; the checkpoint must bind those bytes to the committed block hash of `B_ec` so a cold-start node can verify the set against the authenticated handoff. |
+| Explicit epoch-boundary block type | **Approved.** `B_child` carries an explicit `EpochBoundary` type tag. This simplifies sync verification and the activation rule. |
+| SSI retention bound (two SSIs back) | **Deferred.** The two-chain commit window does not bound what lagging nodes, pruned restarts, or historical-evidence verification may need. Retention policy is specified as part of the SSI store design when Track B implements it. |
+| PO-4 scope | Run with disjoint validator sets, delayed handoff evidence, competing outgoing-set continuations, and restarts on both sides of the epoch boundary. Report search bounds. Dynamic membership remains disabled until PO-4 returns. |
+
+No Track B implementation begins until PO-4 completes.
 
 ---
 
@@ -16,6 +28,104 @@ Dynamic membership is disabled. `EpochSet::new()` refuses any epoch other than 0
 Every `Qc` and `Tc` already carries `valset_hash: [u8; 32]` (`certs.rs:110,121,133`).
 `verify_qc`/`verify_tc` reject any certificate whose `valset_hash` does not match the
 engine's current commitment (`certs.rs:308`). This is the existing hook.
+
+---
+
+## Circular-dependency resolution (owner decision round 3)
+
+**The apparent circularity:** the handoff trace shows `B_ec` becomes final when the node
+processes `QC_B_child` carried inside `B_{e+1,1}`. It also says `S_{e+1}` can sign only
+after `B_ec` is final. If `S_{e+1}` must sign `B_{e+1,1}` and `B_{e+1,1}` must arrive
+to deliver `QC_B_child` — who signs `B_{e+1,1}`?
+
+**Resolution: `QC_B_child` is independently deliverable.** `QC_B_child` is an outgoing-set
+(`S_e`) certificate. It can be received, verified against `S_e`, and stored before any
+`S_{e+1}` member signs anything. No `S_{e+1}` signature is required to verify it.
+
+The correct activation sequence is:
+
+1. Any node receives `QC_B_child` (a supermajority certificate from `S_e` over `B_child`).
+2. The node verifies `QC_B_child` against `S_e` (the currently active set): checks
+   `valset_hash`, signature count, and ML-DSA-65 signatures.
+3. The node observes that `B_child` is at round `r_ec+1` and `B_ec` is at round `r_ec`
+   (consecutive stored rounds). Two-chain rule: `commit_through(B_ec)` fires.
+4. The node loads `S_{e+1}` from `B_ec.payload`, verifies `sha3(bytes) == expected_set_hash`,
+   and replaces `self.valset_hash` with `S_{e+1}.validator_set_hash()`.
+5. `S_{e+1}` members may now sign. The first `S_{e+1}` proposer constructs `B_{e+1,1}`
+   with `B_{e+1,1}.qc = QC_B_child` — embedding the already-verified outgoing-set QC as
+   the cross-epoch handoff evidence.
+6. Any node receiving `B_{e+1,1}` can verify the embedded `QC_B_child` independently
+   (against `S_e` via the SSI map) without requiring a second `S_{e+1}` signature on it.
+
+**Key property:** when `B_{e+1,1}` arrives, the handoff can already be verified on its
+own. The first new-epoch proposal carries evidence of a transition that any honest node
+holding `QC_B_child` and the block ancestry has already committed independently.
+
+This is the design PO-4 must validate, specifically:
+
+- That no competing `S_e` continuation can be certified once a supermajority of `S_e` has
+  signed `QC_B_child` (covered by intra-epoch safety of S_e extended to the boundary).
+- That a node restarted between steps 3 and 5 (after `B_ec` is committed, before
+  `B_{e+1,1}` arrives) holds `QC_B_child` in its high-QC store, resumes at round 1 of
+  epoch e+1, and accepts `B_{e+1,1}` without re-verifying `QC_B_child` against S_e's
+  signatures a second time (they are stored with the QC record).
+
+---
+
+## Activation predicate (exact)
+
+A node activates `S_{e+1}` when **all** of the following hold:
+
+1. The node has committed `B_ec` via `commit_through(B_ec.block_id)`.
+2. `B_ec.payload` contains a serialized `EpochSet` whose hash matches the
+   `expected_set_hash` field in `B_ec.payload_header`.
+3. `sha3(S_{e+1}_bytes) == expected_set_hash`.
+4. `S_{e+1}` passes `EpochSet::new()` validation (all keys 1952 bytes, ML-DSA-65).
+
+After these four checks pass, `self.valset_hash` ← `S_{e+1}.validator_set_hash()`. All
+subsequent QCs and TCs must carry this hash. The activation is **not deferred** — it
+takes effect before any block at height `B_ec.height + 2` is proposed or accepted.
+
+**Q1 (payload header format):** `expected_set_hash` placement in the epoch-change block's
+payload is an implementation detail for Track B. It must be part of the **authenticated**
+block content (i.e., included in the signed header), not a separate un-signed field.
+
+---
+
+## Outgoing-set cutoff
+
+`S_e` may certify blocks at rounds ≤ `r_ec + 1` within epoch e. Its cutoff is:
+
+- `S_e` cannot certify any block at round > `r_ec + 1` in epoch e. Any such certificate
+  would require a competing extension of `B_child` and would violate intra-epoch safety
+  (two distinct QCs at consecutive rounds is impossible for honest supermajorities).
+- After `B_ec` is committed, no honest `S_e` member will form a QC extending `B_ec`'s
+  parent chain in a direction that conflicts with `B_ec` — the safety proof for the
+  intra-epoch two-chain rule applies up to and including `r_ec + 1`.
+- **PO-4 must verify** that this cutoff holds even when some `S_{e+1}` members overlap
+  with `S_e` (non-disjoint sets) and that no coalition straddling the boundary can
+  construct two valid QCs at the same height under different `valset_hash` values.
+
+---
+
+## Restarted-node handling of late QCs and TCs
+
+A node restarted in epoch e+1 with committed tip `B_ec` (height h) and
+`high_qc = QC_B_child` (epoch e, round r_ec+1):
+
+- **Resume round:** round 1 of epoch e+1 (not r_ec+2). The pacemaker must detect that
+  `high_qc.epoch < current_epoch` and reset the round to 1.
+- **Late epoch-e TCs:** a TC with `valset_hash = S_e.validator_set_hash()` and
+  `epoch = e` at round ≤ r_ec+1 is verified against S_e via the SSI map. It must not
+  advance the pacemaker past round 1 of epoch e+1 — a late TC cannot "fast-forward" into
+  the new epoch.
+- **SSI map on restart:** the node loads the SSI map from durable storage. If the SSI
+  entry for `S_e` is present, late epoch-e TCs are verifiable. If it has been evicted,
+  late TCs from epoch e are discarded (safe — the transition has already committed).
+
+**Test needed (G8-E new):** `restart_at_epoch_boundary_resumes_at_round_1_of_new_epoch`
+— a node restarted between steps 3 and 5 (after B_ec committed, before B_{e+1,1}) must
+resume at round 1 of epoch e+1 and accept B_{e+1,1} when it arrives.
 
 ---
 
@@ -87,13 +197,20 @@ it was formed. Because the epoch transition takes effect after `B_ec` is committ
 height `h+1` and `h+2`), any TC at rounds ≤ `r_ec+1` in epoch `e` is verified against
 `S_e`. TCs at round 1 of epoch `e+1` are verified against `S_{e+1}`.
 
-**Retention for cold-start authentication after pruning:** a cold-start node that has
-pruned below `B_ec.height` cannot recover `S_{e+1}` from the block store. It requires
-either: (a) the checkpoint record carries `S_{e+1}` bytes (not just the hash), or (b) a
-separate epoch-set store persists `(epoch, valset_hash) → EpochSet bytes` and survives
-pruning. Option (a) is simpler; option (b) decouples set storage from the checkpoint
-format. This is the unresolved Q3 from the previous draft — the owner must choose before
-the checkpoint type is extended.
+**Retention for cold-start authentication after pruning (Q3 — decision recorded):**
+Option (a) selected: the checkpoint record carries `S_{e+1}` bytes directly. However,
+checkpoint bytes alone do not authenticate the set — the checkpoint must also carry the
+committed block hash of `B_ec` so a cold-start node can verify:
+
+```
+sha3(checkpoint.epoch_set_bytes) == checkpoint.expected_set_hash
+                                 == B_ec.payload_header.expected_set_hash
+checkpoint.B_ec_block_hash       == committed B_ec hash (from the durable commit log)
+```
+
+Without binding the set bytes to the authenticated `B_ec` hash, a corrupted checkpoint
+could substitute a different set without detection. This is a Track B implementation
+requirement, not an open decision.
 
 ---
 
@@ -300,9 +417,19 @@ accepts it because `activation_height[k-1] ≤ h_k < activation_height[k]`.
 **What must be tracked in the engine:** a map `valset_hash → (EpochSet, height_range)` where
 `height_range = [activation_height[k], activation_height[k+1] - 1]`. On certificate
 verification, the engine checks both that the set is known and that the certified height is
-within the set's range. Retention: an SSI entry may be evicted once no QC or TC from its
-height range is pending finality (bounded by the two-chain window: at most two rounds of
-certificates can be pending at any time, so at most two SSIs back must be retained).
+within the set's range.
+
+**Retention policy (deferred — owner round 3):** the two-chain commit window bounds
+in-flight certificates for a caught-up node, but does not bound what lagging nodes,
+pruned restarts, or historical-evidence verification may need. The retention policy
+is a Track B design task. It must specify:
+
+- Minimum retention for a node that has not yet processed `B_child`'s commit
+- Retention for sync/recovery across a pruning boundary
+- Eviction policy once all evidence from an SSI's height range is finalized
+
+The earlier bound of "two SSIs back" is **not approved** and must not be used as a basis
+for implementation or the PO-4 search scope.
 
 ---
 
@@ -341,15 +468,21 @@ certificates can be pending at any time, so at most two SSIs back must be retain
 
 ---
 
-## Decisions needed
+## Decision status (updated 2026-11-11, round 3)
 
-1. **Accept the exact two-chain commit evidence stated above** as the normative definition
-   of "commits `B_ec`," or revise.
-2. **Accept the SSI activation-boundary eligibility rule** (`C.valset_hash == SSI[k]` for
-   the most recent active set at `h_block`), or revise.
-3. **Accept the retention bound** (at most two SSIs back; eviction after two-chain window
-   closes), or specify a different bound.
-4. **Accept R8-4 and R8-5 as Phase 1** once the SSI design is accepted, or defer.
-5. **Keep PO-4 open** (no implementation begins until this decision changes).
+| # | Decision | Status |
+|---|----------|--------|
+| 1 | Two-chain commit evidence as the normative definition of "commits B_ec" | **Direction approved** — exact activation predicate specified above; PO-4 must validate |
+| 2 | SSI activation-boundary eligibility rule (`C.valset_hash == SSI[k]` for most recent active set at `h_block`) | **Direction approved** — PO-4 must validate with disjoint sets and competing continuations |
+| 3 | SSI retention bound | **Deferred** — two-chain window argument insufficient for lagging/pruned nodes; retention policy is a Track B design task |
+| 4 | R8-4 (revocation) and R8-5 (key rotation) as Phase 1 | **Deferred** — pending SSI store design and PO-4 return |
+| 5 | Q3: pruned-node set recovery | **Option (a) selected** — checkpoint carries S_{e+1} bytes bound to B_ec committed block hash |
+| 6 | Explicit epoch-boundary block type for B_child | **Approved** |
+| 7 | PO-4 scope | Disjoint sets, delayed handoff evidence, competing outgoing-set continuations, restarts on both sides of boundary; report search bounds |
 
-No implementation begins until decisions 1–4 are recorded here and PO-4 is resolved.
+**Remaining blockers for Track B:**
+- PO-4 model check with the activation predicate and outgoing-set cutoff specified in this document
+- SSI retention policy design (deferred above)
+- R8-4/R8-5 approval after SSI store design
+
+Dynamic membership remains disabled until PO-4 returns.

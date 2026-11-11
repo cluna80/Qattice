@@ -1,10 +1,20 @@
 # Decision Request: §7.1 Trusted Monotonic Counter (G7.1-P, G7.1.1-P)
 
-**Date:** 2026-11-11 (revised 2026-11-11 — owner review round 2)  
+**Date:** 2026-11-11 (revised 2026-11-11 — owner review round 3)  
 **Gate:** QAT-07 / PQHS-P1  
-**Status:** Pending owner decision — no implementation authorized.  
+**Status:** Partial decisions recorded — see table below; production backend not selected.  
 **Track:** Track C (§7.1 counter backend)  
 **Spec refs:** §7.1, R7.1-1 through R7.1-5; §7.1.1, R7.1.1-1  
+
+### Owner decisions recorded 2026-11-11 (round 3)
+
+| Item | Decision |
+|------|----------|
+| §7.1.1 — digest-bound counter commits | **Approved.** Two Windows-confirmed rejection cases (`equal_counter_with_wrong_digest_is_a_fork_and_fails_closed`, `one_step_ahead_with_wrong_prev_digest_is_a_different_records_successor_and_fails_closed`) recorded at `339f262`, BossKing, 2/2 in 0.17 s. |
+| Backend D — software file counter | **Approved for devnet keys only.** Atomic rename on POSIX/NTFS satisfies the CAS criterion within the devnet scope (process restart, OS crash). Atomic rename alone does not establish the full counter contract. Must be gated `devnet = true` in config and must refuse production keys. Requires crash-durability test (`production_counter_crash_between_file_write_and_advance_recovers_correctly`) and writer-fencing test (`production_counter_concurrent_open_only_one_writer_advances`) before Track C merges. |
+| Backend A — TPM 2.0 | **Gap work authorized** (no backend selection). Design and verify the combined `TPM2_NV_Increment` + `TPM2_NV_Write` policy session for atomic `(value, digest)` CAS. Measure per-advance latency. |
+| Backend C — remote counter service | **Gap work authorized** (no backend selection). Liveness analysis required: validator behavior when service is unreachable must be fail-closed (stop signing). Specify SLA and partition behavior. |
+| Production backend selection | **Deferred.** No production backend selected until gap work for A and C is complete and PO-4 returns. |
 
 ---
 
@@ -233,17 +243,16 @@ cases and that the failure modes are distinct. **§7.1.1 is ready for owner appr
 
 ---
 
-## Decisions needed
+## Decision status (updated 2026-11-11, round 3)
 
-1. **Approve one or more backends for concrete evaluation** — choose from A (TPM), B
-   (HSM), C (remote service), D (devnet file counter), or propose another.
-2. **For each chosen backend:** confirm whether the atomic CAS of `(value, digest)` can be
-   satisfied, and authorize gap work to demonstrate it.
-3. **Approve §7.1 as Phase 1 required interface** (Track C begins) or designate it as
-   Phase 2 / devnet-optional.
-4. If approved: authorize the three production-evidence tests (Scenarios 1–3) and the
-   backend adapter implementation.
-5. **§7.1.1:** once the two dedicated tests (Case A, Case B) are written and pass, approve
-   §7.1.1 for Phase 1 — or defer independently of §7.1.
+| # | Decision | Status |
+|---|----------|--------|
+| 1 | §7.1.1 approval | **Approved** — Windows-confirmed at `339f262` |
+| 2 | Backend D for devnet | **Approved** — devnet keys only; crash-durability and writer-fencing tests required before Track C merges |
+| 3 | Backend A gap work | **Authorized** — combined policy session design; no backend selection yet |
+| 4 | Backend C gap work | **Authorized** — liveness analysis for partition behavior; no backend selection yet |
+| 5 | §7.1 as Phase 1 required interface | **Open** — Track C may begin for devnet scope (Backend D); production scope blocked on gap work and PO-4 |
+| 6 | Production backend selection | **Deferred** |
+| 7 | Scenarios 1–3 production-evidence tests | **Authorized for Backend D devnet scope** — the crash and writer-fencing tests are required before Track C merges |
 
-No implementation begins until this decision is recorded here.
+**Remaining for full Track C approval:** Backend A or C gap work complete; production backend selected; PO-4 returns.
