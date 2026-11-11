@@ -1,9 +1,33 @@
 # PQ-HotStuff-2 — Defensive Pruning Watermark (gated prototype)
 
-**Status: IN PROGRESS. Feature `pq-anchored-evidence`, OFF by default.
-No network wiring. No real-application acceptance. QAT-06 open.**
+**Status: Windows-confirmed `f49aa06`. Feature `pq-anchored-evidence`, OFF by default.
+No network wiring. No real-application acceptance. QAT-06 open. PR unmerged.**
 
 Branch: `feat/pq-hotstuff-2-anchored-evidence-an3`
+
+### Windows evidence (P1–P8)
+
+```
+krizz@BossKing MINGW64 /c/Dev/an3-m3-recheck (feat/pq-hotstuff-2-anchored-evidence-an3)
+$ git pull origin feat/pq-hotstuff-2-anchored-evidence-an3 && cargo test -p chain-forge-consensus \
+  --features pq-hotstuff-fips204,pq-anchored-evidence --test pq_hotstuff_engine_fips204 \
+  -- watermark_advances stale_watermark prune_payloads_removes re_running load_succeeds \
+     damaged_watermark driver_prune --nocapture
+
+running 8 tests
+test stale_watermark_is_refused ... ok
+test damaged_watermark_round_trip_clean ... ok
+test watermark_advances_monotonically_and_is_durable ... ok
+test load_succeeds_with_absent_payloads_below_watermark ... ok
+test prune_payloads_removes_blk_files_below_watermark ... ok
+test re_running_prune_finishes_partial_deletion ... ok
+test driver_prune_below_refused_while_anchor_pending ... ok
+test driver_prune_below_succeeds_after_gate_clears ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 235 filtered out; finished in 34.93s
+```
+
+Commit `f49aa06`, 2026-11-11, krizz@BossKing MINGW64. 8 passed / 34.93s.
 
 ---
 
