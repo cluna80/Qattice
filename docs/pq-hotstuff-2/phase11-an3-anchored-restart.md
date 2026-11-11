@@ -138,6 +138,10 @@ All 11 tests run individually — each reported `test result: ok. 1 passed; 0 fa
 **Windows result — driver wiring tests** (commit `0716a72`, 2026-11-11, MINGW64 krizz@BossKing, release mode, real FIPS 204 ML-DSA-65):
 All 5 tests run individually — each reported `test result: ok. 1 passed; 0 failed`. Cargo exit 0.
 
+**Linux sandbox result — signing gate + audit-watermark fix** (this commit, 2026-11-11, debug mode, `TestVerifier`):
+`test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 218 filtered out; finished in 284.01s`
+(All prior T1–T16 plus new T17–T19; no regressions.)
+
 | # | Test name | What it tests |
 |---|---|---|
 | T1 | `off_mode_is_the_default_and_no_ring_or_verification_runs` | `AnchorMode::default() == Off`; mode enum is wired |
@@ -156,12 +160,17 @@ All 5 tests run individually — each reported `test result: ok. 1 passed; 0 fai
 | T14 | `advance_anchor_drives_audit_to_completion_or_reconcile` | Full audit completes; outcome is `Ready` or `ReconcileFailed` (not `AuditFailed`) |
 | T15 | `not_pending_when_no_anchor_is_installed` | No anchor in config → `anchor_pending` false; `advance_anchor` returns `NotPending` |
 | T16 | `failed_audit_returns_audit_failed_and_anchor_pending_stays_true` | Tampered record → `AuditFailed`; gate not cleared |
+| T17 | `audit_watermark_bypass_is_closed_full_reverification_required` | `audited_height == anchor.height` → first `advance` call returns `NeedHeaders` (bypass closed) |
+| T18 | `tick_with_anchor_pending_produces_no_outbound` | `tick` while audit pending produces zero outbound messages (no propose, no timeout) |
+| T19 | `on_bytes_with_consensus_msg_while_anchor_pending_produces_no_signing_outbound` | Injecting real peer consensus bytes while audit pending produces no broadcast (signing) outbound |
 
-**Implementation note (T8 / `Audit::new_from` invariant):** `an2_record` builds a record with
-`audited_height = anchor.height` (the building node has already verified the full chain). This sets
-`checked_anchor = true` immediately in `Audit::new_from`, which is the correct behaviour for a
-normal restart from a fully-audited record. The tamper test must reset `audited_height = 0` before
-publishing so that `checked_anchor = false` and the ancestor/final-height check actually runs.
+**Audit-watermark bypass (closed):** `Audit::new_from` set `checked_anchor = true` when
+`audited_height == anchor.height`, which made `advance` return `Ready` after a single header window
+even for a fully-persisted record — the whole genesis-to-anchor re-verification was skipped. This is
+the wrong behaviour for `AuditFirst` mode. `AnchorRestart::open` now always uses `Audit::new`
+(ignoring the persisted watermark), so a full genesis-rooted re-verification runs on every startup.
+T17 (`audit_watermark_bypass_is_closed_full_reverification_required`) confirms the bypass is closed:
+feeding one header to a fully-persisted record must return `NeedHeaders`, not `Ready`.
 
 ---
 
@@ -222,6 +231,15 @@ cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204,pq-
 cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204,pq-anchored-evidence --test pq_hotstuff_engine_fips204 -- advance_anchor_drives_audit
 cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204,pq-anchored-evidence --test pq_hotstuff_engine_fips204 -- not_pending_when_no_anchor
 cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204,pq-anchored-evidence --test pq_hotstuff_engine_fips204 -- failed_audit_returns_audit_failed
+```
+
+Signing gate + audit-watermark fix (T17–T19):
+
+```bash
+git pull origin feat/pq-hotstuff-2-anchored-evidence-an3
+cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204,pq-anchored-evidence --test pq_hotstuff_engine_fips204 -- audit_watermark_bypass_is_closed
+cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204,pq-anchored-evidence --test pq_hotstuff_engine_fips204 -- tick_with_anchor_pending
+cargo test --release -p chain-forge-consensus --features pq-hotstuff-fips204,pq-anchored-evidence --test pq_hotstuff_engine_fips204 -- on_bytes_with_consensus_msg_while_anchor_pending
 ```
 
 Each command should report `test result: ok. 1 passed; 0 failed`.

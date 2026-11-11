@@ -239,3 +239,35 @@ fn feature_off_path_is_untouched_engine_counts_unchanged() {
     let mode: AnchorMode = Default::default();
     assert_eq!(mode, AnchorMode::Off);
 }
+
+// T17: the audit-watermark bypass is closed — when audited_height == anchor.height (the normal fully-persisted
+// case), open() must NOT return Ready after feeding a single header; it must run the full genesis-to-anchor audit.
+#[test]
+fn audit_watermark_bypass_is_closed_full_reverification_required() {
+    let (rec, hs, _, _) = an3_setup();
+    // an3_setup produces rec.audited_height == rec.anchor.height (fully persisted on the building node).
+    // The old Audit::new_from code set checked_anchor = true immediately, completing after one header.
+    // With Audit::new, checked_anchor starts false and the full audit must run.
+    assert_eq!(rec.audited_height, rec.anchor.height, "an3_setup must produce a fully-persisted record");
+    assert!(rec.anchor.height > 1, "chain must have height > 1 for the test to be meaningful");
+
+    let cc = cc3(4, 8);
+    let set = set_n(4);
+    let p = cparams3(&set, &cc);
+    let mut ring = AnchorRing::open(MemTreeFs::new(tfaults()), alim(), abind()).unwrap();
+    ring.publish(rec.clone()).unwrap();
+
+    // Open with the fully-persisted record. The old bypass: advance with 1 header → Ready immediately.
+    // The new behaviour: advance with 1 header → NeedHeaders (audit hasn't reached anchor.height yet).
+    let mut restart = AnchorRestart::open(&ring, &abind(), &p, &TestVerifier, &alim(), 6).unwrap();
+    assert_eq!(restart.next_height(), 1, "audit must start at height 1 regardless of audited_height");
+    let one_header_outcome = restart.advance(&p, &TestVerifier, &hs[..1]);
+    assert!(
+        matches!(one_header_outcome, RestartOutcome::NeedHeaders { .. }),
+        "one header must NOT complete the audit when anchor.height > 1; got {one_header_outcome:?}"
+    );
+
+    // Full drive to completion must still succeed.
+    let final_outcome = drive_restart(&mut restart, &hs, 9);
+    assert!(matches!(final_outcome, RestartOutcome::Ready { .. }), "full audit must complete: {final_outcome:?}");
+}

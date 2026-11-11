@@ -119,6 +119,65 @@ fn not_pending_when_no_anchor_is_installed() {
         "no anchor: advance_anchor must return NotPending immediately; got {outcome:?}");
 }
 
+// T17 is in pq_anchor_restart_suite.rs (component level, audit-watermark bypass test).
+
+// T18: tick with anchor pending must produce NO outbound messages (no propose, no timeout, no resend).
+#[test]
+fn tick_with_anchor_pending_produces_no_outbound() {
+    let (rec, _, _, _) = an3_setup();
+    let cc = cc3(4, 8);
+    let set = set_n(4);
+    let p = cparams3(&set, &cc);
+    let mut ring = AnchorRing::open(MemTreeFs::new(tfaults()), alim(), abind()).unwrap();
+    ring.publish(rec).unwrap();
+    let sm = AnchorRestart::open(&ring, &abind(), &p, &TestVerifier, &alim(), 6).unwrap();
+    let (mut drv, first) = start_anchor_node(0, 4, sm, "tick-gate", 1).unwrap();
+    assert!(first.is_empty());
+    assert!(drv.anchor_pending());
+
+    // Tick repeatedly at increasing timestamps. No outbound messages may be produced while audit is pending.
+    for t in [1u64, 100, 1000, 10_000, 100_000] {
+        let outs = drv.tick(t).unwrap();
+        assert!(outs.is_empty(), "tick at t={t} with anchor pending must produce no outbound; got {} message(s)", outs.len());
+    }
+    assert!(drv.anchor_pending(), "anchor_pending must remain true after multiple ticks");
+}
+
+// T19: on_bytes with a consensus message while anchor pending must NOT produce a signing (broadcast) outbound.
+// A parallel DNet is ticked to generate real proposal/vote/timeout bytes; those bytes are fed to the
+// anchor-pending driver (node 0). The driver may emit sync requests (unicast, to: Some(_)) but must
+// never broadcast (to: None), because a broadcast means the driver voted or proposed while signing was gated.
+#[test]
+fn on_bytes_with_consensus_msg_while_anchor_pending_produces_no_signing_outbound() {
+    let (rec, _, _, _) = an3_setup();
+    let cc = cc3(4, 8);
+    let set = set_n(4);
+    let p = cparams3(&set, &cc);
+    let mut ring = AnchorRing::open(MemTreeFs::new(tfaults()), alim(), abind()).unwrap();
+    ring.publish(rec).unwrap();
+    let sm = AnchorRestart::open(&ring, &abind(), &p, &TestVerifier, &alim(), 6).unwrap();
+    let (mut drv, _) = start_anchor_node(0, 4, sm, "bytes-gate", 1).unwrap();
+    assert!(drv.anchor_pending());
+
+    // Build a parallel DNet (same genesis), run several steps so every peer sends at least proposals/timeouts.
+    let mut net = DNet::new(4, &[], "bytes-gate-net");
+    for _ in 0..8 { net.step(); }
+    // Feed bytes from every peer (1–3) into the anchor-pending driver (node 0).
+    let mut fed = 0usize;
+    for peer in 1..4usize {
+        for bytes in net.sent[peer].clone() {
+            let outs = drv.on_bytes(peer, &bytes, 1).unwrap();
+            for o in &outs {
+                assert!(o.to.is_some(),
+                    "anchor-pending driver must not broadcast (sign/vote/propose) from peer {peer}; got to=None outbound");
+            }
+            fed += 1;
+        }
+    }
+    assert!(fed > 0, "test requires at least one message from peers; got none — increase net.step() count");
+    assert!(drv.anchor_pending(), "anchor_pending must remain true after on_bytes");
+}
+
 #[test]
 fn failed_audit_returns_audit_failed_and_anchor_pending_stays_true() {
     let (mut rec, hs, _, _) = an3_setup();

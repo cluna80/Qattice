@@ -5,11 +5,12 @@
 //! Two public pieces:
 //! 1. [`AnchorMode`]: `Off` (current behaviour, default) or `AuditFirst` (signing gated until audit + reconciliation).
 //! 2. [`AnchorRestart`]: the typed restart-path state machine. `open` loads the ring, runs the cross-check, and begins
-//!    the resumable audit from the persisted watermark (not necessarily 0 — durable progress survives a restart). If the
-//!    newest record fails the cross-check the machine tries the previous generation before returning an error. `advance`
-//!    feeds header windows until the audit completes or fails; the caller is expected to call `ring.set_audited` after
-//!    each progress step. After `RestartOutcome::Ready` the caller reconciles the anchor against executor state; signing
-//!    stays disabled until both succeed.
+//!    a genesis-rooted re-verification from height 1 (regardless of the persisted `audited_height` watermark — in
+//!    `AuditFirst` mode the security guarantee requires a full re-verify on every startup, not just when the watermark
+//!    is below the anchor). If the newest record fails the cross-check the machine tries the previous generation before
+//!    returning an error. `advance` feeds header windows until the audit completes or fails; the caller is expected to
+//!    call `ring.set_audited` after each progress step (for display/diagnostics). After `RestartOutcome::Ready` the
+//!    caller reconciles the anchor against executor state; signing stays disabled until both succeed.
 //!
 //! SafetyStore floors, application state, exactly-once execution and blockstore pruning are untouched.
 use super::anchor_record::{AnchorBinding, AnchorError, AnchorLimits, AnchorRecord, AnchorRing};
@@ -75,7 +76,8 @@ impl std::fmt::Debug for AnchorRestart {
 
 impl AnchorRestart {
     /// Load and cross-check the newest ring record. On cross-check failure, tries the previous generation before
-    /// returning an error. On success, begins the resumable audit from `rec.audited_height` (durable watermark).
+    /// returning an error. On success, begins a genesis-rooted re-verification from height 1 regardless of the
+    /// persisted `audited_height` watermark — `AuditFirst` mode requires a complete re-verify on every startup.
     ///
     /// Returns `Err(RestartError::NoRecord)` when the ring is empty, `Err(RestartError::Damaged)` when decode
     /// fails, `Err(RestartError::Foreign)` when the binding does not match `own_binding`, and
@@ -97,7 +99,9 @@ impl AnchorRestart {
             if rec.binding != *own_binding { return Err(RestartError::Foreign); }
             match cross_check(rec, p, v, lim) {
                 Ok(_) => {
-                    let audit = Audit::new_from(rec, seg).map_err(|e| {
+                    // Always use Audit::new (not new_from): AuditFirst requires genesis-rooted
+                    // re-verification on every startup; the persisted watermark must not shortcut it.
+                    let audit = Audit::new(rec, seg).map_err(|e| {
                         RestartError::AuditFailed(AuditError::Segments(e))
                     })?;
                     return Ok(AnchorRestart { record: rec.clone(), audit });

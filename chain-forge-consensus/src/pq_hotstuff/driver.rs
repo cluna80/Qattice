@@ -269,7 +269,12 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
     }
 
     /// Leave `Recovering` as soon as the engine says every condition holds (it never signs before that).
-    fn try_complete_recovery(&mut self) { if self.engine.is_recovering() { let _ = self.engine.complete_recovery(); } }
+    /// Skipped when the anchor audit is pending — signing must remain gated until `advance_anchor` returns `Ready`.
+    fn try_complete_recovery(&mut self) {
+        #[cfg(feature = "pq-anchored-evidence")]
+        if self.anchor.is_some() { return; }
+        if self.engine.is_recovering() { let _ = self.engine.complete_recovery(); }
+    }
 
     /// AN-3 (`pq-anchored-evidence` feature): feed the next window of headers to the anchor audit.
     ///
@@ -416,6 +421,24 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
         Ok(out)
     }
 
+    /// Process engine outputs while the anchor audit is pending: persist block/QC/TC state to maintain DAG integrity,
+    /// but suppress all signing outputs (`Broadcast`, `Send`) and defer execution (`Commit`). The deferred replay in
+    /// `advance_anchor` handles execution catch-up and resend after the audit completes.
+    #[cfg(feature = "pq-anchored-evidence")]
+    fn route_anchor_pending(&mut self, outs: Vec<Output>) -> Result<Vec<Outbound>, DriverError> {
+        let idc = IdCtx { protocol_profile: &self.profile, chain_id: &self.chain, set: &self.set };
+        for o in outs {
+            match o {
+                Output::PersistBlock(_) | Output::PersistCommit { .. } | Output::PersistHighQc(_) | Output::PersistHighTc(_) => {
+                    self.store.apply(&o, &|b| block_id_of(b, &idc).ok())?;
+                }
+                // Suppress: signing outputs. Commits are deferred to advance_anchor's replay.
+                Output::Commit(_) | Output::Broadcast(_) | Output::Send { .. } | Output::EnteredRound { .. } => {}
+            }
+        }
+        Ok(vec![])
+    }
+
     /// An engine error is either fatal (safety) or just a bad message.
     fn soft(&self, e: EngineError) -> Result<(), DriverError> { classify_engine_error(e, self.engine.store().is_latched()) }
 
@@ -466,6 +489,21 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
     }
 
     fn deliver(&mut self, from: usize, m: Msg) -> Result<Vec<Outbound>, DriverError> {
+        // When the anchor audit is pending: process the message so the engine can build its DAG and collect
+        // QCs, but suppress all signing outputs and defer execution via route_anchor_pending.
+        #[cfg(feature = "pq-anchored-evidence")]
+        if self.anchor.is_some() {
+            return match self.engine.on_message(m.clone()) {
+                Ok(outs) => self.route_anchor_pending(outs),
+                Err(EngineError::MissingParent(p)) => {
+                    let mut out = vec![];
+                    if let Some(o) = self.request_sync(p, from) { out.push(o); }
+                    self.park(from, m);
+                    Ok(out)
+                }
+                Err(e) => { self.soft(e)?; Ok(vec![]) }
+            };
+        }
         match self.engine.on_message(m.clone()) {
             Ok(outs) => self.route(outs),
             Err(EngineError::MissingParent(p)) => {
@@ -541,6 +579,11 @@ impl<S: Storage, C: MonotonicCounter, G: ConsensusSigner, V: ConsensusVerifier, 
             out.extend(self.route(outs)?);
         }
         out.extend(self.retry_parked()?);
+        // When the anchor audit is pending: suppress all signing operations (propose, timeout, resend).
+        // try_complete_recovery is also skipped (see above), so the engine stays in Recovering on seeded
+        // starts. On genesis starts the engine is not recovering but the driver gate below is authoritative.
+        #[cfg(feature = "pq-anchored-evidence")]
+        if self.anchor.is_some() { return Ok(out); }
         if self.engine.is_leader() && now.saturating_sub(self.round_started) >= self.dc.min_propose_gap {
             let p = (self.payload)(self.engine.round(), self.me);
             match self.engine.propose(p) { Ok(outs) => out.extend(self.route(outs)?), Err(EngineError::Recovering(_)) => self.stats.propose_refused_while_recovering += 1, Err(e) => self.soft(e)? }
