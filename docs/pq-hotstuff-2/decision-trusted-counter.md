@@ -227,9 +227,9 @@ The two dedicated tests now exist and pass in sandbox (`pq_hotstuff_safety.rs`):
 - Set up: counter at `(ctr.value - 1, [0xff; 32])` where `[0xff; 32] != rec.prev_digest`.
 - Expected and confirmed: `Err(OpenError::SuccessorOfAnotherRecord { counter: ctr.value })`.
 
-Both tests pass against `TestCounter`. They confirm that `trusted.digest` is the anchor in
-both cases and that the failure modes are distinct. **§7.1.1 is ready for owner approval**
-pending Windows confirmation of these two tests (BossKing run required per CLAUDE.md policy).
+Both tests pass against `TestCounter` and on **krizz@BossKing MINGW64** at `339f262`
+(2/2 in 0.17 s, 2026-11-11). They confirm that `trusted.digest` is the anchor in both
+cases and that the failure modes are distinct. **§7.1.1 is ready for owner approval.**
 
 ---
 

@@ -98,7 +98,7 @@
 | G8-G | R8-6, R8-7 | Fresh ML-DSA genesis key generation and PoP verification — Phase 2 deliverable, not Phase 1; blocked on PR #109 key-handling review | Low (Phase 2) |
 | G7.1-C | R7.1-4 | Session/fencing token: stale-session test `a_failed_open_does_not_supersede_the_running_store` exists but `two_stores_sharing_one_simulated_counter_a_stale_store_cannot_commit` and related session-supersession tests from §7 change item 3 — check if fully implemented | Medium |
 | G7.1-P | §7.1 overall | §7.1 is marked "PROPOSED, owner review pending" — no approval yet for the production counter backend (TPM/HSM/remote); `TestCounter` is explicitly not production-ready; the backend interface is not approved for any real deployment | Blocked on owner decision |
-| G7.1.1-P | §7.1.1 | Digest-bound counter commits — marked "not approved for implementation"; PR #127 has the design and tests; not merged | Blocked on owner approval |
+| G7.1.1-P | §7.1.1 | Digest-bound counter commits — two dedicated tests (`equal_counter_with_wrong_digest_is_a_fork_and_fails_closed`, `one_step_ahead_with_wrong_prev_digest_is_a_different_records_successor_and_fails_closed`) **pass 2/2 on krizz@BossKing MINGW64 (0.17 s, 2026-11-11, `339f262`)**. Ready for owner approval; PO-4 (production counter validation) remains open. | Blocked on owner approval |
 
 ---
 
