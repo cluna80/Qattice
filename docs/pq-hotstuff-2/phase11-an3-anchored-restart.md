@@ -135,7 +135,8 @@ All 11 tests run individually — each reported `test result: ok. 1 passed; 0 fa
 **Linux result — driver wiring tests** (commit `04c98c0`, 2026-11-10, release mode, real FIPS 204 ML-DSA-65):
 `test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 223 filtered out; finished in 0.59s`
 
-**Windows result — driver wiring tests**: PENDING — owner must run on MINGW64 krizz@BossKing.
+**Windows result — driver wiring tests** (commit `0716a72`, 2026-11-11, MINGW64 krizz@BossKing, release mode, real FIPS 204 ML-DSA-65):
+All 5 tests run individually — each reported `test result: ok. 1 passed; 0 failed`. Cargo exit 0.
 
 | # | Test name | What it tests |
 |---|---|---|
