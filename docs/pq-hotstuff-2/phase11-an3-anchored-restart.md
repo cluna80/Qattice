@@ -138,9 +138,14 @@ All 11 tests run individually — each reported `test result: ok. 1 passed; 0 fa
 **Windows result — driver wiring tests** (commit `0716a72`, 2026-11-11, MINGW64 krizz@BossKing, release mode, real FIPS 204 ML-DSA-65):
 All 5 tests run individually — each reported `test result: ok. 1 passed; 0 failed`. Cargo exit 0.
 
-**Linux sandbox result — signing gate + audit-watermark fix** (this commit, 2026-11-11, debug mode, `TestVerifier`):
+**Linux sandbox result — signing gate + audit-watermark fix** (commit `54f2bc7`, 2026-11-11, debug mode, `TestVerifier`):
 `test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 218 filtered out; finished in 284.01s`
 (All prior T1–T16 plus new T17–T19; no regressions.)
+
+**Windows result — signing gate + audit-watermark fix** (commit `54f2bc7`, 2026-11-11, MINGW64 krizz@BossKing, release mode, real FIPS 204 ML-DSA-65):
+- T17 `audit_watermark_bypass_is_closed_full_reverification_required`: `test result: ok. 1 passed; 0 failed` (0.75s)
+- T18 `tick_with_anchor_pending_produces_no_outbound`: `test result: ok. 1 passed; 0 failed` (0.57s)
+- T19 `on_bytes_with_consensus_msg_while_anchor_pending_produces_no_signing_outbound`: `test result: ok. 1 passed; 0 failed` (0.62s)
 
 | # | Test name | What it tests |
 |---|---|---|
