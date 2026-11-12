@@ -440,6 +440,15 @@ impl ConsensusEngine for PqHotStuffEngine {
             });
         }
 
+        // Defensive pruning: only accumulate votes for the current round.
+        // Stale votes (round < self.round) that arrive after advance_round must
+        // not contaminate the current bucket; check_quorum scans all buckets and
+        // would fire a spurious QC if 2f+1 stale votes pile up before the current
+        // round reaches quorum on its own.
+        if vote.round != self.round {
+            return Ok(None);
+        }
+
         let round = vote.round;
         let height = vote.height;
         self.accumulator.add(idx, vote);
