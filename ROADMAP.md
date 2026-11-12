@@ -16,11 +16,17 @@
 | `pqhs2_4node_reaches_target_height`: all 4 nodes reach height ≥ 3 within 60s | ✅ |
 | `propose()` uses `compute_block_hash` (sync validation fix — lagging node Dave) | ✅ |
 | Regression checks: `timeout_signing_failure_still_advances_round` (R-TF-1/R-TF-2), `locked_qc_round_never_decreases_within_epoch` (R-LM-1/R-LM-2) — 10/10 engine unit tests | ✅ |
-| **`pqhs2_4node_live` integration test** (BossKing MINGW64, `8f44075`) | ✅ **Windows-confirmed** |
+| Cross-node agreement check: all 4 nodes assert identical `block_hash` + `state_root` at height 3 | ✅ |
+| **`pqhs2_4node_live` integration test** (BossKing MINGW64, `d9c770d`) | ✅ **Windows-confirmed** |
 
-**Windows confirmation (owner-run, 2026-11-12):** `cargo test -p chain-forge-node --features pq-hotstuff --test pqhs2_4node_live -- --nocapture` on branch `feat/qat-07-safety-store-integration` at `8f44075` — 1/1 passed in 29.8s. All 4 ML-DSA-65 devnet nodes reached height 3: `qcb1alice=3 qcb1bob=3 qcb1carol=3 qcb1dave=3`.
+**Windows confirmation (owner-run, 2026-11-12):** `cargo test -p chain-forge-node --features pq-hotstuff --test pqhs2_4node_live -- --nocapture` on branch `feat/qat-07-safety-store-integration` at `d9c770d` — 1/1 passed in 23.7s. All 4 ML-DSA-65 devnet nodes reached height 3 and agreed on the committed block:
 
-State root consistency (run at `23868f4`, Alice/Bob/Carol): `state_root=a92a28fed791f2c03bb88f7899807e131fc9e38729164c2abd86d4c11013e08e` at every committed height 1–4 — identical across all three quorum nodes. Dave sync unblocked at `8f44075`.
+```
+block_hash  = 217e30ed9f7cd845375c2d67e522204db03aed3c6b5b4b66ec6dcb07137ec488
+state_root  = a92a28fed791f2c03bb88f7899807e131fc9e38729164c2abd86d4c11013e08e
+```
+
+All four nodes — `qcb1alice`, `qcb1bob`, `qcb1carol`, `qcb1dave` — produced identical values. No fork. Dave synced successfully and committed the same block as the quorum.
 
 **Bugs fixed (this milestone):**
 - `on_timeout` sign failure (`map_err(Internal)?` → `unwrap_or_default()`) blocked round advance.
