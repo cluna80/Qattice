@@ -249,6 +249,12 @@ impl<S: Storage, C: MonotonicCounter> SafetyStore<S, C> {
             if epoch == seal_epoch && round > seal_round {
                 return Err(SignError::SealViolation { epoch, round, seal_round });
             }
+            // ProofNotDurable: advance_epoch_record has not been called yet (R2 write-order step 3).
+            // The seal is written but the epoch record has not advanced; epoch+1 signing is blocked
+            // until the durable advance completes. The engine must not forward the frame until then.
+            if epoch == seal_epoch + 1 {
+                return Err(SignError::ProofNotDurable { requested: epoch, sealed_epoch: seal_epoch, sealed_round: seal_round });
+            }
         }
         // floors and the stored item only mean something inside one epoch; a new epoch starts clean
         let same_epoch = epoch == self.rec.epoch;

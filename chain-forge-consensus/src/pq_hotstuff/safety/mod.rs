@@ -338,6 +338,8 @@ pub enum SignError {
     FloorViolation { kind: &'static str, round: u64, floor: u64 },
     #[error("epoch {epoch} is sealed at round {seal_round}; round {round} is above the cutoff")]
     SealViolation { epoch: u64, round: u64, seal_round: u64 },
+    #[error("epoch {requested} proof is not yet durable: advance_epoch_record has not been called (sealed at epoch {sealed_epoch} round {sealed_round})")]
+    ProofNotDurable { requested: u64, sealed_epoch: u64, sealed_round: u64 },
     #[error("round {round} is below the minimum for epoch {epoch} (must be >= 1)")]
     RoundBelowEpochMinimum { epoch: u64, round: u64 },
     #[error("{0}")]
