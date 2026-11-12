@@ -6,24 +6,48 @@
 
 **Goal:** Identify the last block certified by the outgoing validator set and the first certified by the incoming set, via the epoch encoded in the QC itself — not the block record's `epoch` field (which is the engine epoch active at `commit_block` time, not which set signed the QC).
 
-**Current state (gap):** `Vote` has no `epoch` field; `vote_signing_bytes` does not include epoch; `CommitCertificate` does not carry an epoch. The API `BlockSummary` exposes `last_commit_signers` (validator IDs, from the previous block's last_commit) but not the full `CommitCertificate` or its constituent vote epochs. There is therefore currently no way for a test to assert "this QC was signed under epoch N" without reading internal engine state.
+**Agreed boundary trace (epoch-change at height 2):**
 
-**Required changes:**
-1. Add `epoch: u64` to `Vote` and include it in `vote_signing_bytes` (domain-separated: `CFV| chain_id | type | height | round | epoch | block_hash`). This is a signing-format change — existing devnet key fixtures are compatible, but all existing vote construction sites must be updated.
-2. Add `epoch: u64` to `CommitCertificate` (the epoch of the QC, set when the QC forms — before `on_commit` advances the engine epoch for epoch-change blocks).
-3. Expose `last_commit_certificate` (the full `CommitCertificate` for the previous block, epoch field included) in `BlockSummary` or as a separate `/api/blocks/{height}/qc` endpoint.
-4. Update `verify_handoff_proof` to check `certificate.epoch == expected_outgoing_epoch`.
-5. Update `sign_vote` and all vote construction sites.
-6. Update `gate_b_admission` and `gate_b_epoch_handoff` test helpers (they use `vote_signing_bytes` directly).
+| Block record | `last_commit` certifies | Expected certificate epoch |
+|---|---|---|
+| h3 | h2 (epoch-change block) | 0 |
+| h4 | h3 (boundary child) | **0** |
+| h5 | h4 (first incoming-set block) | 1 |
 
-**What the test will assert (design):**
-- h2 QC (`last_commit` stored in h3's block record): `qc.epoch=0` — signed by the outgoing (epoch-0) set
-- h3 QC (`last_commit` stored in h4's block record): `qc.epoch=1` — signed by the incoming (epoch-1) set
-- This is the boundary: the last outgoing-set QC is at h2, the first incoming-set QC is at h3
+The outgoing validator set certifies **both** the epoch-change block (h2) and its boundary child (h3). The incoming set first certifies h4. The boundary certificate epoch flips from 0 to 1 between h4's `last_commit` (h3's cert, epoch=0) and h5's `last_commit` (h4's cert, epoch=1).
 
-**Note on same-validator-set transition:** In this test the outgoing and incoming validator membership is identical (same 4 nodes). The epoch field on the QC distinguishes which epoch's bookkeeping the signers operated under, even when the set members are the same. For a future membership-change test, the QC epoch will also distinguish which key material was active.
+**Why h3's certificate carries epoch=0 (protocol design):** The certificate epoch of a block is set to the engine epoch at QC formation time, **before** `on_commit` fires for the block that triggers the transition. In the two-chain commit trace, h3's QC is what delivers the commit signal for h2 (the epoch-change block). Validators cast their h3 precommits while the engine is still at epoch=0 — h2 has not yet been delivered to `on_commit`. The QC forms, `on_commit(h2)` fires and advances the epoch to 1, then h4 is proposed and voted under epoch=1. h4's QC therefore carries epoch=1.
 
-**Blocking dependency:** `vote_signing_bytes` change is a protocol break. All existing live and unit tests that construct `Vote` structs or call `vote_signing_bytes` must be updated atomically. Gate this work on a separate branch; do not mix with the current epoch-change milestone.
+**What the test will assert:**
+
+```rust
+// h3's last_commit certifies h2 — outgoing set, epoch 0
+assert_eq!(api.block(3).last_commit.epoch, 0);
+assert_eq!(api.block(3).last_commit.height, 2);
+// h4's last_commit certifies h3 — still outgoing set, epoch 0
+assert_eq!(api.block(4).last_commit.epoch, 0);
+assert_eq!(api.block(4).last_commit.height, 3);
+// h5's last_commit certifies h4 — incoming set, epoch 1
+assert_eq!(api.block(5).last_commit.epoch, 1);
+assert_eq!(api.block(5).last_commit.height, 4);
+// Verify both handoff QCs against the authenticated outgoing set
+verify_handoff_proof(chain, &api.block(3).last_commit, &outgoing_set, ...); // h2 cert
+verify_handoff_proof(chain, &api.block(4).last_commit, &outgoing_set, ...); // h3 cert
+```
+
+**Current state (gap):** `Vote` has no `epoch` field; `vote_signing_bytes` does not include epoch; `CommitCertificate` does not carry an epoch. The API `BlockSummary` exposes `last_commit_signers` (validator IDs only) but not the full `CommitCertificate`. There is no way for a test to assert "this QC was signed under epoch N" without reading internal engine state.
+
+**Required changes (separate branch — protocol break):**
+1. Add `epoch: u64` to `Vote`. Every vote in a certificate must carry the same epoch and must sign the same epoch value. Add a version prefix to `vote_signing_bytes` so legacy-format bytes cannot be accepted under the new format: `CFV2| chain_id | type | height | round | epoch | block_hash` (increment prefix from `CFV|` to `CFV2|`).
+2. Add `epoch: u64` to `CommitCertificate`. Must match the signed epoch of all constituent votes. Set at QC formation time (before `on_commit` fires).
+3. Expose the full `last_commit: Option<CommitCertificate>` in `BlockSummary` (or a separate `/api/blocks/{height}/qc` endpoint) so the devnet test can read it without internal access.
+4. Update `verify_handoff_proof` to: (a) require `certificate.epoch == expected_outgoing_epoch`, (b) verify both handoff QCs (h2's cert and h3's cert) against the outgoing set before accepting the transition.
+5. Update `sign_vote` and all vote construction sites to set `Vote.epoch`.
+6. Update `gate_b_admission`, `gate_b_epoch_handoff`, and all unit tests that call `vote_signing_bytes` directly.
+
+**Note on same-validator-set transition:** In this test the outgoing and incoming validator membership is identical (same 4 nodes). The certificate epoch distinguishes which epoch's bookkeeping the signers operated under. For a future membership-change test, the certificate epoch also distinguishes which key material was active.
+
+**Blocking dependency:** `vote_signing_bytes` prefix change is a protocol break. All existing live and unit tests that construct `Vote` structs or call `vote_signing_bytes` must be updated atomically. Do not mix with the current epoch-change milestone.
 
 ---
 
