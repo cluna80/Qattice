@@ -1,5 +1,29 @@
 # Qattice — Public Testnet Alpha: ML-DSA-65 + PQ-HotStuff Launch Plan
 
+## QAT-07 phase 1 complete — 2026-11-12
+
+**QAT-07 phase 1: `EngineSigningContext` — SafetyStore wired into `PqHotStuffEngine`**
+
+| Deliverable | Status |
+|---|---|
+| `EngineSigningContext` trait (write-before-broadcast interface, EC-3) | Done |
+| `SafetyStoreSigningContext` production impl (`SafetyStore` + `ConsensusSigner`) | Done |
+| `attach_signing_context` / `restore_floors` — restart anti-equivocation (EC-4) | Done |
+| `advance_epoch` on epoch-change commits (EC-6 wiring) | Done |
+| `sign_local_precommit` convenience method | Done |
+| Sign-later fallback unchanged — existing tests unaffected | Done |
+| All 204 crate tests pass sandbox + **Windows-confirmed** (BossKing MINGW64, `c77c567`) | ✅ **Windows-confirmed** |
+
+**Windows confirmation (owner-run, 2026-11-12):** `cargo test -p chain-forge-consensus --features pq-hotstuff` on branch `feat/qat-07-safety-store-integration` at `c77c567` — 204/204 passed.
+
+**Remaining QAT-07 scope (separate review against PO-4 evidence):**
+- Epoch validator-set SSI switch-over in `on_commit`
+- Key rotation + next-block revocation
+- ML-DSA-only validator admission gate
+- TCP restart anti-equivocation test on Windows
+
+---
+
 ## CF-C1 complete — 2026-11-12
 
 **CF-C1: `PqHotStuffEngine` — native PQ-HotStuff-2 `ConsensusEngine` implementation**
