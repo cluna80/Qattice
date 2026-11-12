@@ -1,5 +1,32 @@
 # Qattice — Public Testnet Alpha: ML-DSA-65 + PQ-HotStuff Launch Plan
 
+## QAT-07 epoch-handoff verification complete — 2026-11-12
+
+**QAT-07 authenticated epoch-handoff: ML-DSA-65 signature verification on `CommitCertificate`, canonical `set_hash` with public keys, consecutive-round parent link (`epoch-transition` feature flag)**
+
+| Deliverable | Status |
+|---|---|
+| `epoch-transition` feature flag (implies `pq-hotstuff-fips204`, disabled by default) | Done |
+| `canonical_set_hash`: ID-lex order, 2-byte-prefixed id + key + 8-byte power, SHA3-256 | Done |
+| `verify_handoff_proof`: consecutive-round check, ML-DSA-65 sig per precommit, no dupe signers, quorum, set-hash binding | Done |
+| `HandoffError` enum: 9 variants covering all rejection paths | Done |
+| `engine.rs` `on_commit`: `verify_handoff_proof` called before R2 write sequence under `epoch-transition` | Done |
+| EH-1 wrong key → `SignatureInvalid` | ✅ |
+| EH-2 corrupt signature → `SignatureInvalid` | ✅ |
+| EH-3 duplicate signer → `DuplicateSigner` | ✅ |
+| EH-4 insufficient quorum → `InsufficientPower` | ✅ |
+| EH-5 substituted incoming key → `SetHashMismatch` | ✅ |
+| EH-6 invalid child link → `ConsecutiveRoundsViolation` | ✅ |
+| EH-7 happy path → `Ok` | ✅ |
+| canonical_set_hash order-independence and key-binding | ✅ |
+| **8/8 epoch-handoff tests** (BossKing MINGW64, `fda5abf`) | ✅ **Windows-confirmed** |
+
+**Windows confirmation (owner-run, 2026-11-12):** `cargo test -p chain-forge-consensus --features epoch-transition --test gate_b_epoch_handoff -- --nocapture` at `fda5abf` — 8/8 passed in 0.20s. All rejection paths confirmed: wrong key, corrupt sig, duplicate signer, insufficient quorum, substituted incoming key, invalid child link. Happy path with 3-of-3 real ML-DSA-65 signatures passes. Baseline build (no features) unchanged.
+
+**What is NOT included here (separate milestones):** SSI registry resolution, key rotation, next-block revocation, ML-DSA-only validator admission gate, P2P wiring.
+
+---
+
 ## QAT-07 Gate B complete — 2026-11-12
 
 **QAT-07 Gate B: OS-process TCP epoch-boundary + crash injection + file-based monotonic counter (Windows)**
