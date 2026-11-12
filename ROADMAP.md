@@ -14,9 +14,9 @@
 | B3: 8 counter tests — truncated, CRC mismatch, stale session, CAS failure, F1/F2 two-process fencing | Done |
 | `gate-b-harness` feature flag — devnet harness disabled in production build | Done |
 | B1 TCP epoch boundary: 1/1 Windows-confirmed at `b61257c` | ✅ |
-| B3 counter fencing: 8/8 Windows-confirmed at `ba170eb` | ✅ |
-| B2 crash injection: 6/6 Windows-confirmed at `7e8402b` | ✅ |
-| **All three suites on one revision: pending** (rerun fencing + crash at `1a7e468`) | ⬜ |
+| B3 counter fencing: 8/8 Windows-confirmed at `72b5a88` | ✅ |
+| B2 crash injection: 6/6 Windows-confirmed at `72b5a88` | ✅ |
+| **All 15 Gate B tests on one revision** (BossKing MINGW64, `72b5a88`) | ✅ **Windows-confirmed** |
 
 **Windows confirmation — TCP epoch boundary (owner-run, 2026-11-12):** `cargo test -p chain-forge-consensus --features gate-b-harness --test gate_b_tcp_epoch_boundary` at `b61257c` — 1/1 passed. All 7 steps confirmed:
 - Step 3: `SealViolation` — epoch 0 sealed at round 5; round 6 above cutoff
@@ -25,16 +25,9 @@
 - Step 7: epoch-1 ML-DSA-65 frame, 3309-byte signature, verifies
 - Receiver saw exactly 2 frames (epoch-0 round-5, epoch-1 round-1), both valid
 
-**Windows confirmation — counter fencing (owner-run, 2026-11-12):** `cargo test -p chain-forge-consensus --features gate-b-harness --test gate_b_counter_fencing` at `ba170eb` — 8/8 passed. F1: child blocked with `open_exclusive: The process cannot access the file because it is being used by another process. (os error 32)`; succeeded after `release_handle()`. F2: reacquisition after simulated kill, file value=1 confirmed, advanced to value=2.
-
-**Windows confirmation — crash injection (owner-run, 2026-11-12):** `cargo test -p chain-forge-consensus --features gate-b-harness --test gate_b_crash_injection` at `7e8402b` — 6/6 passed (K0–K4 + summary). Note: `safety/mod.rs` and `safety/store.rs` changed between `7e8402b` and `b61257c` (`ProofNotDurable` variant and guard added); crash tests must be rerun at `1a7e468` before this result carries forward.
+**Windows confirmation — counter fencing + crash injection (owner-run, 2026-11-12):** `cargo test -p chain-forge-consensus --features gate-b-harness --test gate_b_counter_fencing --test gate_b_crash_injection` at `72b5a88` — 8/8 + 6/6 passed. F1 fencing: child blocked with `open_exclusive: The process cannot access the file because it is being used by another process. (os error 32)`; succeeded after `release_handle()`. F2: file state value=1 after simulated kill, advanced to value=2. K0–K4 all recover correctly; K4 clean shutdown control passes.
 
 **Gate B scope document:** `docs/pq-hotstuff-2/gate-b-scope.md` at `d8bfdf9` — approved by owner 2026-11-12.
-
-**To establish unified Gate B coverage on one revision**, run on BossKing at `1a7e468`:
-```
-cargo test -p chain-forge-consensus --features gate-b-harness --test gate_b_counter_fencing --test gate_b_crash_injection -- --nocapture
-```
 
 ---
 
