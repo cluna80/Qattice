@@ -14,17 +14,24 @@
 //!    round parent link (locked_qc.round + 1 == child_qc_round), and that every vote
 //!    binds to the expected chain, epoch, height, and block hash.
 //!
+//! 3. **`pqc-native` admission** — `admit_pq_native` derives the incoming validator
+//!    set from a closed `VcaRegistry` snapshot, enforcing that every admitted entry
+//!    has an ML-DSA-65 consensus key bound in the registry and that no zero-weight
+//!    or malformed-key entry enters the set. The returned `ValidatorSet` is what
+//!    `canonical_set_hash` and `verify_handoff_proof` operate on.
+//!
 //! # What is NOT here
-//! SSI registry resolution, key rotation, next-block revocation, and broader admission
-//! policy are gated on later milestones. `on_commit` passes in the new validator set
-//! from the committed epoch-change block; this module validates it without touching any
-//! mutable identity registry.
+//! Key rotation, next-block revocation, and dynamic membership changes are gated on
+//! later milestones. Revocation finalized at height H affects eligibility at H+1 via
+//! a separate authenticated path. Dynamic membership remains disabled during this work.
 #![cfg(feature = "epoch-transition")]
 
 use sha3::{Digest, Sha3_256};
 
-use crate::{CommitCertificate, Round, ValidatorSet, VoteType, vote_signing_bytes};
+use crate::{BlockHeight, CommitCertificate, Round, ValidatorSet, VoteType, vote_signing_bytes};
 use crate::pq_hotstuff::safety::{ConsensusVerifier, Fips204Verifier};
+pub use chain_forge_vca_pq::AdmissionError;
+use chain_forge_vca_pq::VcaRegistry;
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
@@ -182,4 +189,31 @@ pub fn verify_handoff_proof(
 
 fn hex_prefix(b: &[u8; 32]) -> String {
     b.iter().take(8).map(|x| format!("{x:02x}")).collect()
+}
+
+// ── pqc-native admission ──────────────────────────────────────────────────────
+
+/// Derive the candidate incoming `ValidatorSet` from a closed `VcaRegistry` snapshot
+/// for a `pqc-native` chain.
+///
+/// Rules (locked QAT-07):
+/// - Zero-weight validators are excluded silently (they carry no quorum power).
+/// - Any positive-weight entry with a missing, wrong-length, or wrong-slot key
+///   is an error: the entire candidate set is rejected; `on_commit` must not
+///   filter the set it already committed to.
+/// - The returned set's `height` is set to `at_height`.
+/// - The returned set is what `canonical_set_hash` and `verify_handoff_proof` must receive.
+pub fn admit_pq_native(
+    registry: &VcaRegistry,
+    at_height: BlockHeight,
+) -> Result<ValidatorSet, AdmissionError> {
+    let mut validators = Vec::new();
+    for record in registry.records.values() {
+        if record.weight.0 == 0 {
+            continue; // zero-weight: silently excluded
+        }
+        let info = record.to_validator_info_pq()?;
+        validators.push(info);
+    }
+    Ok(ValidatorSet { height: at_height, validators })
 }

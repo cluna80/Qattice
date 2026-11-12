@@ -353,6 +353,11 @@ pub struct VcaValidatorRecord {
     /// Post-quantum signature public key (ML-DSA-87).
     /// Empty until the validator opts in / migration trigger fires.
     pub pq_pubkey:     Vec<u8>,
+
+    /// ML-DSA-65 consensus key (FIPS 204, 1952 bytes).
+    /// Distinct from `pq_pubkey` (ML-DSA-87, account/transaction slot).
+    /// Empty until the validator registers a consensus key for a `pqc-native` chain.
+    pub consensus_ml_dsa_65_pubkey: Vec<u8>,
 }
 
 impl VcaValidatorRecord {
@@ -380,7 +385,14 @@ impl VcaValidatorRecord {
             weight,
             classical_pubkey,
             pq_pubkey,
+            consensus_ml_dsa_65_pubkey: vec![],
         }
+    }
+
+    /// Set the ML-DSA-65 consensus key after construction (key registration path).
+    pub fn with_consensus_key(mut self, key: Vec<u8>) -> Self {
+        self.consensus_ml_dsa_65_pubkey = key;
+        self
     }
 
     /// Convert this VCA record to a `ValidatorInfo` for the consensus layer.
@@ -393,6 +405,58 @@ impl VcaValidatorRecord {
             public_key:   self.classical_pubkey.clone(),
         }
     }
+
+    /// Convert this record to a `ValidatorInfo` for a `pqc-native` chain.
+    /// Uses `consensus_ml_dsa_65_pubkey` as `public_key`.
+    ///
+    /// Returns `Err` if the consensus key is absent, the wrong length, or
+    /// happens to be an ML-DSA-87 key (4627 bytes) supplied in the wrong slot.
+    pub fn to_validator_info_pq(&self) -> Result<ValidatorInfo, AdmissionError> {
+        let key = &self.consensus_ml_dsa_65_pubkey;
+        if key.is_empty() {
+            return Err(AdmissionError::NoPqConsensusKey { id: self.validator_id.0.clone() });
+        }
+        if key.len() == MLDSA87_PUBKEY_LEN {
+            return Err(AdmissionError::WrongKeySlot {
+                id: self.validator_id.0.clone(),
+                supplied_len: key.len(),
+            });
+        }
+        if key.len() != MLDSA65_PUBKEY_LEN {
+            return Err(AdmissionError::WrongKeyLength {
+                id: self.validator_id.0.clone(),
+                expected: MLDSA65_PUBKEY_LEN,
+                got: key.len(),
+            });
+        }
+        Ok(ValidatorInfo {
+            id:           self.validator_id.clone(),
+            voting_power: self.weight.0,
+            pop_verified: self.personhood.0 > 0.0,
+            public_key:   key.clone(),
+        })
+    }
+}
+
+/// ML-DSA-65 public key length (FIPS 204, consensus key slot).
+pub const MLDSA65_PUBKEY_LEN: usize = 1952;
+/// ML-DSA-87 public key length (transaction/account PQ slot — wrong slot for consensus).
+pub const MLDSA87_PUBKEY_LEN: usize = 2592;
+
+/// Errors from the `pqc-native` admission path.
+#[derive(Debug, thiserror::Error)]
+pub enum AdmissionError {
+    #[error("validator {id} has no ML-DSA-65 consensus key (consensus_ml_dsa_65_pubkey is empty)")]
+    NoPqConsensusKey { id: String },
+
+    #[error("validator {id} supplied an ML-DSA-87 key ({supplied_len} bytes) in the ML-DSA-65 consensus slot")]
+    WrongKeySlot { id: String, supplied_len: usize },
+
+    #[error("validator {id} consensus key is {got} bytes, expected {expected}")]
+    WrongKeyLength { id: String, expected: usize, got: usize },
+
+    #[error("validator {id} has zero voting power and cannot be admitted")]
+    ZeroWeight { id: String },
 }
 
 // ── VCA registry ─────────────────────────────────────────────────────────────
