@@ -1,5 +1,30 @@
 # Qattice — Public Testnet Alpha: ML-DSA-65 + PQ-HotStuff Launch Plan
 
+## QAT-07 key rotation and next-block revocation complete — 2026-11-12
+
+**QAT-07 key rotation and next-block revocation for pqc-native admission (`epoch-transition` feature flag)**
+
+| Deliverable | Status |
+|---|---|
+| `revoked: bool` field on `VcaValidatorRecord` (default false; persists for auditability) | Done |
+| `AdmissionError::UnknownValidator` variant (shared by rotation path) | Done |
+| `rotate_consensus_key(id, new_key)`: validates via same rules as `to_validator_info_pq`; may be called before or after `close_epoch()` | Done |
+| `revoke_validator(id)`: marks `record.revoked = true`; irreversible within an epoch | Done |
+| `admit_pq_native`: skips revoked entries after zero-weight check; revoked wins over rotated | Done |
+| KR-1  rotate valid key → admitted set has new key | ✅ |
+| KR-2  rotate ML-DSA-87 key → `WrongKeySlot` | ✅ |
+| KR-3  rotate unknown validator → `UnknownValidator` | ✅ |
+| KR-4  revocation at H → absent from admitted set at H+1 | ✅ |
+| KR-5  revoked + rotated → revoked wins | ✅ |
+| KR-6  end-to-end: rotate → admit → `canonical_set_hash` → `verify_handoff_proof` → Ok | ✅ |
+| **6/6 rotation/revocation tests** (BossKing MINGW64, `021b9c7`) | ✅ **Windows-confirmed** |
+
+**Windows confirmation (owner-run, 2026-11-12):** `cargo test -p chain-forge-consensus --features epoch-transition --test gate_b_rotation -- --nocapture` at `021b9c7` — 6/6 passed in 0.05s.
+
+**Locked invariants:** Revocation finalized at H excludes the validator from the admitted set at H+1. `on_commit` verifies the exact admitted set without filtering it again. Revoked wins over rotated within the same epoch. Dynamic membership remains disabled.
+
+---
+
 ## QAT-07 pqc-native admission gate complete — 2026-11-12
 
 **QAT-07 ML-DSA-65 consensus key binding and pqc-native validator admission (`epoch-transition` feature flag)**
