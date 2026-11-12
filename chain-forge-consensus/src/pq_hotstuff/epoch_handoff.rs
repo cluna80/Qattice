@@ -29,6 +29,7 @@
 use sha3::{Digest, Sha3_256};
 
 use crate::{BlockHeight, CommitCertificate, Round, ValidatorSet, VoteType, vote_signing_bytes};
+#[cfg(not(feature = "real-crypto"))]
 use crate::pq_hotstuff::safety::{ConsensusVerifier, Fips204Verifier};
 pub use chain_forge_vca_pq::AdmissionError;
 use chain_forge_vca_pq::VcaRegistry;
@@ -131,6 +132,11 @@ pub fn verify_handoff_proof(
     }
 
     // ── 2–4. Signature verification and quorum ────────────────────────────────
+    // When chain-forge-crypto is built with real-pqc (always the case in the
+    // node binary), use verify_consensus to match the dilithium3 signing path
+    // used by sign_vote in node.rs. The Fips204Verifier path is kept for
+    // future use when devnet keys are regenerated in FIPS 204 format.
+    #[cfg(not(feature = "real-crypto"))]
     let verifier = Fips204Verifier;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut power_verified: u64 = 0;
@@ -159,6 +165,12 @@ pub fn verify_handoff_proof(
             vote.block_hash.as_ref(),
         );
 
+        // Verify using the same scheme as node.rs::sign_vote / verify_vote_signature.
+        #[cfg(feature = "real-crypto")]
+        if chain_forge_crypto::verify_consensus(&msg, &vote.signature, &val.public_key).is_err() {
+            return Err(HandoffError::SignatureInvalid { validator_id: vid });
+        }
+        #[cfg(not(feature = "real-crypto"))]
         if !verifier.verify(&val.public_key, crate::pq_hotstuff::safety::CTX_VOTE, &msg, &vote.signature) {
             return Err(HandoffError::SignatureInvalid { validator_id: vid });
         }

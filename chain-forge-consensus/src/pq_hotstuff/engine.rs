@@ -765,22 +765,21 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "pq-hotstuff-fips204")]
+    #[cfg(all(feature = "pq-hotstuff-fips204", feature = "real-crypto"))]
     async fn epoch_transition_records_seal_round() {
-        use crate::pq_hotstuff::safety::Fips204Signer;
-        use crate::pq_hotstuff::safety::CTX_VOTE;
         use crate::vote_signing_bytes;
 
         // 1-node set so quorum threshold = 1 and a single precommit satisfies R1 verification.
-        // Uses a real ML-DSA-65 keypair (deterministic seed) so verify_handoff_proof can check
-        // the actual signature rather than rejecting an empty one.
-        let mut signer = Fips204Signer::from_seed(&[0u8; 32]);
+        // Signs with chain_forge_crypto (dilithium3) to match the node's sign_vote path,
+        // which is what verify_handoff_proof now verifies against (real-crypto path).
+        let kp = chain_forge_crypto::MlDsaScheme.generate_random().expect("keygen");
+        let public_key = kp.public_key.clone();
 
         let v0 = ValidatorInfo {
             id: ValidatorId("v0".into()),
             voting_power: 1,
             pop_verified: false,
-            public_key: signer.public_key().to_vec(),
+            public_key,
         };
         let vs1 = ValidatorSet { height: 0, validators: vec![v0] };
 
@@ -798,10 +797,9 @@ mod tests {
             validators: vec![make_validator("v1")],
         };
 
-        // Sign the precommit with the real ML-DSA-65 key.
+        // Sign the precommit with dilithium3 (same as node.rs::sign_vote).
         let msg = vote_signing_bytes("test-chain", &VoteType::Precommit, 1, 3, Some(&BlockHash("ec".into())));
-        use crate::pq_hotstuff::safety::ConsensusSigner;
-        let sig = signer.sign(CTX_VOTE, &msg).expect("sign failed");
+        let sig = chain_forge_crypto::sign_consensus(&msg, &kp).expect("sign failed");
 
         let precommit = Vote {
             vote_type: VoteType::Precommit,
