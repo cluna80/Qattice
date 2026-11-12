@@ -1,5 +1,36 @@
 # Qattice — Public Testnet Alpha: ML-DSA-65 + PQ-HotStuff Launch Plan
 
+## CF-C1 complete — 2026-11-12
+
+**CF-C1: `PqHotStuffEngine` — native PQ-HotStuff-2 `ConsensusEngine` implementation**
+
+| Deliverable | Status |
+|---|---|
+| `PqHotStuffEngine` struct + full `ConsensusEngine` trait impl | Done |
+| `ConsensusVariant::PqHotStuff` (feature-gated `pq-hotstuff`) | Done |
+| Two-chain commit rule (spec §3.3–3.5): `locked_qc.round + 1 == high_qc.round` | Done |
+| Exponential-backoff pacemaker (spec §5.1) | Done |
+| Vote accumulator: 2f+1 threshold quorum | Done |
+| Epoch-transition seal hook (spec §3.6, EC-6): `seal_round` on `on_commit` | Done |
+| 6 unit tests (init, proposer rotation, two-chain commit, pacemaker, epoch seal, variant) | Done |
+| All 204 crate tests pass sandbox + **Windows-confirmed** (BossKing MINGW64, `a37ef87`) | ✅ **Windows-confirmed** |
+
+**Windows confirmation (owner-run, 2026-11-12):** `cargo test -p chain-forge-consensus --features pq-hotstuff` on branch `feat/pq-hotstuff-2-engine-cf-c1` at `a37ef87` — 204/204 passed.
+
+PR [#160](https://github.com/cluna80/Qattice/pull/160) — merged to main pending owner review.
+
+**Formal model basis:** PO-4 (epoch-transition TLC check, 2026-11-11) exhaustively confirmed two-chain commit and EC-6 seal rule in overlap (15,165 states) and disjoint (65 states, SnapSync). Dynamic-membership blocker lifted.
+
+**What is NOT yet included (QAT-07 scope):**
+- Real ML-DSA-65 signing (requires `ConsensusSigner` + `MonotonicCounter` from the node layer)
+- Epoch validator-set SSI switch-over
+- Restart anti-equivocation over TCP (Windows)
+- Key rotation, revocation
+
+**Next milestone: QAT-07** — durable write-before-broadcast safety state, restart anti-equivocation, epoch validator sets, key rotation, ML-DSA-only validator admission.
+
+---
+
 ## PQ-HotStuff-2 implementation status — 2026-11-09 (newest status; documentation-only; append-only)
 
 > **Status supersession, not gate completion.** This section records what the draft PR stack #133–#144 (plus one PR still to be opened) implements and which of it the owner has Windows-confirmed. It removes nothing: earlier sections, including the locked 2026-11-08 pruning requirements and the 2026-11-06 status below, stay as written. It changes no code, authorizes no merge, activation or deployment, and **marks no QAT gate complete**. Per `CLAUDE.md`, a sandbox/CI run never counts as confirmation, so **no ✅ is used here**: nothing below is merged, and the legend's ✅ means shipped.
