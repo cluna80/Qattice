@@ -6243,6 +6243,26 @@ impl Node {
               evidence_precommits = payload.last_commit.as_ref().map_or(0, |c| c.precommits.len()),
               included_txs = txs.len(),
               "propose context");
+        // PQ-HotStuff epoch-change: if genesis configures an epoch-change at this
+        // height, replace tx_bytes with the typed PQHS-EC1 epoch-change payload.
+        #[cfg(feature = "pq-hotstuff")]
+        let tx_bytes = {
+            let ec_height = self.genesis.pqhs_epoch_change.as_ref()
+                .and_then(|v| v.get("at_height"))
+                .and_then(|h| h.as_u64());
+            if ec_height == Some(height)
+                && self.consensus.variant() == chain_forge_consensus::ConsensusVariant::PqHotStuff
+            {
+                let new_epoch = self.genesis.pqhs_epoch_change.as_ref()
+                    .and_then(|v| v.get("new_epoch"))
+                    .and_then(|e| e.as_u64())
+                    .unwrap_or(2);
+                let vs = self.consensus.validator_set().clone();
+                chain_forge_consensus::encode_epoch_change_payload(new_epoch, &vs)
+            } else {
+                tx_bytes
+            }
+        };
         let parent = BlockHash(format!("genesis_h{height}"));
         match self.consensus.propose(height, round, parent, tx_bytes).await {
             Ok(proposal) => {
