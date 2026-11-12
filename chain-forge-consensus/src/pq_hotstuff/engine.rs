@@ -232,8 +232,10 @@ impl PqHotStuffEngine {
     }
 
     /// Returns true if `round` is safe to vote at given `locked_qc` (spec §3.4).
+    /// A lock from a previous height never blocks votes in the current height,
+    /// because rounds restart at 1 on every height advance.
     fn safe_to_vote(&self, round: Round) -> bool {
-        round >= self.locked_qc.round
+        self.locked_qc.height < self.height || round >= self.locked_qc.round
     }
 
     /// Two-chain commit: commit `to_commit` when `locked_qc` is its direct child
@@ -565,10 +567,6 @@ impl ConsensusEngine for PqHotStuffEngine {
 
         self.height = certificate.height + 1;
         self.round = 1;
-        // locked_qc and high_qc are per-height: reset so round 1 of the new
-        // height is not blocked by a lock acquired in the previous height.
-        self.locked_qc = Qc::genesis();
-        self.high_qc = Qc::genesis();
         self.accumulator.clear();
         self.pending_proposal = None;
         Ok(())
@@ -611,8 +609,6 @@ impl ConsensusEngine for PqHotStuffEngine {
     ) -> ConsensusResult<()> {
         self.height = height;
         self.round = 1;
-        self.locked_qc = Qc::genesis();
-        self.high_qc = Qc::genesis();
         self.validator_set = validator_set;
         self.accumulator.clear();
         self.pending_proposal = None;
