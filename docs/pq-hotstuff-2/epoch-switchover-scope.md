@@ -28,14 +28,14 @@ Round z+1   B_child proposed — parent = B_ec, pol_qc = QC_ec.
 
 Commit      locked_qc.round + 1 == high_qc.round → B_ec committed.
             CommitCertificate{B_ec, QC_ec, QC_child} written to durable block store.
-            Signing eligibility rule evaluated for each validator (see R2).
+            Signing eligibility rule evaluated for each validator (see R2 table).
 
 Handoff     V_new extracted from committed B_ec body.
             Epoch counter advances: 0 → 1.
             signing_ctx.advance_epoch(1) fires.
 
 Epoch 1     V_new begins signing at epoch=1, round=1.
-            V_old signing eligibility: see R2.
+            V_old signing eligibility: see R2 table.
 ```
 
 ---
@@ -76,44 +76,69 @@ empty, the handoff fails closed. `V_new` is NOT taken from a proposal or QC.
 
 ## R2 — Signing eligibility rule
 
-This single rule covers the boundary child, delayed proof delivery,
-overlapping membership, and the moment the cutoff becomes binding.
+### Transition table
 
-**Definition:** A validator `v` is *eligible* to sign an object `m` if and
-only if all of the following hold:
+The table below is the normative definition of R2. All other text in this
+section is derived from it. Each row applies when all conditions in that row
+match; rows are evaluated top to bottom, first match wins.
 
-1. `m.epoch == v.safety_record.epoch` (no cross-epoch signing).
-2. `m.round >= v.safety_record.hvr` (no signing below the voting floor).
-3. If `v.seal` is set to `(e_s, z_s)`:
-   - `m.epoch != e_s` OR `m.round <= z_s`.
-   That is: once sealed, `v` may only retransmit messages it already signed
-   in epoch `e_s` at round `<= z_s`. It may not produce new signatures for
-   epoch `e_s` at any round above `z_s`.
-4. `v` holds a valid authenticated membership credential for `m.epoch`.
-   An overlap validator (member of both V_old and V_new) must present its
-   epoch-1 credential to sign epoch-1 objects; it cannot reuse its epoch-0
-   credential. The two epochs are authenticated separately.
+| `req.epoch` vs `rec.epoch` | `req.round` | Proof durable | Seal set | Membership | Prior record for `(epoch, round)` | Decision |
+|---|---|---|---|---|---|---|
+| `req.epoch < rec.epoch` | any | any | any | any | any | **DENY** `EpochRegression` |
+| `req.epoch == rec.epoch` | `< rec.hvr` | any | any | any | any | **DENY** `FloorViolation` |
+| `req.epoch == rec.epoch` | `== rec.last_signed_round` | any | any | any | same message bytes | **RETRANSMIT** stored bytes |
+| `req.epoch == rec.epoch` | `== rec.last_signed_round` | any | any | any | different message bytes | **DENY** `ConflictingMessage` |
+| `req.epoch == rec.epoch` | `> rec.last_signed_round` | any | `(e_s, z_s)` with `req.epoch == e_s AND req.round > z_s` | any | — | **DENY** `SealViolation` |
+| `req.epoch == rec.epoch` | `> rec.last_signed_round` | any | none or `e_s != req.epoch` | any | — | **CREATE** new signature |
+| `req.epoch == rec.epoch + 1` | `< 1` | any | any | any | any | **DENY** `RoundBelowEpochMinimum` |
+| `req.epoch == rec.epoch + 1` | `>= 1` | FALSE | any | any | any | **DENY** `ProofNotDurable` |
+| `req.epoch == rec.epoch + 1` | `>= 1` | TRUE | any | not in V_new | any | **DENY** `NotMember` |
+| `req.epoch == rec.epoch + 1` | `>= 1` | TRUE | any | in V_new | any | **CREATE** new signature; advance `rec.epoch` |
+| `req.epoch > rec.epoch + 1` | any | any | any | any | any | **DENY** `EpochSkip` |
 
-**When the seal becomes binding:**
+**Column definitions:**
 
-The seal `(0, z+1)` is set on `v` when ALL of the following are true:
-- `v` has signed `QC_child` (i.e., `v` voted for `B_child` at round `z+1`).
-- The `CommitCertificate` for `B_ec` has been written and synced to durable
-  block store.
-- The seal field `(0, z+1)` has been written and synced to `v`'s safety
-  record, in that order.
+- `rec.epoch`: the epoch stored in the validator's durable safety record.
+- `rec.hvr`: highest vote round stored; `None` treated as 0.
+- `rec.last_signed_round`: the round of the last committed signing record for
+  `req.epoch`. `None` treated as 0 for comparison; retransmit path applies
+  only when a record exists.
+- `Proof durable`: `CommitCertificate{B_ec, QC_ec, QC_child}` has been
+  written and fsynced to block store before this signing call.
+- `Seal set`: the safety record's `seal` field contains a tuple `(e_s, z_s)`.
+- Membership: whether the signer's public key appears in the V_new encoded in
+  the committed `B_ec`.
 
-A validator that has not yet learned `QC_child` has not signed it and is not
-yet sealed. It remains eligible to sign epoch-0 objects at rounds `> z+1`
-until it learns the certificate and the seal is durably written. This is the
-delayed-proof window. It is not a safety gap: `Inv_NoOldEpochBeyondBoundary`
-(S4) is an upper-bound invariant on committed certificates, not on individual
-validator actions. A late-learning validator may sign objects beyond `z+1`,
-but those objects cannot form a quorum that conflicts with a committed
-certificate, because the outgoing set has already committed `B_ec` with a
-2f+1 majority.
+### Seal timing: voting vs. proof delivery
 
-**Durable write order:**
+**Voting for `B_child` and learning `QC_child` are separate events.**
+
+A validator `v` can vote for `B_child` at round `z+1` (contributing its share
+of `QC_child`) but not yet have received the full `QC_child` back. Until `v`
+learns that `QC_child` has formed and the `CommitCertificate` is durably
+written, the proof-durable condition is false. During this window `v` remains
+eligible to sign epoch-0 objects at rounds `> z+1` (the `SealViolation` row
+does not trigger while `seal` is unset).
+
+**What prevents prohibited epoch-0 certificates in this window:**
+
+The safety argument is that under BFT assumptions (at most `f` Byzantine
+validators, `f < n/3`), no quorum of `2f+1` outgoing validators can form a
+certificate for a conflicting object. At the moment `QC_child` forms, `2f+1`
+honest validators have precommitted for `B_child`. Those validators have their
+`locked_qc` set to `QC_ec` (round `z`). By the cross-round locking rule (R4),
+they will not vote for any object whose `pol_qc.round < z`. A competing
+certificate at any conflicting chain tip would require `2f+1` precommits that
+include at least `f+1` honest validators, each of which is locked and will not
+grant them.
+
+**This is a BFT-assumption argument, not a model-verified result.** The
+crash+SnapSync TLC run with a saved output log and a witness trace is required
+to verify that the delayed-proof window does not create a reachable path to a
+boundary violation. See §Open model obligations.
+
+### Durable write order
+
 1. Write `CommitCertificate` to block store. fsync.
 2. Write `seal = (0, z+1)` to safety record. fsync.
 3. Advance epoch counter.
@@ -155,9 +180,17 @@ On open, the safety store verifies:
 - `handoff_cert_hash` matches the certificate in the block store. Fail
   closed if not.
 
-### R3-a: Safety record in epoch 0, block store tip in epoch 1
+### R3-a: Safety record in epoch 0, block store committed epoch is 1
 
-The handoff happened but the signer did not advance. Recovery:
+**Trigger condition:** `safety_record.epoch < block_store.committed_epoch`.
+
+The handoff happened — the block store has an epoch-1 committed tip — but
+the signer did not fully advance. The handoff proof may already be durable in
+the block store while the tip still identifies epoch 0; R3-a applies as soon
+as the committed epoch in the block store is ahead of the safety record,
+regardless of which block is at the tip.
+
+Recovery:
 
 1. Load `CommitCertificate` for `B_ec` from block store. Fail closed if
    missing or unverifiable against V_old public keys.
@@ -187,48 +220,56 @@ The signing context is not attached until step 7 completes.
 ### R3-c: Round-1 minimum for the incoming set
 
 The first signature in epoch 1 must have `round >= 1`. This is enforced by
-an explicit check in `sign_core`, applied when `epoch > rec.epoch` at the
-moment of the first sign (i.e., the advance just happened) or when
-`epoch == rec.epoch == 1` and `rec.hvr` is `None`:
+an explicit check in `sign_core`, applied when `req.epoch > rec.epoch` (the
+incoming-epoch row in the R2 table):
 
 ```
-if epoch == rec.epoch && round < 1 {
-    return Err(SignError::RoundBelowEpochMinimum { epoch, round });
+if requested_epoch > rec.epoch && requested_round < 1 {
+    return Err(SignError::RoundBelowEpochMinimum {
+        epoch: requested_epoch,
+        round: requested_round,
+    });
 }
 ```
 
-`EpochRegression` (`epoch < rec.epoch`) covers old-epoch messages after the
-advance. It does not cover `epoch=1, round=0`: the above check fills that gap.
-The check applies on the first incoming signature even when the safety record
-still names the outgoing epoch at the moment of evaluation (R3-a step 6).
+The guard fires when the safety record is still at epoch 0 and the first
+incoming request names epoch 1. Using `epoch == rec.epoch` in this check is
+wrong: when the record has not yet advanced (`rec.epoch == 0`) and the
+request is for epoch 1, `epoch == rec.epoch` is false and the check would be
+skipped entirely for the first incoming request. The condition must be
+`requested_epoch > rec.epoch`.
+
+`EpochRegression` (`req.epoch < rec.epoch`) covers old-epoch messages after
+the advance and does not overlap with this check.
 
 ---
 
 ## R4 — Competing candidates: cross-round locking rule
 
-Same-round vote restriction (R1 / `RoundBelowSigned`) prevents two different
-messages at the same round. It does not prevent a competing epoch-change
-proposal at a later round `z'`.
+**Open obligation.**
 
-**Cross-round locking rule (derived from spec §3.4):** A validator votes for
-a proposal at round `z'` only if the proposal's `pol_qc.round >= locked_qc.round`.
-If the validator's `locked_qc` certifies `B_ec` at round `z`, it will not
-vote for a competing epoch-change block `B_ec'` at round `z'` unless
-`B_ec'`'s `pol_qc.round >= z`. Producing such a `pol_qc` requires 2f+1
-outgoing validators to have precommitted for `B_ec'` at some round `>= z`.
-Under BFT assumptions (f < n/3), this is impossible if 2f+1 validators have
-already precommitted for `B_ec` at round `z`, because honest validators lock
-on `B_ec` and will not vote for a conflicting block at the same or lower
-round.
+A validator that voted for `B_ec` at round `z` will not vote for a competing
+epoch-change block `B_ec'` at the same round (the safety store's
+`RoundBelowSigned` check prevents it). It may receive a competing proposal at
+a later round `z'`.
 
-**Open obligation:** This argument holds under BFT assumptions but has not
-been exhaustively model-checked in the compete scenario. The PO-4 compete
-run (`witness_t3_compete`, SetB non-empty) was stopped before exhaustion
-(406K+ states). Until the compete scenario is exhaustively checked, the
-single-candidate assumption is a BFT-assumption-dependent claim, not a
-model-verified result. Any protocol change that relaxes the BFT assumption or
-introduces multiple valid epoch-change candidates per epoch requires a new
-model run before this scope can be re-approved.
+The cross-round locking rule (spec §3.4) constrains this: a validator votes
+for a proposal at round `z'` only if the proposal's `pol_qc.round >= locked_qc.round`.
+If the validator's `locked_qc` certifies `B_ec` at round `z`, it will not vote
+for `B_ec'` at `z'` unless `B_ec'`'s `pol_qc.round >= z`. Producing such a
+`pol_qc` would require `2f+1` outgoing validators to have precommitted for a
+competing block at some round `>= z`, which under BFT assumptions is
+impossible once `2f+1` honest validators have locked on `B_ec`.
+
+**This argument has not been exhaustively model-checked in the compete
+scenario.** The PO-4 compete run (`witness_t3_compete`, SetB non-empty) was
+stopped before exhaustion (406K+ states). The cross-round locking rule is a
+BFT-assumption-dependent claim that holds in the same-round case but has not
+been verified for all reachable later-round configurations. This scope document
+cannot close the competing-candidates obligation. Any protocol change that
+introduces multiple valid epoch-change candidates per epoch, or that relaxes
+the BFT assumption, requires an exhaustive compete-scenario model run before
+Gate A can be re-approved.
 
 ---
 
@@ -244,8 +285,10 @@ Acceptance:
   each of the four steps. Each crash scenario re-opens correctly.
 - `set_hash` and `handoff_cert_hash` written to safety record on advance.
   Mismatch on restart fails closed.
-- R3-a and R3-b recovery paths implemented and tested.
-- `RoundBelowEpochMinimum` check implemented in `sign_core`.
+- R3-a and R3-b recovery paths implemented and tested. R3-a trigger is
+  `safety_record.epoch < block_store.committed_epoch`, not tip identity.
+- `RoundBelowEpochMinimum` check implemented in `sign_core` using
+  `requested_epoch > rec.epoch && requested_round < 1`.
 - An in-process epoch-boundary test passes on Windows (BossKing MINGW64,
   developer-run, result pasted): 4 validators, real ML-DSA-65 keys, one
   epoch-change block. Test must demonstrate:
@@ -281,21 +324,24 @@ Acceptance (additional, beyond Gate A):
 
 ### What the crash run does and does not establish
 
-`crash_t3_disjoint.cfg` exists at commit `e818fda`:
-- `CrashOn=TRUE`, `SnapSync=TRUE`, `MaxProps=6`, `MaxTos=3`, `LagSet={0,1}`
+`crash_t3_disjoint.cfg` at commit `e818fda` (the revision this document is
+tied to):
+- `CrashOn=TRUE`, `StageVotes=TRUE`, `MaxProps=8`, `MaxTos=4`, `LagSet={0,1}`
+- **No `SnapSync` assignment** — the SnapSync abstraction was not enabled at
+  this revision.
 
-The TLC result (65 states, exhausted, no violation) was recorded in the
-session context during PO-4 work on 2026-11-11 but **no output log was
-saved** to `out/`. The run cannot be independently verified from saved
-artifacts. No witness trace establishes that crash and restart actions were
-reachable in the explored states; exhaustion depth alone does not.
+The file was subsequently modified in commit `dc3f273` to add `SnapSync=TRUE`,
+set `StageVotes=FALSE`, and reduce `MaxProps` to 6 and `MaxTos` to 3. That
+modified configuration produced a 65-state exhaustive run recorded in
+REPORT.md, but **no output log was saved** to `out/`. The run cannot be
+independently verified from saved artifacts.
 
 **What this means for R3:** The crash recovery rules in R3 are derived from
 the protocol structure and the safety store's existing crash tests (76 tests
-in `pq_hotstuff_safety.rs`, Windows-confirmed). They are not supported by a
-verified TLC crash-restart witness for the epoch-transition model. A re-run
-of `crash_t3_disjoint.cfg` with a saved log and a witness trace is required
-before R3 can cite PO-4 as evidence.
+in `pq_hotstuff_safety.rs`, Windows-confirmed at `c77c567`). They are not
+supported by a verified TLC crash-restart witness for the epoch-transition
+model. A re-run of `crash_t3_disjoint.cfg` with a saved log and a witness
+trace is required before R3 can cite PO-4 as evidence.
 
 ### Mutation evidence (non-SnapSync, output logs saved)
 
@@ -314,3 +360,4 @@ run log was not saved but the REPORT.md records the result.
 | `crash_t3_disjoint` with saved log and restart witness | **Not yet run with saved output** |
 | Compete scenario (SetB non-empty) exhaustive safety | **Not exhausted** (406K+ states stopped) |
 | Cross-round locking rule under competing candidates | **BFT-assumption argument only; not model-checked** |
+| Delayed-proof window safety (SnapSync crash witness) | **BFT-assumption argument only; not model-checked** |
