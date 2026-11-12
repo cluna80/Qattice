@@ -240,8 +240,10 @@ impl PqHotStuffEngine {
 
     /// Two-chain commit: commit `to_commit` when `locked_qc` is its direct child
     /// at the consecutive round (locked_qc.round == to_commit.round + 1).
+    /// Both QCs must be at the current height; a lock from a prior height must
+    /// never trigger a commit in the current height.
     fn try_two_chain_commit(&self, to_commit: &Qc) -> Option<CommitCertificate> {
-        if self.locked_qc.round == to_commit.round + 1 {
+        if to_commit.height == self.height && self.locked_qc.round == to_commit.round + 1 {
             return Some(CommitCertificate {
                 height: to_commit.height,
                 round: to_commit.round,
