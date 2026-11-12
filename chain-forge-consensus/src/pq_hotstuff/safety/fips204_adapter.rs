@@ -7,7 +7,7 @@
 //! measure only: copies made elsewhere (the backend's own parsed key object, which it zeroizes on drop, or the operating
 //! system's memory) are not under this type's control.
 use super::{ConsensusSigner, ConsensusVerifier, SignerError};
-use fips204_crypto::fips204_backend::MlDsa65Fips204;
+use chain_forge_crypto::fips204_backend::MlDsa65Fips204;
 
 /// An in-memory ML-DSA-65 signing key.
 pub struct Fips204Signer {

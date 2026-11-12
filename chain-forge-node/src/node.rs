@@ -1203,6 +1203,15 @@ impl Node {
             chain_forge_core::BftVariant::HotStuff   => ConsensusVariant::HotStuffStyle,
             chain_forge_core::BftVariant::Fba        => ConsensusVariant::XrplInspired,
             chain_forge_core::BftVariant::Tendermint => ConsensusVariant::TendermintStyle,
+            chain_forge_core::BftVariant::PqHotStuff => {
+                #[cfg(not(feature = "pq-hotstuff"))]
+                return Err(NodeError::Genesis(
+                    "genesis selects pq-hotstuff but the node was built without \
+                     --features pq-hotstuff; rebuild with that feature enabled".to_string()
+                ));
+                #[cfg(feature = "pq-hotstuff")]
+                ConsensusVariant::PqHotStuff
+            }
         };
         if desired_variant != ConsensusVariant::TendermintStyle {
             tracing::warn!(variant = ?desired_variant,
@@ -1234,6 +1243,13 @@ impl Node {
             }
             ConsensusVariant::XrplInspired => {
                 let mut e = FbaEngine::new();
+                e.init(consensus_cfg, genesis_vs).await
+                    .map_err(|e| NodeError::Consensus(e.to_string()))?;
+                Box::new(e)
+            }
+            #[cfg(feature = "pq-hotstuff")]
+            ConsensusVariant::PqHotStuff => {
+                let mut e = chain_forge_consensus::PqHotStuffEngine::new();
                 e.init(consensus_cfg, genesis_vs).await
                     .map_err(|e| NodeError::Consensus(e.to_string()))?;
                 Box::new(e)
