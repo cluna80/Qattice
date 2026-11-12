@@ -3414,8 +3414,25 @@ impl Node {
                         } else {
                             match self.cast_and_broadcast_own_votes(&proposal).await {
                                 Ok(Some(cert)) => {
-                                    if let Err(e) = self.commit_block(cert, &proposal).await {
-                                        error!(error = %e, "commit failed after reaching quorum via own vote");
+                                    // The two-chain commit cert is for the previous
+                                    // locked QC (cert.round = R-1), not the current
+                                    // proposal's round (R). Use cert coords to find it.
+                                    let commit_proposal = if cert.round == proposal.round {
+                                        Some(proposal.clone())
+                                    } else {
+                                        self.pending_proposals
+                                            .get(&(cert.height, cert.round))
+                                            .cloned()
+                                    };
+                                    match commit_proposal {
+                                        Some(p) => {
+                                            if let Err(e) = self.commit_block(cert, &p).await {
+                                                error!(error = %e, "commit failed after reaching quorum via own vote");
+                                            }
+                                        }
+                                        None => {
+                                            self.pending_certs.insert((cert.height, cert.round), cert);
+                                        }
                                     }
                                 }
                                 Ok(None) => {}
@@ -3507,8 +3524,11 @@ impl Node {
                                 let epoch = self.consensus.current_height();
                                 self.handle_drained_equivocations(eqs, epoch);
 
+                                // The two-chain commit cert is for the *previous*
+                                // locked QC (cert.round = R-1), not the vote's
+                                // round (R). Look up the proposal by cert's coords.
                                 let proposal = self.pending_proposals
-                                    .get(&(vote.height, vote.round))
+                                    .get(&(cert.height, cert.round))
                                     .cloned();
                                 match proposal {
                                     Some(p) => {
@@ -3525,13 +3545,13 @@ impl Node {
                                         // can commit the moment the body lands, without
                                         // needing to call receive_vote again.
                                         warn!(
-                                            height = vote.height,
-                                            round  = vote.round,
+                                            height = cert.height,
+                                            round  = cert.round,
                                             "quorum reached but proposal not yet seen; \
                                              parking certificate for deferred commit"
                                         );
                                         self.pending_certs
-                                            .insert((vote.height, vote.round), cert);
+                                            .insert((cert.height, cert.round), cert);
                                     }
                                 }
                             }
