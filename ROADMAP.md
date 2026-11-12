@@ -24,7 +24,12 @@ cargo test -p chain-forge-consensus --features epoch-transition --test prop_hand
 cargo test -p chain-forge-crypto --features real-pqc --test prop_sign_verify -- --nocapture
 ```
 
-**Windows confirmation:** ⬜ **Pending** — per CLAUDE.md policy, tests are not marked ✅ until confirmed on BossKing (MINGW64).
+**Windows confirmation (owner-run, 2026-11-12):** `feat/vote-format-v2` at `f8d52c4` — BossKing MINGW64. All 24/24 passed:
+- `prop_vote_format` (`--features pq-hotstuff`): 12/12 in 0.28s
+- `prop_handoff` (`--features epoch-transition`): 6/6 in 0.60s
+- `prop_sign_verify` (`--features real-pqc`): 6/6 in 1.61s
+
+✅ **Windows-confirmed**
 
 **Next steps (not started):**
 - Wire `Vote.epoch` into `sign_vote` so the epoch is set at construction time (not just on literal initializers).
