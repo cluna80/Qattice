@@ -318,6 +318,13 @@ impl PqHotStuffEngine {
 
     /// Pacemaker timeout for the current round (ms).
     pub fn current_timeout_ms(&self) -> u64 { self.pacemaker.timeout_ms() }
+
+    /// Test helper: set high_qc.round so unit tests can simulate the
+    /// post-two-chain state without running a full receive_vote sequence.
+    #[cfg(test)]
+    pub fn test_set_high_qc_round(&mut self, round: Round) {
+        self.high_qc.round = round;
+    }
 }
 
 impl Default for PqHotStuffEngine {
@@ -424,6 +431,14 @@ impl ConsensusEngine for PqHotStuffEngine {
     async fn receive_vote(&mut self, vote: Vote) -> ConsensusResult<Option<CommitCertificate>> {
         if vote.height != self.height {
             return Err(ConsensusError::StaleMessage(vote.height, self.height));
+        }
+
+        // PQ-HotStuff is single-phase: only Precommit votes count toward quorum.
+        // Prevotes are broadcast for pacemaker liveness evidence but must not be
+        // accumulated here — mixing them with precommits causes CommitCertificate
+        // precommits to contain non-precommit votes, which verify_commit rejects.
+        if vote.vote_type != VoteType::Precommit {
+            return Ok(None);
         }
 
         let idx = self.validator_set.validators
@@ -750,10 +765,26 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "pq-hotstuff-fips204")]
     async fn epoch_transition_records_seal_round() {
+        use crate::pq_hotstuff::safety::Fips204Signer;
+        use crate::pq_hotstuff::safety::CTX_VOTE;
+        use crate::vote_signing_bytes;
+
         // 1-node set so quorum threshold = 1 and a single precommit satisfies R1 verification.
+        // Uses a real ML-DSA-65 keypair (deterministic seed) so verify_handoff_proof can check
+        // the actual signature rather than rejecting an empty one.
+        let mut signer = Fips204Signer::from_seed(&[0u8; 32]);
+
+        let v0 = ValidatorInfo {
+            id: ValidatorId("v0".into()),
+            voting_power: 1,
+            pop_verified: false,
+            public_key: signer.public_key().to_vec(),
+        };
+        let vs1 = ValidatorSet { height: 0, validators: vec![v0] };
+
         let mut e = PqHotStuffEngine::new();
-        let vs1 = ValidatorSet { height: 0, validators: vec![make_validator("v0")] };
         let config = ConsensusConfig {
             variant: ConsensusVariant::PqHotStuff,
             chain_id: "test-chain".into(),
@@ -766,18 +797,29 @@ mod tests {
             height: 1,
             validators: vec![make_validator("v1")],
         };
+
+        // Sign the precommit with the real ML-DSA-65 key.
+        let msg = vote_signing_bytes("test-chain", &VoteType::Precommit, 1, 3, Some(&BlockHash("ec".into())));
+        use crate::pq_hotstuff::safety::ConsensusSigner;
+        let sig = signer.sign(CTX_VOTE, &msg).expect("sign failed");
+
         let precommit = Vote {
             vote_type: VoteType::Precommit,
             height: 1,
             round: 3,
             block_hash: Some(BlockHash("ec".into())),
             validator: ValidatorId("v0".into()),
-            signature: vec![],
+            signature: sig,
             scheme: Vote::default_scheme(),
         };
         let cert = CommitCertificate {
             height: 1, round: 3, block_hash: BlockHash("ec".into()), precommits: vec![precommit],
         };
+        // verify_handoff_proof requires high_qc.round == cert.round + 1 (consecutive-round
+        // check). In the real two-chain flow this is always true because the commit fires
+        // when the second QC (round 4) forms and high_qc has just been updated. The test
+        // calls on_commit directly, so we set up the state manually.
+        e.test_set_high_qc_round(4);
         e.on_commit(cert, Some(new_vs)).await.unwrap();
         assert_eq!(e.seal_round(), Some(3));
         assert_eq!(e.epoch(), 1);
