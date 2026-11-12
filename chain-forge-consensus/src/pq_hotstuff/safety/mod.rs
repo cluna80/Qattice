@@ -38,11 +38,15 @@
 #[cfg(feature = "pq-hotstuff-fips204")]
 mod fips204_adapter;
 mod fs;
+#[cfg(feature = "gate-b-harness")]
+pub mod fs_counter;
 mod record;
 mod store;
 
 #[cfg(feature = "pq-hotstuff-fips204")]
 pub use fips204_adapter::{Fips204Signer, Fips204Verifier};
+#[cfg(feature = "gate-b-harness")]
+pub use fs_counter::FsCounter;
 pub use fs::FsStorage;
 pub use record::{decode_marker, decode_record, encode_marker, encode_record, Marker};
 pub use store::{FreshInit, SafetyStore, Signed};

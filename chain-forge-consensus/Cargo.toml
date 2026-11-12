@@ -18,6 +18,7 @@ sha3        = { workspace = true, optional = true }
 # Separate, renamed dependency so the PQ-HotStuff-2 FIPS 204 adapter enables ONLY the fips204-backend feature of chain-forge-crypto
 # (the `chain-forge-crypto` entry above enables real-crypto, which is Ed25519, and stays tied to the `real-crypto` feature).
 fips204-crypto = { package = "chain-forge-crypto", path = "../chain-forge-crypto", features = ["fips204-backend"], optional = true }
+crc32fast   = { version = "1", optional = true }
 
 [features]
 real-crypto = ["chain-forge-crypto", "chain-forge-crypto/real-pqc"]
@@ -25,6 +26,9 @@ real-crypto = ["chain-forge-crypto", "chain-forge-crypto/real-pqc"]
 pq-hotstuff = ["dep:sha3"]
 # The real FIPS 204 ML-DSA-65 adapter for the safety-state signer/verifier traits (in-memory keys only; off by default).
 pq-hotstuff-fips204 = ["pq-hotstuff", "dep:fips204-crypto"]
+# Gate B devnet test harness (QAT-07). Two OS processes, loopback TCP, real ML-DSA-65, file-based counter.
+# DISABLED by default. Enable only for the Windows acceptance test run. Epoch-transition activation is a separate decision.
+gate-b-harness = ["pq-hotstuff-fips204", "dep:crc32fast"]
 
 [dev-dependencies]
 tokio = { workspace = true }
