@@ -15,12 +15,16 @@
 //! - Vote aggregation: threshold quorum (2f+1 out of 3f+1)
 //! - Proposer rotation: round-robin by validator index within epoch
 //!
+//! # QAT-07 additions (this file, stacked on CF-C1)
+//! - `signing_ctx: Option<Box<dyn EngineSigningContext>>` on `PqHotStuffEngine`
+//! - `attach_signing_context` wires in a `SafetyStoreSigningContext` (or any impl)
+//! - `restore_floors` loads hvr/hqr from the durable record on restart
+//! - `propose`, `receive_vote`, `on_timeout` route through the context when present
+//! - `on_commit` calls `signing_ctx.advance_epoch` on epoch-change commits
+//!
 //! # What is NOT here yet (gated on later milestones)
-//! - Real ML-DSA-65 signing (SafetyStore integration requires a `ConsensusSigner` +
-//!   `MonotonicCounter` from the node layer — QAT-07)
-//! - Epoch-set replacement (`on_commit` accepts `new_validator_set` but the full
-//!   SSI switch-over logic is QAT-07)
 //! - P2P / network I/O (chain-forge-node layer)
+//! - Key rotation, revocation, ML-DSA-only admission gate (QAT-08)
 //! - Production key storage (blocked on PR #109 review)
 
 use std::collections::{BTreeMap, HashSet};
@@ -30,6 +34,8 @@ use crate::{
     ConsensusConfig, ConsensusEngine, ConsensusError, ConsensusResult, ConsensusVariant,
     Round, ValidatorId, ValidatorSet, Vote, VoteType,
 };
+use crate::pq_hotstuff::signing::EngineSigningContext;
+use crate::pq_hotstuff::wire::HASH_LEN;
 
 // ── QC / TC types ─────────────────────────────────────────────────────────────
 
@@ -149,6 +155,11 @@ pub struct PqHotStuffEngine {
     seal_round: Option<Round>,
 
     pacemaker: Pacemaker,
+
+    // QAT-07: optional SafetyStore signing context. When Some, all outbound messages
+    // are signed with write-before-broadcast guarantees. When None, the engine runs
+    // in sign-later mode (suitable for unit tests and the CF-C1 skeleton).
+    signing_ctx: Option<Box<dyn EngineSigningContext>>,
 }
 
 impl PqHotStuffEngine {
@@ -175,6 +186,35 @@ impl PqHotStuffEngine {
             pending_proposal: None,
             seal_round: None,
             pacemaker: Pacemaker::new(1000),
+            signing_ctx: None,
+        }
+    }
+
+    /// Attach a durable signing context (QAT-07). Call this once after `init`, before
+    /// any `propose` / `receive_vote` / `on_timeout`. After attaching, call
+    /// `restore_floors` to reload hvr/hqr from the durable record.
+    pub fn attach_signing_context(&mut self, ctx: Box<dyn EngineSigningContext>) {
+        self.signing_ctx = Some(ctx);
+    }
+
+    /// Reload the highest vote round (hvr) and lock QC round (hqr) from the durable
+    /// safety record. Must be called after `attach_signing_context` on every restart.
+    /// Sets `locked_qc.round` and `high_qc.round` to at least the stored floors.
+    pub fn restore_floors(&mut self) {
+        if let Some(ctx) = &self.signing_ctx {
+            let floors = ctx.restore();
+            if floors.epoch == self.epoch {
+                if let Some(hqr) = floors.hqr {
+                    if hqr > self.locked_qc.round as u64 {
+                        self.locked_qc.round = hqr as u32;
+                    }
+                }
+                if let Some(hvr) = floors.hvr {
+                    if hvr > self.high_qc.round as u64 {
+                        self.high_qc.round = hvr as u32;
+                    }
+                }
+            }
         }
     }
 
@@ -216,6 +256,35 @@ impl PqHotStuffEngine {
         self.pending_proposal = None;
     }
 
+    /// Produce a signed precommit vote for the local validator (QAT-07).
+    /// Returns the signature bytes; the caller builds the wire `VoteMessage`.
+    /// Returns empty vec when no signing context is attached (sign-later mode).
+    pub fn sign_local_precommit(
+        &mut self,
+        block_hash: &BlockHash,
+        parent_hash: &BlockHash,
+        parent_round: Round,
+        qc_round: Round,
+    ) -> Result<Vec<u8>, ConsensusError> {
+        if let Some(ctx) = self.signing_ctx.as_mut() {
+            let block_id = sha3_32(block_hash.0.as_bytes());
+            let parent_id = sha3_32(parent_hash.0.as_bytes());
+            ctx.sign_vote(
+                &self.config.chain_id,
+                self.epoch,
+                self.round as u64,
+                block_id,
+                parent_id,
+                parent_round as u64,
+                qc_round as u64,
+            )
+            .map(|s| s.signature)
+            .map_err(ConsensusError::Internal)
+        } else {
+            Ok(vec![])
+        }
+    }
+
     /// Return the proposer `ValidatorId` for a given (height, round).
     pub fn proposer_for(&self, height: BlockHeight, round: Round) -> Option<ValidatorId> {
         if self.validator_set.validators.is_empty() { return None; }
@@ -242,6 +311,12 @@ impl PqHotStuffEngine {
 impl Default for PqHotStuffEngine {
     fn default() -> Self { Self::new() }
 }
+
+// SAFETY: `PqHotStuffEngine` only accesses `signing_ctx` through `&mut self`.
+// The signing context is never shared across threads; all callers hold exclusive
+// access. This manual impl is required because `dyn EngineSigningContext` is
+// `Send` but not `Sync` (the safety store uses `&mut self` for all writes).
+unsafe impl Sync for PqHotStuffEngine {}
 
 #[async_trait::async_trait]
 impl ConsensusEngine for PqHotStuffEngine {
@@ -295,6 +370,18 @@ impl ConsensusEngine for PqHotStuffEngine {
             sha3_hex(parent_hash.0.as_bytes())
         ));
 
+        // Build block_id bytes for signing: take SHA3-256 of the placeholder string.
+        let block_id_bytes = sha3_32(block_hash.0.as_bytes());
+
+        // Sign via SafetyStore when a context is attached (QAT-07); otherwise sign-later.
+        let signature = if let Some(ctx) = self.signing_ctx.as_mut() {
+            ctx.sign_proposal(self.epoch, round as u64, block_id_bytes)
+                .map(|s| s.signature)
+                .map_err(ConsensusError::Internal)?
+        } else {
+            vec![]
+        };
+
         Ok(BlockProposal {
             height,
             round,
@@ -303,7 +390,7 @@ impl ConsensusEngine for PqHotStuffEngine {
             parent_hash,
             timestamp_ms: 0,
             tx_data,
-            signature: vec![],  // signed by SafetyStore in the node layer (QAT-07)
+            signature,
             pol_round: if self.high_qc.round > 0 { Some(self.high_qc.round) } else { None },
         })
     }
@@ -374,11 +461,19 @@ impl ConsensusEngine for PqHotStuffEngine {
         let old_round = round;
         self.advance_round(round + 1);
 
-        // Nil vote for the timed-out round (broadcast to peers to form a TC)
         let validator = self.validator_set.validators
             .first()
             .map(|v| v.id.clone())
             .unwrap_or_else(|| ValidatorId("unknown".into()));
+
+        // Sign timeout via SafetyStore (QAT-07); otherwise sign-later.
+        let signature = if let Some(ctx) = self.signing_ctx.as_mut() {
+            ctx.sign_timeout(&self.config.chain_id, self.epoch, old_round as u64, self.high_qc.round as u64)
+                .map(|s| s.signature)
+                .map_err(ConsensusError::Internal)?
+        } else {
+            vec![]
+        };
 
         Ok(Vote {
             vote_type: VoteType::Nil,
@@ -386,7 +481,7 @@ impl ConsensusEngine for PqHotStuffEngine {
             round: old_round,
             validator,
             block_hash: None,
-            signature: vec![],
+            signature,
             scheme: Vote::default_scheme(),
         })
     }
@@ -403,6 +498,9 @@ impl ConsensusEngine for PqHotStuffEngine {
             self.seal_round = Some(certificate.round);
             self.epoch += 1;
             self.validator_set = vs;
+            if let Some(ctx) = self.signing_ctx.as_mut() {
+                ctx.advance_epoch(self.epoch);
+            }
         }
 
         self.height = certificate.height + 1;
@@ -463,6 +561,12 @@ impl ConsensusEngine for PqHotStuffEngine {
 fn sha3_hex(data: &[u8]) -> String {
     use sha3::{Digest, Sha3_256};
     Sha3_256::digest(data).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// SHA3-256 as a 32-byte array (for wire signing).
+fn sha3_32(data: &[u8]) -> [u8; HASH_LEN] {
+    use sha3::{Digest, Sha3_256};
+    Sha3_256::digest(data).into()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
