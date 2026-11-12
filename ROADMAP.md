@@ -1,5 +1,39 @@
 # Qattice — Public Testnet Alpha: ML-DSA-65 + PQ-HotStuff Launch Plan
 
+## vote-format v2 property tests — sandbox pass, Windows pending — 2026-11-12
+
+**Branch:** `feat/vote-format-v2` — commits `2037c7a` (format change) + `3813fe2` (property tests)
+
+**What landed:**
+
+- `Vote.epoch: u64` and `CommitCertificate.epoch: u64` added (`#[serde(default)]` for backward-compatible v1 deserialization). All existing construction sites updated to `epoch: 0`.
+- `vote_signing_bytes_v2` with unambiguous encoding: `CFV2\x00 | u16-BE chain_id_len | chain_id | type_byte | u64-LE height | u32-LE round | u64-LE epoch | 32-byte set_hash | 0x00/0x01 | [u16-BE bh_len | bh_bytes]`.
+- Three property test files:
+
+| File | Features | Tests | Sandbox |
+|---|---|---|---|
+| `chain-forge-consensus/tests/prop_vote_format.rs` | `pq-hotstuff` | P1 field binding (epoch, height, round, set_hash, absent/present block_hash, chain_id, all VoteType variants, boundary values), P2 v1≠v2 bytes, fixed v1/v2 encoding vectors | 12/12 ✅ |
+| `chain-forge-consensus/tests/prop_vote_format.rs` | `epoch-transition` | P4 canonical_set_hash: order-independent, ID/power/pubkey sensitive | included above |
+| `chain-forge-consensus/tests/prop_handoff.rs` | `epoch-transition` | P3/P7 valid h2/h3 pair, mixed-epoch vote, wrong child QC round, wrong cert epoch (placeholder), 1-of-4 quorum, set hash mismatch | 6/6 ✅ |
+| `chain-forge-crypto/tests/prop_sign_verify.rs` | `real-pqc` | P5 roundtrip/wrong-key/mutated-message, P6 bit-flip/boundaries/truncation | 6/6 ✅ |
+
+**Sandbox run commands (all passed):**
+```
+cargo test -p chain-forge-consensus --features pq-hotstuff --test prop_vote_format -- --nocapture
+cargo test -p chain-forge-consensus --features epoch-transition --test prop_handoff -- --nocapture
+cargo test -p chain-forge-crypto --features real-pqc --test prop_sign_verify -- --nocapture
+```
+
+**Windows confirmation:** ⬜ **Pending** — per CLAUDE.md policy, tests are not marked ✅ until confirmed on BossKing (MINGW64).
+
+**Next steps (not started):**
+- Wire `Vote.epoch` into `sign_vote` so the epoch is set at construction time (not just on literal initializers).
+- Wire `vote_signing_bytes_v2` into the verifier path and `verify_handoff_proof`.
+- Expose `last_commit: Option<CommitCertificate>` in `BlockSummary` so the devnet boundary test can assert QC epochs.
+- Four-node QC epoch boundary devnet test (requires all three wiring steps above).
+
+---
+
 ## Next: QC epoch assertion test — open
 
 **Next boundary test: assert the epoch carried by each quorum certificate (QC epoch field)**
@@ -35,7 +69,7 @@ verify_handoff_proof(chain, &api.block(3).last_commit, &outgoing_set, ...); // h
 verify_handoff_proof(chain, &api.block(4).last_commit, &outgoing_set, ...); // h3 cert
 ```
 
-**Current state (gap):** `Vote` has no `epoch` field; `vote_signing_bytes` does not include epoch; `CommitCertificate` does not carry an epoch. The API `BlockSummary` exposes `last_commit_signers` (validator IDs only) but not the full `CommitCertificate`. There is no way for a test to assert "this QC was signed under epoch N" without reading internal engine state.
+**Current state:** `Vote.epoch` and `CommitCertificate.epoch` are implemented (`feat/vote-format-v2`, `2037c7a`). `vote_signing_bytes_v2` is available but not yet wired into `sign_vote` or the verifier path. The API `BlockSummary` exposes `last_commit_signers` (validator IDs only) but not the full `CommitCertificate`. There is no way for a test to assert "this QC was signed under epoch N" without reading internal engine state.
 
 **Required changes (separate branch — protocol break):**
 1. Add `epoch: u64` to `Vote`. Every vote in a certificate must carry the same epoch and must sign the same epoch value. Add a version prefix to `vote_signing_bytes` so legacy-format bytes cannot be accepted under the new format: `CFV2| chain_id | type | height | round | epoch | block_hash` (increment prefix from `CFV|` to `CFV2|`).
