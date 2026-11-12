@@ -13,17 +13,20 @@
 | B2: 5 kill points (K0–K3 forced + K4 clean control) — crash-window recovery via `open()` | Done |
 | B3: 8 counter tests — truncated, CRC mismatch, stale session, CAS failure, F1/F2 two-process fencing | Done |
 | `gate-b-harness` feature flag — devnet harness disabled in production build | Done |
-| **9 Gate B acceptance tests pass Windows-confirmed** (BossKing MINGW64, `ba170eb`) | ✅ **Windows-confirmed** |
+| **9 Gate B acceptance tests pass Windows-confirmed** (BossKing MINGW64, `b61257c`) | ✅ **Windows-confirmed** |
 
-**Windows confirmation (owner-run, 2026-11-12):** `cargo test -p chain-forge-consensus --features gate-b-harness --test gate_b_counter_fencing --test gate_b_tcp_epoch_boundary` on branch `feat/qat-07-safety-store-integration` at `ba170eb` — 8/8 counter fencing + 1/1 TCP epoch boundary passed.
+**Windows confirmation — counter fencing (owner-run, 2026-11-12):** `cargo test -p chain-forge-consensus --features gate-b-harness --test gate_b_counter_fencing` at `ba170eb` — 8/8 passed. F1 fencing: child blocked with `open_exclusive: The process cannot access the file because it is being used by another process. (os error 32)`; succeeded after `release_handle()`. F2 reacquisition after simulated kill: file state value=1 confirmed, reacquired and advanced to value=2.
+
+**Windows confirmation — TCP epoch boundary (owner-run, 2026-11-12):** `cargo test -p chain-forge-consensus --features gate-b-harness --test gate_b_tcp_epoch_boundary` at `b61257c` — 1/1 passed. All 7 steps:
+- Step 3: `SealViolation` — epoch 0 sealed at round 5; round 6 above cutoff ✅
+- Step 4: `ProofNotDurable` — epoch 1 proof not durable; `advance_epoch_record` not yet called (sealed at epoch 0 round 5) ✅
+- Step 6: `EpochRegression` — epoch 0 below recorded epoch 1 ✅
+- Step 7: epoch-1 ML-DSA-65 frame, 3309-byte signature, verifies ✅
+- Receiver saw exactly 2 frames (epoch-0 round-5, epoch-1 round-1), both valid ✅
+
+**Windows confirmation — crash injection (owner-run, 2026-11-12):** `cargo test -p chain-forge-consensus --features gate-b-harness --test gate_b_crash_injection` at `7e8402b` — 6/6 passed (K0–K4 + summary). Same crate sources as `b61257c` for all safety store and FsCounter code; crash-injection tests carry forward.
 
 **Gate B scope document:** `docs/pq-hotstuff-2/gate-b-scope.md` at `d8bfdf9` — approved by owner 2026-11-12.
-
-**F1 fencing (Windows):** child blocked with `open_exclusive: The process cannot access the file because it is being used by another process. (os error 32)`; succeeded after `release_handle()`.
-
-**B1 TCP all 7 steps:** SealViolation ✅ · RoundBelowEpochMinimum ✅ · EpochRegression ✅ · epoch-1 ML-DSA-65 frame (3309-byte sig, verifies) ✅ · receiver saw exactly 2 frames.
-
-**Gate B crash injection confirmed at `7e8402b`:** `cargo test -p chain-forge-consensus --features gate-b-harness --test gate_b_crash_injection` — 6/6 passed (K0–K4 + summary).
 
 ---
 
