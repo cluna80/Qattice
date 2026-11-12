@@ -257,6 +257,7 @@ impl PqHotStuffEngine {
                 round: to_commit.round,
                 block_hash: to_commit.block_hash.clone(),
                 precommits: to_commit.precommits.clone(),
+                epoch: 0,
             });
         }
         None
@@ -522,6 +523,7 @@ impl ConsensusEngine for PqHotStuffEngine {
             block_hash: None,
             signature,
             scheme: Vote::default_scheme(),
+            epoch: 0,
         })
     }
 

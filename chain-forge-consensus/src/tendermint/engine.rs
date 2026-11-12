@@ -307,7 +307,7 @@ impl TendermintEngine {
         if self.own_votes.contains_key(&key) { return; }
         let vote = Vote {
             vote_type, height: self.height, round, validator: id, block_hash,
-            signature: vec![], scheme: Vote::default_scheme(),
+            signature: vec![], scheme: Vote::default_scheme(), epoch: 0,
         };
         self.own_votes.insert(key, vote.clone());
         self.actions.push_back(ConsensusAction::CastVote(vote));
@@ -380,7 +380,7 @@ impl TendermintEngine {
         let Some((round, block_hash, precommits, block)) = decision else { return false };
         info!(height = self.height, round, block_hash = %block_hash,
               precommit_count = precommits.len(), "precommit quorum reached - committing block");
-        let certificate = CommitCertificate { height: self.height, round, block_hash, precommits };
+        let certificate = CommitCertificate { height: self.height, round, block_hash, precommits, epoch: 0 };
         self.decided = true;
         self.just_decided = Some(certificate.clone());
         self.actions.push_back(ConsensusAction::Commit { certificate, proposal: block });
@@ -846,7 +846,7 @@ impl ConsensusEngine for TendermintEngine {
         Ok(Vote {
             vote_type: VoteType::Nil, height: self.height, round: self.round,
             validator: ValidatorId("self".into()), block_hash: None,
-            signature: vec![], scheme: Vote::default_scheme(),
+            signature: vec![], scheme: Vote::default_scheme(), epoch: 0,
         })
     }
 

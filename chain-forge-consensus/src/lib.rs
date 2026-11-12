@@ -184,6 +184,12 @@ pub struct Vote {
     /// without any change to their construction sites.
     #[serde(default = "Vote::default_scheme")]
     pub scheme: String,
+
+    /// Consensus epoch under which this vote was cast (vote-format v2).
+    /// Included in `vote_signing_bytes_v2`; absent from v1 votes (defaults to 0).
+    /// Every vote in a `CommitCertificate` must carry the same epoch.
+    #[serde(default)]
+    pub epoch: u64,
 }
 
 impl Vote {
@@ -248,7 +254,12 @@ pub fn proposal_signing_bytes(
     b
 }
 
-/// Bytes a validator signs for `Vote::signature`.
+/// Bytes a validator signs for `Vote::signature` (v1 format, legacy).
+///
+/// Format: `CFV| <chain_id> | <type_byte> <height_8le> <round_4le> [<block_hash_bytes>]`
+///
+/// The `|` delimiter after chain_id is a vestigial separator; block_hash is
+/// appended without a length prefix. Use `vote_signing_bytes_v2` for new code.
 pub fn vote_signing_bytes(
     chain_id: &str, vote_type: &VoteType, height: BlockHeight, round: Round,
     block_hash: Option<&BlockHash>,
@@ -264,6 +275,57 @@ pub fn vote_signing_bytes(
     b
 }
 
+/// Bytes a validator signs for `Vote::signature` (v2 format).
+///
+/// All field boundaries are unambiguous: chain_id is length-prefixed (u16 BE),
+/// block_hash uses a presence flag followed by a length-prefixed value.
+/// The `CFV2\x00` prefix ensures no v2 byte string equals any v1 string.
+///
+/// Format:
+/// ```text
+/// b"CFV2\x00"                     5-byte prefix (null prevents | ambiguity)
+/// chain_id_len: u16 BE             length of chain_id in bytes
+/// chain_id: [u8]
+/// vote_type: u8                    0=Prevote, 1=Precommit, 2=Nil
+/// height: u64 LE
+/// round: u32 LE
+/// epoch: u64 LE
+/// set_hash: [u8; 32]              canonical_set_hash of active validator set
+/// block_hash_flag: u8             0x00 = absent, 0x01 = present
+/// [block_hash_len: u16 BE]        only when flag = 0x01
+/// [block_hash: [u8]]
+/// ```
+pub fn vote_signing_bytes_v2(
+    chain_id: &str,
+    vote_type: &VoteType,
+    height: BlockHeight,
+    round: Round,
+    epoch: u64,
+    set_hash: &[u8; 32],
+    block_hash: Option<&BlockHash>,
+) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(b"CFV2\x00");
+    let chain_bytes = chain_id.as_bytes();
+    b.extend_from_slice(&(chain_bytes.len() as u16).to_be_bytes());
+    b.extend_from_slice(chain_bytes);
+    b.push(match vote_type { VoteType::Prevote => 0, VoteType::Precommit => 1, VoteType::Nil => 2 });
+    b.extend_from_slice(&height.to_le_bytes());
+    b.extend_from_slice(&round.to_le_bytes());
+    b.extend_from_slice(&epoch.to_le_bytes());
+    b.extend_from_slice(set_hash);
+    match block_hash {
+        None => b.push(0x00),
+        Some(bh) => {
+            b.push(0x01);
+            let bh_bytes = bh.0.as_bytes();
+            b.extend_from_slice(&(bh_bytes.len() as u16).to_be_bytes());
+            b.extend_from_slice(bh_bytes);
+        }
+    }
+    b
+}
+
 /// Proof that a block was committed: the block hash plus the set of
 /// pre-commit votes whose combined power meets quorum.
 /// Stored in the block header so any light client can verify finality.
@@ -275,6 +337,13 @@ pub struct CommitCertificate {
 
     /// The pre-commit votes that form the quorum. Must cover ≥ 2/3+1 power.
     pub precommits: Vec<Vote>,
+
+    /// Consensus epoch at QC formation time (vote-format v2).
+    /// Set when the quorum threshold is crossed, before `on_commit` fires.
+    /// Must match every constituent vote's `epoch` field.
+    /// Defaults to 0 for v1 certificates (backward-compatible deserialization).
+    #[serde(default)]
+    pub epoch: u64,
 }
 
 // ── Engine-driven consensus (Tendermint state machine) ────────────────────────
@@ -962,6 +1031,7 @@ impl FbaEngine {
                 block_hash: Some(hash.clone()),
                 signature:  vec![],
                 scheme:     Vote::default_scheme(),
+                epoch:      0,
             }).collect())
             .unwrap_or_default();
 
@@ -970,6 +1040,7 @@ impl FbaEngine {
             round:      self.round,
             block_hash: hash.clone(),
             precommits,
+            epoch:      0,
         }
     }
 
@@ -1151,6 +1222,7 @@ impl ConsensusEngine for FbaEngine {
             block_hash: None,
             signature:  vec![],
             scheme:     Vote::default_scheme(),
+            epoch:      0,
         })
     }
 
@@ -1764,6 +1836,7 @@ impl HotStuffEngine {
             round:      self.round,
             block_hash,
             precommits: self.commit_votes.to_precommits(),
+            epoch:      0,
         }
     }
 
@@ -2069,6 +2142,7 @@ impl ConsensusEngine for HotStuffEngine {
             block_hash: None,
             signature:  vec![],
             scheme:     Vote::default_scheme(),
+            epoch:      0,
         };
         Ok(nil_vote)
     }
