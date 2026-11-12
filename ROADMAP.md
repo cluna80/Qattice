@@ -1,5 +1,34 @@
 # Qattice — Public Testnet Alpha: ML-DSA-65 + PQ-HotStuff Launch Plan
 
+## QAT-07 pqc-native admission gate complete — 2026-11-12
+
+**QAT-07 ML-DSA-65 consensus key binding and pqc-native validator admission (`epoch-transition` feature flag)**
+
+| Deliverable | Status |
+|---|---|
+| `consensus_ml_dsa_65_pubkey` field on `VcaValidatorRecord` (distinct from `pq_pubkey` ML-DSA-87 account slot) | Done |
+| `with_consensus_key(key)` builder for key registration path | Done |
+| `to_validator_info_pq()`: rejects empty key, ML-DSA-87 in ML-DSA-65 slot, wrong length | Done |
+| `AdmissionError` enum: `NoPqConsensusKey`, `WrongKeySlot`, `WrongKeyLength`, `ZeroWeight` | Done |
+| `MLDSA65_PUBKEY_LEN` (1952) and `MLDSA87_PUBKEY_LEN` (2592) constants exported | Done |
+| `admit_pq_native(registry, height)`: excludes zero-weight silently; rejects set on any malformed key | Done |
+| AD-1  valid credential binding → admitted | ✅ |
+| AD-2  substituted key → `SetHashMismatch` via `verify_handoff_proof` | ✅ |
+| AD-3  missing key → `NoPqConsensusKey` | ✅ |
+| AD-4  ML-DSA-87 key in ML-DSA-65 slot → `WrongKeySlot` | ✅ |
+| AD-5  malformed length → `WrongKeyLength` | ✅ |
+| AD-6  zero-weight excluded silently | ✅ |
+| AD-7  end-to-end: `admit_pq_native` → `canonical_set_hash` → `verify_handoff_proof` → Ok | ✅ |
+| **7/7 admission tests** (BossKing MINGW64, `421bc33`) | ✅ **Windows-confirmed** |
+
+**Finding (locked):** `pq_pubkey` on `VcaValidatorRecord` is ML-DSA-87 (4627-byte signature, account/transaction dual-sig slot) as documented. Every production caller passes `vec![]`. The ML-DSA-65 consensus key (1952-byte public key) has no existing field — `consensus_ml_dsa_65_pubkey` is new and distinct.
+
+**Windows confirmation (owner-run, 2026-11-12):** `cargo test -p chain-forge-consensus --features epoch-transition --test gate_b_admission -- --nocapture` at `421bc33` — 7/7 passed in 0.13s. All rejection paths confirmed: missing key, ML-DSA-87 in ML-DSA-65 slot, malformed length, zero-weight excluded, substituted-key detected via set_hash. End-to-end path with real ML-DSA-65 signatures passes.
+
+**Remaining scope (not included here):** Key rotation, next-block revocation (revocation finalized at H affects eligibility at H+1 via authenticated path), dynamic membership activation.
+
+---
+
 ## QAT-07 epoch-handoff verification complete — 2026-11-12
 
 **QAT-07 authenticated epoch-handoff: ML-DSA-65 signature verification on `CommitCertificate`, canonical `set_hash` with public keys, consecutive-round parent link (`epoch-transition` feature flag)**
