@@ -18,7 +18,8 @@ workspace with no borrowed consensus or state-machine code from any other chain.
 
 | Area | Status |
 |---|---|
-| BFT consensus (Tendermint-style, pluggable) | ✅ Running — 4-node, block-producing; supported devnet validators use ML-DSA-65-format keys on the legacy consensus cryptography backend |
+| Tendermint-style consensus | Historical four-node devnet baseline with ML-DSA-65-format validator keys on the legacy consensus backend |
+| PQ-HotStuff-2 consensus | Four-node block production and authenticated same-validator-set epoch transition tested on Windows in the QAT-07 integration branch. See [the test record](https://github.com/cluna80/Qattice/blob/eeb477c/ROADMAP.md#qat-07-authenticated-epoch-change-devnet-complete--2026-11-12). |
 | ML-DSA-65 user transactions | ✅ Legacy devnet transactions tested; separate FIPS 204-based signing-v2 implementation tested on a fresh private integration fixture, not enabled on the supported devnet |
 | Replay / nonce protection | ✅ All rejection cases pass |
 | Timestamp monotonicity | ✅ Enforced and regression-tested |
@@ -32,7 +33,7 @@ workspace with no borrowed consensus or state-machine code from any other chain.
 
 - **Validator keys versus cryptographic backend:** The supported four-node devnet (`tests/devnet/genesis-4node-mldsa.json`) declares `validator_scheme: ml-dsa-65` and `signature_scheme: pqc-native`; its validator public keys use the ML-DSA-65 format (1,952 bytes). **Consensus votes and block signatures still use the legacy ML-DSA backend, not the FIPS 204-based signing-v2 transaction backend.** Migration and verification of validator/consensus signing remain open (QAT-01/02 / legacy ML-DSA roadmap work). Ed25519 validator keys remain in classical-compatibility test fixtures, not the supported ML-DSA devnet.
 - **FIPS 204 scope:** `chain-forge-execution/src/signing_v2.rs` uses the `fips204_backend` for **user transaction** authorization only, under the `signing-v2` feature and an explicit chain commitment profile. It does not upgrade validator votes or block signatures. Four-node signing-v2 integration tests do not establish FIPS 204 conformity of consensus signing.
-- PQ-HotStuff consensus is not implemented or deployed; the supported devnet uses the Tendermint-style engine.
+- **Native PQ-HotStuff-2 integration:** The [Phase 0 prerequisite](docs/PQ-POP-PREREQUISITE.md) tracks acceptance for the native node. The Windows epoch-transition result used the legacy consensus signature backend. It does not establish FIPS 204 conformity, dynamic membership acceptance, or production readiness.
 - No public testnet — devnet is single-operator
 - No resource marketplace (removed; may return as an optional module post-Phase 0)
 - No independent cryptographic audit of DIS transcript format (return gate documented)
