@@ -597,6 +597,7 @@ impl ConsensusEngine for PqHotStuffEngine {
 
     fn current_height(&self) -> BlockHeight { self.height }
     fn current_round(&self) -> Round { self.round }
+    fn current_epoch(&self) -> u64 { self.epoch }
 
     fn verify_commit(
         &self,

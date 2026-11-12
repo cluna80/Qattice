@@ -74,6 +74,7 @@ zk-vrc = ["chain-forge-personhood"]
 pq-hotstuff = [
     "chain-forge-consensus/pq-hotstuff-fips204",
     "chain-forge-consensus/gate-b-harness",
+    "chain-forge-consensus/epoch-transition",
     "chain-forge-vca-pq",
 ]
 # Devnet bootstrap only: lets a devnet genesis opt into identity parameters
@@ -182,4 +183,9 @@ path = "tests/validator_precommit_delay_live.rs"
 [[test]]
 name = "pqhs2_4node_live"
 path = "tests/pqhs2_4node_live.rs"
+required-features = ["pq-hotstuff"]
+
+[[test]]
+name = "pqhs2_4node_epoch_live"
+path = "tests/pqhs2_4node_epoch_live.rs"
 required-features = ["pq-hotstuff"]

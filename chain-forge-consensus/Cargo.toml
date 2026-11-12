@@ -15,12 +15,13 @@ thiserror   = { workspace = true }
 async-trait = { workspace = true }
 tracing     = { workspace = true }
 sha3        = { workspace = true, optional = true }
+hex         = { workspace = true, optional = true }
 crc32fast   = { version = "1", optional = true }
 
 [features]
 real-crypto = ["dep:chain-forge-crypto", "chain-forge-crypto/real-crypto", "chain-forge-crypto/real-pqc"]
 # PQ-HotStuff-2 (docs/pq-hotstuff-001-spec.md). Phase 0: not in any default feature set; no network activates it.
-pq-hotstuff = ["dep:sha3"]
+pq-hotstuff = ["dep:sha3", "dep:hex"]
 # The real FIPS 204 ML-DSA-65 adapter for the safety-state signer/verifier traits (in-memory keys only; off by default).
 # Uses the fips204-backend feature of chain-forge-crypto; compatible with real-crypto in the same build.
 pq-hotstuff-fips204 = ["pq-hotstuff", "dep:chain-forge-crypto", "chain-forge-crypto/fips204-backend"]

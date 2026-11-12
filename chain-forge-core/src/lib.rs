@@ -406,6 +406,14 @@ pub struct GenesisConfig {
     /// runtime flag or environment variable can override it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<GenesisIdentity>,
+
+    /// PQ-HotStuff authenticated epoch-change configuration (devnet use only).
+    /// When present, the proposer at `at_height` injects a typed epoch-change
+    /// payload (`PQHS-EC1:` magic + JSON) into the block's `tx_data`. The new
+    /// validator set is built from the outgoing set at that height. Absent in
+    /// all production genesis files; absence is identical to omitting the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pqhs_epoch_change: Option<serde_json::Value>,
 }
 
 /// See `GenesisConfig::identity`.
