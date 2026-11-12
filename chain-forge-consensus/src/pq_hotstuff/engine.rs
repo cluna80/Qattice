@@ -42,18 +42,20 @@ use crate::pq_hotstuff::wire::HASH_LEN;
 // ── QC / TC types ─────────────────────────────────────────────────────────────
 
 /// A quorum certificate: a block hash and the round at which 2f+1 validators voted for it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Qc {
     pub block_hash: BlockHash,
     pub round: Round,
     pub height: BlockHeight,
     /// Indices of signers (into the validator set at the time of signing).
     pub signers: Vec<usize>,
+    /// The actual Vote objects that formed this QC, needed for handoff-proof verification.
+    pub precommits: Vec<Vote>,
 }
 
 impl Qc {
     fn genesis() -> Self {
-        Qc { block_hash: BlockHash("genesis".into()), round: 0, height: 0, signers: vec![] }
+        Qc { block_hash: BlockHash("genesis".into()), round: 0, height: 0, signers: vec![], precommits: vec![] }
     }
 }
 
@@ -110,11 +112,13 @@ impl VoteAccumulator {
         for (key, votes) in &self.buckets {
             if votes.len() >= threshold && !key.is_empty() {
                 let signers = votes.iter().map(|(i, _)| *i).collect();
+                let precommits = votes.iter().map(|(_, v)| v.clone()).collect();
                 return Some(Qc {
                     block_hash: BlockHash(key.clone()),
                     round,
                     height,
                     signers,
+                    precommits,
                 });
             }
         }
@@ -252,7 +256,7 @@ impl PqHotStuffEngine {
                 height: to_commit.height,
                 round: to_commit.round,
                 block_hash: to_commit.block_hash.clone(),
-                precommits: vec![],
+                precommits: to_commit.precommits.clone(),
             });
         }
         None
@@ -717,8 +721,8 @@ mod tests {
     async fn two_chain_commit_fires_on_consecutive_qcs() {
         let mut e = engine().await;
         // Simulate: locked_qc at round 1, then high_qc at round 2 → commit round-1 block
-        e.locked_qc = Qc { block_hash: BlockHash("b1".into()), round: 1, height: 1, signers: vec![] };
-        let new_qc = Qc { block_hash: BlockHash("b2".into()), round: 2, height: 2, signers: vec![] };
+        e.locked_qc = Qc { block_hash: BlockHash("b1".into()), round: 1, height: 1, signers: vec![], precommits: vec![] };
+        let new_qc = Qc { block_hash: BlockHash("b2".into()), round: 2, height: 2, signers: vec![], precommits: vec![] };
         let cert = e.try_two_chain_commit(&e.locked_qc.clone());
         assert!(cert.is_none(), "no commit yet — locked_qc is not b1's child");
 
