@@ -565,6 +565,10 @@ impl ConsensusEngine for PqHotStuffEngine {
 
         self.height = certificate.height + 1;
         self.round = 1;
+        // locked_qc and high_qc are per-height: reset so round 1 of the new
+        // height is not blocked by a lock acquired in the previous height.
+        self.locked_qc = Qc::genesis();
+        self.high_qc = Qc::genesis();
         self.accumulator.clear();
         self.pending_proposal = None;
         Ok(())
@@ -607,6 +611,8 @@ impl ConsensusEngine for PqHotStuffEngine {
     ) -> ConsensusResult<()> {
         self.height = height;
         self.round = 1;
+        self.locked_qc = Qc::genesis();
+        self.high_qc = Qc::genesis();
         self.validator_set = validator_set;
         self.accumulator.clear();
         self.pending_proposal = None;
