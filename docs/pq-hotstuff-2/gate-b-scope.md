@@ -101,33 +101,50 @@ with the stated assertions.
 
 ## B2 — Crash injection at exact OS-level kill points
 
-**What it tests:** a `TerminateProcess` kill at each step boundary leaves the store in
-a state that (a) `open` accepts, (b) the counter mismatch is correctly classified, and
-(c) the correct recovery path resumes signing without producing a conflicting signature.
-Clean shutdown after a full advance is kept as a control, not a replacement for the kill cases.
+**What it tests:** a `TerminateProcess` kill at each step boundary — including after the
+full durable advance but before cleanup — leaves the store in a state that (a) `open`
+accepts, (b) the counter mismatch is correctly classified, and (c) the correct recovery
+path resumes signing without producing a conflicting signature.
 
-The R2 write order has four boundaries and therefore four kill points:
+The R2 write order has four kill points plus a clean-shutdown control:
 
 | Kill point | Label | State file after kill | Counter after kill | Expected `open` outcome |
 |---|---|---|---|---|
 | K0 | After CommitCertificate written (block store); before `write_seal` | Record at epoch 0, no seal | Matches state file | Opens at epoch 0, no seal; R3-a: caller writes seal then advances |
 | K1 | After `write_seal` state file written; before counter advance | Record at epoch 0 with seal; counter one behind file | Crash window (counter+1 == file.counter) | Opens at epoch 0 with seal; R3-a: `advance_epoch_record` |
 | K2 | After `advance_epoch_record` state file written; before counter advance | Record at epoch 1 with set_hash/cert_hash; counter one behind | Crash window | Opens at epoch 1; R3-b: verify hashes, restore floors |
-| K3 (control) | After full advance, clean `into_parts()` | Record at epoch 1 | Matches state file | Opens at epoch 1 normally |
+| K3 | After full durable advance; before `into_parts()` cleanup — `TerminateProcess` | Record at epoch 1 | Matches state file (counter also caught up before kill) | Opens at epoch 1 normally; no recovery step needed |
+| K4 (control) | After full advance, clean `into_parts()` | Record at epoch 1 | Matches state file | Opens at epoch 1 normally |
+
+K3 and K4 produce identical store state; K3 confirms that cleanup code after a full
+advance is not on the signing safety path (a kill there cannot corrupt the record or the
+counter).
 
 **For K1 and K2 (crash window):** `open` adopts the durable file and completes the
-counter advance. This is the standard crash-window recovery path in `store::open`. The
-key additional assertion for Gate B is:
+counter advance. This is the standard crash-window recovery path in `store::open`. Key
+additional assertions:
 
 - After adopting a K1 state: the signer cannot produce a new epoch-0 signature at any
   round above the seal round (SealViolation fires before any new signing attempt).
 - After adopting a K2 state: the signer cannot produce an epoch-0 signature
   (EpochRegression fires). It can produce an epoch-1 signature at round ≥ 1.
 
+**Restart with durable handoff proof (K0 and K1):**
+
+For K0 and K1, the durable `CommitCertificate` for epoch 0 exists in the block store,
+but the safety record's epoch marker and the chain tip still name epoch 0 (the transition
+has not completed). The test must demonstrate R3-a with this starting state:
+- The block-store tip is at epoch-0 height; the committed epoch-1 certificate is durable
+  but not yet reflected in the safety record.
+- `open` returns a store at epoch 0 (K0: no seal; K1: with seal).
+- The harness loads the `CommitCertificate` for epoch 0 from the block store, verifies it
+  against V_old public keys, and runs the R3-a reconciliation sequence.
+- After reconciliation, signing is unblocked at epoch 1.
+- ASSERT: no epoch-0 signature above the seal round is producible at any point.
+
 **Signing blocked until handoff proof reconciles (R3-a):**
 
-After a K0 or K1 crash, the caller must run R3-a before attaching the signing context.
-Specifically:
+After a K0 or K1 crash, the caller must run R3-a before attaching the signing context:
 - Load `CommitCertificate` from block store. Fail closed if missing.
 - Verify cert against V_old public keys. Fail closed if invalid.
 - If seal not in record: `write_seal`. If seal already in record: skip.
@@ -141,11 +158,12 @@ completion returns an error (signing context not attached), not a stale epoch-0 
 process at a controlled point, exercised in a child process launched by the test harness.
 The test harness opens the resulting files in a second process and runs the assertions.
 
-**Acceptance:** owner pastes output from each of the four kill points showing:
+**Acceptance:** owner pastes output from each of the five kill points (K0–K4) showing:
 - The restarted process opens successfully (or fails closed if appropriate).
 - No conflicting signature is produced.
 - The correct recovery step runs idempotently.
-- Signing is blocked until R3-a or R3-b completes.
+- Signing is blocked until R3-a or R3-b completes (K0–K1 must demonstrate this with
+  a durable cert in the block store while the safety record names epoch 0).
 
 ---
 
@@ -154,35 +172,75 @@ The test harness opens the resulting files in a second process and runs the asse
 Gate A used `TestCounter` (in-memory, not a trusted mechanism). Gate B requires an
 OS-backed counter that survives process crashes.
 
-**Specification:**
+**On-disk layout:**
 
-The counter file holds a fixed-width record: `value: u64` (big-endian) `|| digest: [u8; 32]`.
-Writes use `FILE_FLAG_WRITE_THROUGH` and call `FlushFileBuffers` before returning.
+The counter file holds a fixed-width record: `value: u64` (big-endian) `|| digest: [u8; 32]`
+(40 bytes total). `digest` is `SHA3-256(value_bytes)`.
 
-**Writer fencing across processes:** the counter file is opened with `GENERIC_WRITE |
-FILE_SHARE_READ` and no write-share flag. A second process attempting to advance the
-counter will receive `ERROR_SHARING_VIOLATION` and fail closed. This is the fencing
-mechanism: only the holder of the open file handle can advance the counter.
+**Write path:** Writes call `FlushFileBuffers` before returning. The file is opened with
+`FILE_FLAG_WRITE_THROUGH` and `FILE_FLAG_NO_BUFFERING` with sector-aligned writes so that
+the write reaches stable storage rather than the disk controller's write-back buffer (see
+power-loss caveat below).
 
-The `acquire_session()` call opens the counter file. `into_parts()` closes it, releasing
-the fence. A process killed without calling `into_parts()` releases the fence when the
-OS closes the handle on process exit.
+**Partial-write recovery:**
 
-**Recovery of `(value, digest)` after crash:** `read()` decodes the file. Because writes
-are `FILE_FLAG_WRITE_THROUGH`, a killed process leaves either the previous record or the
-new record, never a partial write (assuming the OS honours the write-through guarantee,
-which is the standard Windows contract for `FILE_FLAG_WRITE_THROUGH` with sector-aligned
-writes or on NTFS). The `open` logic in `SafetyStore` already handles both outcomes via
-the crash-window classification.
+`FILE_FLAG_WRITE_THROUGH` and `FlushFileBuffers` do not establish atomic replacement of
+the 40-byte record. A kill mid-write can leave a partial record. `read()` must therefore:
+
+1. Read all 40 bytes. If the read returns fewer than 40 bytes, the file is truncated
+   (interrupted write); fail closed: return `Err(CounterError::Truncated)`.
+2. Decode `value` from the first 8 bytes and `stored_digest` from the remaining 32.
+3. Recompute `expected = SHA3-256(value_bytes)`.
+4. If `stored_digest != expected`: fail closed: return `Err(CounterError::DigestMismatch)`.
+5. If both checks pass: return `Ok(value)`.
+
+`open` in `SafetyStore` treats `Err(CounterError::Truncated)` and
+`Err(CounterError::DigestMismatch)` as fatal: the store does not open and the caller must
+not sign. This is the fail-closed contract. Recovery from a corrupted counter requires
+out-of-band restoration (not in Gate B scope).
+
+The write-then-verify approach (write, flush, re-read and verify digest) is an
+alternative; either is acceptable provided the same fail-closed contract holds on `open`.
+
+**Writer fencing across processes:**
+
+The counter file is opened with `GENERIC_WRITE | FILE_SHARE_READ` and no write-share
+flag. A second process attempting to advance the counter will receive
+`ERROR_SHARING_VIOLATION` and fail closed. Only the holder of the open file handle can
+advance the counter.
+
+`acquire_session()` opens the counter file and holds the handle. `into_parts()` closes
+it, releasing the fence. A process killed without calling `into_parts()` releases the
+fence when the OS closes the handle on process exit.
+
+**Two-process fencing test (required for Gate B):**
+
+The harness must demonstrate both sides of the fencing contract:
+
+```
+Test F1 (fencing while first writer is alive):
+  Process A: acquire_session() — counter handle open.
+  Process B: attempt acquire_session() — ASSERT: returns ERROR_SHARING_VIOLATION.
+  Process A: advance counter to value=1.
+  Process B: attempt acquire_session() again — ASSERT: still ERROR_SHARING_VIOLATION.
+  Process A: into_parts() — handle closed.
+  Process B: acquire_session() — ASSERT: succeeds, reads value=1.
+
+Test F2 (reacquisition after kill):
+  Process A: acquire_session() — counter handle open, value=1.
+  Process B: attempt acquire_session() — ASSERT: returns ERROR_SHARING_VIOLATION.
+  Process A: TerminateProcess — handle released by OS.
+  Process B: acquire_session() — ASSERT: succeeds, reads value=1 (no advance).
+  Process B: advance counter to value=2 — ASSERT: succeeds, digest valid.
+```
 
 **What this does NOT cover:**
 
-- **Power-loss durability:** `FILE_FLAG_WRITE_THROUGH` reaches the OS page cache and the
-  disk controller's write-back buffer. Reaching the platter or flash on a power loss
-  requires `FILE_FLAG_NO_BUFFERING` with sector-aligned writes, or a hardware-level
-  `FlushFileBuffers` on a device that honours it. This is not required for Gate B devnet
-  testing but must be addressed before production deployment. Record this as an open
-  obligation.
+- **Power-loss durability:** `FILE_FLAG_NO_BUFFERING` with sector-aligned writes reaches
+  the disk controller's write buffer but not necessarily the platter or flash on a power
+  loss; a device that honours `FlushFileBuffers` as an FUA command provides stronger
+  guarantees. This is not required for Gate B devnet testing but must be addressed before
+  production deployment. Record this as an open obligation.
 - **Rollback resistance:** a user with filesystem access can overwrite the counter file
   with an older value. A hardware-backed counter (TPM NV index, secure enclave) prevents
   this. Record this as an open obligation. For devnet, the file counter provides
@@ -202,11 +260,12 @@ Sandbox runs do not count (per CLAUDE.md test validation policy).
 | Test | Transport | Signer | Counter | Required |
 |---|---|---|---|---|
 | Gate A epoch-boundary (13 tests) | In-process doubles | `TestSigner` (size-conformant stub, not real FIPS 204) | `TestCounter` (in-memory) | ✅ Windows-confirmed `7ca0aa7` |
-| B1 TCP epoch-boundary | Loopback TCP, two OS processes | Real FIPS 204 ML-DSA-65 | File counter (`FILE_FLAG_WRITE_THROUGH`) | Required |
-| B2 crash injection × 4 (K0–K3) | `TerminateProcess`, file storage | Real FIPS 204 ML-DSA-65 | File counter | Required |
+| B1 TCP epoch-boundary | Loopback TCP, two OS processes | Real FIPS 204 ML-DSA-65 | File counter | Required |
+| B2 crash injection × 5 (K0–K4) | `TerminateProcess`, file storage | Real FIPS 204 ML-DSA-65 | File counter | Required |
+| B3 counter fencing (F1, F2) | Two OS processes, file counter | n/a | File counter | Required |
 
-After B1 and B2 pass on Windows with pasted output, the epoch-transition flag may be
-enabled in a devnet configuration with separate owner approval.
+After B1, B2, and B3 pass on Windows with pasted output, the epoch-transition flag may
+be enabled in a devnet configuration with separate owner approval.
 
 ---
 
