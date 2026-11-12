@@ -23,7 +23,11 @@ height 4  epoch=1  block_hash=a2dfbe20a86dc54ac288da067cc274fc6cebd51646ddfbddcd
 height 5  epoch=1  block_hash=2e549efacc215f1f731b66159c481ec3c6c1264d3f4ab001ddf2bcf5551ee936
 ```
 
-No fork at any height. `verify_handoff_proof` accepted the outgoing-set ML-DSA-65 signatures at h2, epoch transitioned to 1 immediately on `on_commit`, and h3–h5 finalized in epoch 1 with the same validator set. The two-chain commit rule (consecutive QCs at the same engine height) confirmed.
+No fork at any height. The two-chain commit rule (consecutive QCs at the same engine height) confirmed.
+
+**What `epoch=1` at height 3 means (implementation note):** The `epoch` field in a block record is captured from `self.consensus.current_epoch()` **before** `on_commit` is called for that block (see `node.rs` line 5449: "Capture the epoch of the block being committed (before on_commit advances it)"). For h2 (the epoch-change block): `current_epoch()=0` is captured, then `on_commit` fires and advances the engine to epoch 1. For h3: `current_epoch()=1` is captured (the engine is already in epoch 1 when h3 commits). The `epoch=1` stored in h3's record is therefore the engine epoch **already active** when h3 commits — not the epoch *under* which h3 was proposed or voted on. h3 is signed by the same 4 validators in both cases (this is a same-validator-set transition; the validator membership is unchanged). The first block authored exclusively under the new epoch bookkeeping is h3; the first block that required the new epoch's membership for liveness would only matter if validators were added or removed, which is out of scope for this milestone.
+
+**Scope boundary (same-validator-set only):** This test closes the **same-validator-set epoch-transition test**. The genesis configures `at_height=2, new_epoch=2` with the identical 4 validators for both outgoing and incoming sets. Validator additions, removals, and dynamic membership activation are separate milestones not tested here.
 
 **Key bugs fixed (this milestone):**
 - `propose_and_broadcast_multinode` did not inject the PQHS-EC1 epoch-change payload; only the `propose_fresh` path (not taken by PQ-HotStuff) did. Fixed to mirror the same genesis-config lookup.
