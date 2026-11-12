@@ -1,5 +1,32 @@
 # Qattice — Public Testnet Alpha: ML-DSA-65 + PQ-HotStuff Launch Plan
 
+## Next: QC epoch assertion test — open
+
+**Next boundary test: assert the epoch carried by each quorum certificate (QC epoch field)**
+
+**Goal:** Identify the last block certified by the outgoing validator set and the first certified by the incoming set, via the epoch encoded in the QC itself — not the block record's `epoch` field (which is the engine epoch active at `commit_block` time, not which set signed the QC).
+
+**Current state (gap):** `Vote` has no `epoch` field; `vote_signing_bytes` does not include epoch; `CommitCertificate` does not carry an epoch. The API `BlockSummary` exposes `last_commit_signers` (validator IDs, from the previous block's last_commit) but not the full `CommitCertificate` or its constituent vote epochs. There is therefore currently no way for a test to assert "this QC was signed under epoch N" without reading internal engine state.
+
+**Required changes:**
+1. Add `epoch: u64` to `Vote` and include it in `vote_signing_bytes` (domain-separated: `CFV| chain_id | type | height | round | epoch | block_hash`). This is a signing-format change — existing devnet key fixtures are compatible, but all existing vote construction sites must be updated.
+2. Add `epoch: u64` to `CommitCertificate` (the epoch of the QC, set when the QC forms — before `on_commit` advances the engine epoch for epoch-change blocks).
+3. Expose `last_commit_certificate` (the full `CommitCertificate` for the previous block, epoch field included) in `BlockSummary` or as a separate `/api/blocks/{height}/qc` endpoint.
+4. Update `verify_handoff_proof` to check `certificate.epoch == expected_outgoing_epoch`.
+5. Update `sign_vote` and all vote construction sites.
+6. Update `gate_b_admission` and `gate_b_epoch_handoff` test helpers (they use `vote_signing_bytes` directly).
+
+**What the test will assert (design):**
+- h2 QC (`last_commit` stored in h3's block record): `qc.epoch=0` — signed by the outgoing (epoch-0) set
+- h3 QC (`last_commit` stored in h4's block record): `qc.epoch=1` — signed by the incoming (epoch-1) set
+- This is the boundary: the last outgoing-set QC is at h2, the first incoming-set QC is at h3
+
+**Note on same-validator-set transition:** In this test the outgoing and incoming validator membership is identical (same 4 nodes). The epoch field on the QC distinguishes which epoch's bookkeeping the signers operated under, even when the set members are the same. For a future membership-change test, the QC epoch will also distinguish which key material was active.
+
+**Blocking dependency:** `vote_signing_bytes` change is a protocol break. All existing live and unit tests that construct `Vote` structs or call `vote_signing_bytes` must be updated atomically. Gate this work on a separate branch; do not mix with the current epoch-change milestone.
+
+---
+
 ## QAT-07 authenticated epoch-change devnet complete — 2026-11-12
 
 **QAT-07 Phase 3: authenticated epoch-change end-to-end — `pqhs2_4node_epoch_change_reaches_new_epoch` passes on Windows with real ML-DSA-65 signatures**
