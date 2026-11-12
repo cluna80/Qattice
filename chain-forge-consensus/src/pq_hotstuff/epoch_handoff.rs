@@ -212,6 +212,9 @@ pub fn admit_pq_native(
         if record.weight.0 == 0 {
             continue; // zero-weight: silently excluded
         }
+        if record.revoked {
+            continue; // revocation finalized at H: excluded from set at H+1
+        }
         let info = record.to_validator_info_pq()?;
         validators.push(info);
     }
