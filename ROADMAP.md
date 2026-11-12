@@ -1,5 +1,27 @@
 # Qattice — Public Testnet Alpha: ML-DSA-65 + PQ-HotStuff Launch Plan
 
+## QAT-07 Gate A complete — 2026-11-12
+
+**QAT-07 Gate A: epoch-boundary signing rules — R2 transition table, durable write order, R3-a/R3-b recovery**
+
+| Deliverable | Status |
+|---|---|
+| `SafetyRecord` v3: `seal`, `set_hash`, `handoff_cert_hash` fields | Done |
+| `SignError::SealViolation` — new epoch-0 sig above seal round denied | Done |
+| `SignError::RoundBelowEpochMinimum` — epoch > 0 must start at round ≥ 1 | Done |
+| `store::write_seal` — R2 step 2: durably writes `seal=(epoch, round)` | Done |
+| `store::advance_epoch_record` — R2 steps 3–4: clears floors/seal, writes epoch + hashes | Done |
+| `on_commit` R1 cert verification — fails closed before accepting V_new | Done |
+| `on_commit` durable write order — write_seal then advance_epoch_record | Done |
+| 13 Gate A acceptance tests (`pq_hotstuff_epoch_boundary.rs`) | Done |
+| **217 crate tests pass sandbox + Windows-confirmed** (BossKing MINGW64, `7ca0aa7`) | ✅ **Windows-confirmed** |
+
+**Windows confirmation (owner-run, 2026-11-12):** `cargo test -p chain-forge-consensus --features pq-hotstuff --test pq_hotstuff_epoch_boundary` on branch `feat/qat-07-safety-store-integration` at `7ca0aa7` — 13/13 passed.
+
+**Gate A scope document:** `docs/pq-hotstuff-2/epoch-switchover-scope.md` at `c459f2f` — approved by owner 2026-11-12.
+
+---
+
 ## QAT-07 phase 1 complete — 2026-11-12
 
 **QAT-07 phase 1: `EngineSigningContext` — SafetyStore wired into `PqHotStuffEngine`**
@@ -16,11 +38,11 @@
 
 **Windows confirmation (owner-run, 2026-11-12):** `cargo test -p chain-forge-consensus --features pq-hotstuff` on branch `feat/qat-07-safety-store-integration` at `c77c567` — 204/204 passed.
 
-**Remaining QAT-07 scope (separate review against PO-4 evidence):**
+**Remaining QAT-07 scope:**
+- Gate B: TCP epoch-boundary test + crash injection over OS processes (Windows)
 - Epoch validator-set SSI switch-over in `on_commit`
 - Key rotation + next-block revocation
 - ML-DSA-only validator admission gate
-- TCP restart anti-equivocation test on Windows
 
 ---
 
