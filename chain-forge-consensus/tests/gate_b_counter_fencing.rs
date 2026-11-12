@@ -137,7 +137,6 @@ const ENV_COUNTER_PATH: &str = "GATE_B_COUNTER_PATH";
 /// Child entry point: called when GATE_B_COUNTER_CHILD_MODE is set.
 /// Mode "try_acquire": attempt acquire_session() and print the result.
 /// Mode "acquire_and_advance": acquire, advance to value=2 digest=[0xDD;32], print result.
-#[allow(dead_code)]
 fn maybe_run_as_child() -> bool {
     let mode = match std::env::var(ENV_CHILD_MODE) {
         Ok(m) => m,
@@ -163,13 +162,21 @@ fn maybe_run_as_child() -> bool {
     true
 }
 
+/// Dedicated test entry point for the child process in F1/F2 fencing tests.
+/// When the env var is set, `maybe_run_as_child()` runs the child logic and exits;
+/// when it is not set, this test is a no-op (filtered out by the parent test anyway).
+#[test]
+fn gate_b_child_entry() {
+    maybe_run_as_child();
+}
+
 fn spawn_child(mode: &str, counter_path: &std::path::Path) -> std::process::Output {
     let exe = std::env::current_exe().expect("current_exe");
     std::process::Command::new(&exe)
         .env(ENV_CHILD_MODE, mode)
         .env(ENV_COUNTER_PATH, counter_path.to_str().unwrap())
-        // Run only the child entry; use a filter that matches nothing real.
-        .args(["--test-threads=1", "__gate_b_child_entry__"])
+        // Run only the child entry point test.
+        .args(["--test-threads=1", "gate_b_child_entry"])
         .output()
         .expect("spawn child")
 }
