@@ -6837,12 +6837,21 @@ impl Node {
         // Capture the epoch of the block being committed (before on_commit advances it).
         let committed_epoch = self.consensus.current_epoch();
 
+        // Look up the COMMITTED proposal (cert.height, cert.round), not the
+        // current proposal (which is for the NEXT height). The two-chain commit
+        // fires when processing height H+1, so `proposal` is at H+1 here.
         #[cfg(feature = "pq-hotstuff")]
-        let epoch_change_vs = match self.decode_epoch_change(&proposal) {
-            Ok(vs) => vs,
-            Err(e) => {
-                warn!(height = cert.height, "epoch-change payload malformed, rejecting commit: {e}");
-                return Err(e);
+        let epoch_change_vs = {
+            let committed_proposal = self.pending_proposals
+                .get(&(cert.height, cert.round))
+                .cloned();
+            match committed_proposal.as_ref().map(|p| self.decode_epoch_change(p)) {
+                Some(Ok(vs)) => vs,
+                Some(Err(e)) => {
+                    warn!(height = cert.height, "epoch-change payload malformed, rejecting commit: {e}");
+                    return Err(e);
+                }
+                None => None,
             }
         };
         #[cfg(not(feature = "pq-hotstuff"))]
