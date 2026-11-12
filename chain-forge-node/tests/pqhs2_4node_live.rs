@@ -94,6 +94,58 @@ fn poll_height(api_port: u16) -> Option<u64> {
         .and_then(|s| s.trim().parse().ok())
 }
 
+/// Fetch a JSON field value from `/api/blocks/{height}` on a node.
+fn fetch_block_field(api_port: u16, height: u64, field: &str) -> Option<String> {
+    use std::io::{BufRead, Write};
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{api_port}")).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+    let request = format!(
+        "GET /api/blocks/{height} HTTP/1.0\r\nHost: 127.0.0.1:{api_port}\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).ok()?;
+    let mut body = String::new();
+    let reader = std::io::BufReader::new(stream);
+    let mut past_headers = false;
+    for line in reader.lines() {
+        let line = line.ok()?;
+        if past_headers { body.push_str(&line); }
+        else if line.is_empty() { past_headers = true; }
+    }
+    let needle = format!("\"{}\":\"", field);
+    body.split(&needle)
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .map(|s| s.to_string())
+}
+
+/// Assert all four nodes agree on `block_hash` and `state_root` at the given height.
+fn assert_four_node_agreement(nodes: &[NodeProcess], height: u64) {
+    println!("\n── Block agreement check at height {height} ──────────────────────────────────");
+    let mut hashes: Vec<(&str, String, String)> = Vec::new();
+    for node in nodes {
+        let block_hash = fetch_block_field(node.api_port, height, "block_hash")
+            .unwrap_or_else(|| format!("<unavailable from {}>", node.validator));
+        let state_root = fetch_block_field(node.api_port, height, "state_root")
+            .unwrap_or_else(|| format!("<unavailable from {}>", node.validator));
+        println!("   {}  block_hash={}  state_root={}", node.validator, block_hash, state_root);
+        hashes.push((node.validator, block_hash, state_root));
+    }
+    let (_, ref ref_hash, ref ref_root) = hashes[0];
+    for (validator, hash, root) in &hashes[1..] {
+        assert_eq!(
+            hash, ref_hash,
+            "AGREEMENT FAILURE: {} block_hash {} != {} block_hash {} at height {}",
+            validator, hash, hashes[0].0, ref_hash, height
+        );
+        assert_eq!(
+            root, ref_root,
+            "AGREEMENT FAILURE: {} state_root {} != {} state_root {} at height {}",
+            validator, root, hashes[0].0, ref_root, height
+        );
+    }
+    println!("   ✓ All 4 nodes agree: block_hash={ref_hash}  state_root={ref_root}");
+}
+
 // ── RAII process guard ────────────────────────────────────────────────────────
 
 struct NodeProcess {
@@ -293,6 +345,10 @@ fn pqhs2_4node_reaches_target_height() {
 
     let mut nodes = spawn_nodes(&bin, &log_dir);
     poll_until_height(&mut nodes, target, timeout, &log_dir);
+
+    // Cross-node agreement: all 4 nodes must have the same block_hash and
+    // state_root at the target height. This catches forks and state divergence.
+    assert_four_node_agreement(&nodes, target);
 
     println!("\n[pqhs2_4node_reaches_target_height] PASS");
 }
