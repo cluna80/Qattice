@@ -491,16 +491,51 @@ impl ConsensusEngine for PqHotStuffEngine {
         certificate: CommitCertificate,
         new_validator_set: Option<ValidatorSet>,
     ) -> ConsensusResult<()> {
-        // Epoch-transition hook (spec §3.6, EC-6):
-        // A new validator set signals an epoch-change block was committed.
-        // Record the seal round so the safety store can enforce EC-6.
         if let Some(vs) = new_validator_set {
-            self.seal_round = Some(certificate.round);
+            // R1: verify two-chain finality before accepting the new set.
+            // The certificate must carry consecutive rounds (locked_qc.round + 1 == high_qc.round)
+            // and ≥ 2f+1 signatures from the outgoing set over the epoch-change block.
+            self.verify_commit(&certificate, &self.validator_set.clone())
+                .map_err(|e| ConsensusError::Internal(format!("epoch-change cert invalid: {e}")))?;
+
+            let old_epoch = self.epoch;
+            let seal_round = certificate.round; // QC_child.round = z+1 (the child of B_ec)
+
+            // Hashes for the durable safety record.
+            let cert_bytes = {
+                let mut b = Vec::new();
+                b.extend_from_slice(certificate.block_hash.0.as_bytes());
+                b.extend_from_slice(&certificate.round.to_be_bytes());
+                b.extend_from_slice(&certificate.height.to_be_bytes());
+                b
+            };
+            let handoff_cert_hash = sha3_32(&cert_bytes);
+
+            // Canonical V_new hash: sorted validator IDs + powers.
+            let set_hash = {
+                let mut b = Vec::new();
+                for v in &vs.validators {
+                    b.extend_from_slice(v.id.0.as_bytes());
+                    b.extend_from_slice(&v.voting_power.to_be_bytes());
+                }
+                sha3_32(&b)
+            };
+
+            // R2 durable write order:
+            // Step 1: CommitCertificate in block store (caller's responsibility before on_commit).
+            // Step 2: write seal to safety record.
+            // Step 3: advance epoch counter in safety record.
+            // Step 4: update in-memory signing context.
+            if let Some(ctx) = self.signing_ctx.as_mut() {
+                ctx.write_seal(old_epoch, seal_round as u64)
+                    .map_err(|e| ConsensusError::Internal(format!("write_seal failed: {e}")))?;
+                ctx.advance_epoch_record(old_epoch + 1, set_hash, handoff_cert_hash)
+                    .map_err(|e| ConsensusError::Internal(format!("advance_epoch_record failed: {e}")))?;
+            }
+
+            self.seal_round = Some(seal_round);
             self.epoch += 1;
             self.validator_set = vs;
-            if let Some(ctx) = self.signing_ctx.as_mut() {
-                ctx.advance_epoch(self.epoch);
-            }
         }
 
         self.height = certificate.height + 1;
@@ -661,20 +696,39 @@ mod tests {
 
     #[tokio::test]
     async fn epoch_transition_records_seal_round() {
-        let mut e = engine().await;
+        // 1-node set so quorum threshold = 1 and a single precommit satisfies R1 verification.
+        let mut e = PqHotStuffEngine::new();
+        let vs1 = ValidatorSet { height: 0, validators: vec![make_validator("v0")] };
+        let config = ConsensusConfig {
+            variant: ConsensusVariant::PqHotStuff,
+            chain_id: "test-chain".into(),
+            propose_timeout_ms: 1000, prevote_timeout_ms: 1000, precommit_timeout_ms: 1000,
+            block_time_ms: 500, personhood: None, vca: None,
+        };
+        e.init(config, vs1).await.unwrap();
+
         let new_vs = ValidatorSet {
             height: 1,
-            validators: (4..8).map(|i| make_validator(&format!("v{i}"))).collect(),
+            validators: vec![make_validator("v1")],
+        };
+        let precommit = Vote {
+            vote_type: VoteType::Precommit,
+            height: 1,
+            round: 3,
+            block_hash: Some(BlockHash("ec".into())),
+            validator: ValidatorId("v0".into()),
+            signature: vec![],
+            scheme: Vote::default_scheme(),
         };
         let cert = CommitCertificate {
-            height: 1, round: 3, block_hash: BlockHash("ec".into()), precommits: vec![],
+            height: 1, round: 3, block_hash: BlockHash("ec".into()), precommits: vec![precommit],
         };
         e.on_commit(cert, Some(new_vs)).await.unwrap();
         assert_eq!(e.seal_round(), Some(3));
         assert_eq!(e.epoch(), 1);
         assert_eq!(e.current_height(), 2);
-        assert_eq!(e.validator_set().validators.len(), 4);
-        assert_eq!(e.validator_set().validators[0].id.0, "v4");
+        assert_eq!(e.validator_set().validators.len(), 1);
+        assert_eq!(e.validator_set().validators[0].id.0, "v1");
     }
 
     #[tokio::test]

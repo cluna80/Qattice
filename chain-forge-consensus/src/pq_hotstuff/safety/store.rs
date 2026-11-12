@@ -85,6 +85,7 @@ impl<S: Storage, C: MonotonicCounter> SafetyStore<S, C> {
             state: State::Fresh, protocol_profile: init.protocol_profile.into(), chain_id: init.chain_id.into(),
             public_key: init.public_key.to_vec(), instance_id: init.instance_id, counter: 1, prev_digest: [0; 32], epoch: init.epoch,
             hvr: None, hqr: None, last_vote: None, last_timeout: None, last_proposal: None,
+            seal: None, set_hash: None, handoff_cert_hash: None,
         };
         let rb = encode_record(&rec).map_err(|e| InitError::Storage(e.to_string()))?;
         let rec_digest: [u8; 32] = rb[rb.len() - 32..].try_into().unwrap();
@@ -170,7 +171,10 @@ impl<S: Storage, C: MonotonicCounter> SafetyStore<S, C> {
                 if rec.counter != 1 { return Err(bad("a fresh record must be at counter 1")); }
             }
             State::Active => {
-                if slots.iter().all(|(_, s)| s.is_none()) { return Err(bad("an active record has nothing signed")); }
+                // An epoch-advance record is Active but has no signed slots yet (slots were cleared on advance).
+                // It is distinguishable from a corrupt record by set_hash being present.
+                let epoch_start = rec.set_hash.is_some() || rec.handoff_cert_hash.is_some();
+                if !epoch_start && slots.iter().all(|(_, s)| s.is_none()) { return Err(bad("an active record has nothing signed")); }
                 if rec.counter < 2 { return Err(bad("an active record must be past counter 1")); }
             }
         }
@@ -235,6 +239,17 @@ impl<S: Storage, C: MonotonicCounter> SafetyStore<S, C> {
         if self.latched { return Err(SignError::Latched); }
         if signer.public_key() != self.rec.public_key.as_slice() { return Err(SignError::IdentityMismatch("signer key")); }
         if epoch < self.rec.epoch { return Err(SignError::EpochRegression { record: self.rec.epoch, requested: epoch }); }
+        // RoundBelowEpochMinimum: any epoch > 0 must start at round >= 1 (R3-c).
+        // Applies whether the record has already advanced (same_epoch path) or is still at the previous epoch.
+        if epoch > 0 && round == 0 {
+            return Err(SignError::RoundBelowEpochMinimum { epoch, round });
+        }
+        // SealViolation: sealed epoch may not produce new signatures above the seal round (R2, EC-6)
+        if let Some((seal_epoch, seal_round)) = self.rec.seal {
+            if epoch == seal_epoch && round > seal_round {
+                return Err(SignError::SealViolation { epoch, round, seal_round });
+            }
+        }
         // floors and the stored item only mean something inside one epoch; a new epoch starts clean
         let same_epoch = epoch == self.rec.epoch;
         let (hvr, slot) = if same_epoch { (self.rec.hvr, self.rec.slot(kind).cloned()) } else { (None, None) };
@@ -278,6 +293,7 @@ impl<S: Storage, C: MonotonicCounter> SafetyStore<S, C> {
             n.last_vote = None;
             n.last_timeout = None;
             n.last_proposal = None;
+            n.seal = None;
         }
         n.state = State::Active;
         n.counter = next_counter;
@@ -302,6 +318,56 @@ impl<S: Storage, C: MonotonicCounter> SafetyStore<S, C> {
         self.rec = n;
         self.rec_digest = new_digest;
         Ok(Signed { message, envelope, resent: false })
+    }
+
+    /// Write the epoch seal (R2 write-order step 2). Call after the CommitCertificate is durable in the block store.
+    /// Sets `seal = (old_epoch, seal_round)` on the current record without advancing the epoch counter.
+    /// A crash after this returns `seal` on restart; R3-a uses it to skip re-writing.
+    pub fn write_seal(&mut self, old_epoch: u64, seal_round: u64) -> Result<(), SignError> {
+        if self.latched { return Err(SignError::Latched); }
+        if old_epoch != self.rec.epoch {
+            return Err(SignError::EpochRegression { record: self.rec.epoch, requested: old_epoch });
+        }
+        let next_counter = self.rec.counter.checked_add(1).ok_or(SignError::CounterExhausted)?;
+        let mut n = self.rec.clone();
+        n.counter = next_counter;
+        n.prev_digest = self.rec_digest;
+        n.seal = Some((old_epoch, seal_round));
+        let new_digest = match self.commit(&n) { Ok(d) => d, Err(e) => { self.latched = true; return Err(SignError::Commit(e)); } };
+        self.rec = n;
+        self.rec_digest = new_digest;
+        Ok(())
+    }
+
+    /// Advance the epoch record (R2 write-order steps 3-4). Call after `write_seal` succeeds.
+    /// Increments `epoch`, clears per-epoch floors and the seal, and durably records `set_hash` and `handoff_cert_hash`.
+    pub fn advance_epoch_record(
+        &mut self,
+        new_epoch: u64,
+        set_hash: [u8; 32],
+        handoff_cert_hash: [u8; 32],
+    ) -> Result<(), SignError> {
+        if self.latched { return Err(SignError::Latched); }
+        if new_epoch != self.rec.epoch + 1 {
+            return Err(SignError::EpochRegression { record: self.rec.epoch, requested: new_epoch });
+        }
+        let next_counter = self.rec.counter.checked_add(1).ok_or(SignError::CounterExhausted)?;
+        let mut n = self.rec.clone();
+        n.counter = next_counter;
+        n.prev_digest = self.rec_digest;
+        n.epoch = new_epoch;
+        n.hvr = None;
+        n.hqr = None;
+        n.last_vote = None;
+        n.last_timeout = None;
+        n.last_proposal = None;
+        n.seal = None;
+        n.set_hash = Some(set_hash);
+        n.handoff_cert_hash = Some(handoff_cert_hash);
+        let new_digest = match self.commit(&n) { Ok(d) => d, Err(e) => { self.latched = true; return Err(SignError::Commit(e)); } };
+        self.rec = n;
+        self.rec_digest = new_digest;
+        Ok(())
     }
 
     fn commit(&mut self, n: &SafetyRecord) -> Result<[u8; 32], String> {

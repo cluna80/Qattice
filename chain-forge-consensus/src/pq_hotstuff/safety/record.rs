@@ -60,6 +60,14 @@ fn put_opt_u64(o: &mut Vec<u8>, v: Option<u64>) {
     match v { None => o.push(0), Some(x) => { o.push(1); put_u64(o, x); } }
 }
 
+fn put_opt_hash(o: &mut Vec<u8>, v: Option<[u8; 32]>) {
+    match v { None => o.push(0), Some(h) => { o.push(1); o.extend_from_slice(&h); } }
+}
+
+fn put_opt_seal(o: &mut Vec<u8>, v: Option<(u64, u64)>) {
+    match v { None => o.push(0), Some((e, r)) => { o.push(1); put_u64(o, e); put_u64(o, r); } }
+}
+
 fn put_slot(o: &mut Vec<u8>, s: &Option<SignedItem>) -> Result<(), RecordError> {
     match s {
         None => o.push(0),
@@ -96,6 +104,9 @@ pub fn encode_record(r: &SafetyRecord) -> Result<Vec<u8>, RecordError> {
     put_slot(&mut o, &r.last_vote)?;
     put_slot(&mut o, &r.last_timeout)?;
     put_slot(&mut o, &r.last_proposal)?;
+    put_opt_seal(&mut o, r.seal);
+    put_opt_hash(&mut o, r.set_hash);
+    put_opt_hash(&mut o, r.handoff_cert_hash);
     Ok(seal(o))
 }
 
@@ -152,6 +163,22 @@ impl<'a> Reader<'a> {
         match self.u8()? { 0 => Ok(None), 1 => Ok(Some(self.u64()?)), _ => Err(RecordError::BadField("option flag")) }
     }
 
+    fn opt_hash(&mut self) -> Result<Option<[u8; 32]>, RecordError> {
+        match self.u8()? {
+            0 => Ok(None),
+            1 => Ok(Some(self.take(32)?.try_into().unwrap())),
+            _ => Err(RecordError::BadField("hash option flag")),
+        }
+    }
+
+    fn opt_seal(&mut self) -> Result<Option<(u64, u64)>, RecordError> {
+        match self.u8()? {
+            0 => Ok(None),
+            1 => Ok(Some((self.u64()?, self.u64()?))),
+            _ => Err(RecordError::BadField("seal option flag")),
+        }
+    }
+
     fn slot(&mut self) -> Result<Option<SignedItem>, RecordError> {
         match self.u8()? {
             0 => Ok(None),
@@ -199,6 +226,9 @@ pub fn decode_record(b: &[u8]) -> Result<SafetyRecord, RecordError> {
         last_vote: r.slot()?,
         last_timeout: r.slot()?,
         last_proposal: r.slot()?,
+        seal: r.opt_seal()?,
+        set_hash: r.opt_hash()?,
+        handoff_cert_hash: r.opt_hash()?,
     };
     r.finish()?;
     Ok(rec)

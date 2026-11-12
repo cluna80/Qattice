@@ -114,8 +114,18 @@ pub trait EngineSigningContext: Send {
         block_id: [u8; HASH_LEN],
     ) -> Result<SignedProposal, String>;
 
-    /// Called when an epoch-change block is committed. Clears per-epoch floors.
-    fn advance_epoch(&mut self, new_epoch: u64);
+    /// Write the epoch seal (R2 step 2). `old_epoch` is the epoch being sealed; `seal_round` is QC_child.round (= z+1).
+    /// Must be called after the CommitCertificate is durable in the block store and before `advance_epoch_record`.
+    fn write_seal(&mut self, old_epoch: u64, seal_round: u64) -> Result<(), String>;
+
+    /// Advance the epoch record (R2 steps 3-4). `set_hash` = SHA3-256 of V_new; `handoff_cert_hash` = SHA3-256 of cert.
+    /// Must be called after `write_seal` succeeds.
+    fn advance_epoch_record(
+        &mut self,
+        new_epoch: u64,
+        set_hash: [u8; HASH_LEN],
+        handoff_cert_hash: [u8; HASH_LEN],
+    ) -> Result<(), String>;
 }
 
 // ── Production implementation ─────────────────────────────────────────────────
@@ -206,9 +216,19 @@ impl<S: Storage + Send, C: MonotonicCounter + Send> EngineSigningContext for Saf
             .map_err(|e| e.to_string())
     }
 
-    fn advance_epoch(&mut self, new_epoch: u64) {
+    fn write_seal(&mut self, old_epoch: u64, seal_round: u64) -> Result<(), String> {
+        self.store.write_seal(old_epoch, seal_round).map_err(|e| e.to_string())
+    }
+
+    fn advance_epoch_record(
+        &mut self,
+        new_epoch: u64,
+        set_hash: [u8; HASH_LEN],
+        handoff_cert_hash: [u8; HASH_LEN],
+    ) -> Result<(), String> {
+        self.store.advance_epoch_record(new_epoch, set_hash, handoff_cert_hash)
+            .map_err(|e| e.to_string())?;
         self.epoch = new_epoch;
-        // The SafetyStore clears per-epoch floors automatically on the first sign
-        // call in a new epoch (epoch > rec.epoch). No explicit flush needed here.
+        Ok(())
     }
 }

@@ -501,7 +501,7 @@ fn trailing_bytes_and_an_unsupported_version_are_refused() {
     more.push(0);
     s2.set_raw(STATE_FILE, more);
     assert!(w.open(&s2, &ctr).is_err());
-    for bad_version in [1u16, 3] {
+    for bad_version in [1u16, 4] {
         let mut v = good.clone();
         v[4..6].copy_from_slice(&bad_version.to_be_bytes());
         let mut s3 = st.clone();
@@ -1298,14 +1298,15 @@ fn a_forged_file_counter_of_u64_max_against_a_small_counter_is_inconsistent_not_
 
 // ================================================================ golden record format (independent oracle)
 
-const FRESH_LEN_DIGEST: (usize, &str) = (2113, "f7201e0f54d327f570b7ed022c4eb34615e4a5918be94c14ad1f0a30e8039cb8");
-const ACTIVE_LEN_DIGEST: (usize, &str) = (5581, "d19e50088e275383d8a336d31581598d8eea156a89c5f3a88e3dc7ceba3c73c5");
-const MARKER_LEN_DIGEST: (usize, &str) = (2059, "4041fe5645ebd735a964b43c646be4823329ca74bf004dfc30f2acef7c618985");
+const FRESH_LEN_DIGEST: (usize, &str) = (2116, "1983be03f1726d38d1fa329e226e5c24a7417647fdd62b230b8b0391d448b9d1");
+const ACTIVE_LEN_DIGEST: (usize, &str) = (5584, "800911f19750a70f7bd1a0890714a292110a17e11f8f3c5c931b192779b43b8a");
+const MARKER_LEN_DIGEST: (usize, &str) = (2059, "1c211a1021a197688519bf8513ad3d8a7b3e394a46f97448cf73f1bf47d64dbe");
 
 fn oracle_record(state: State, counter: u64, prev_digest: [u8; 32], hvr: Option<u64>, hqr: Option<u64>, vote_item: Option<SignedItem>) -> SafetyRecord {
     SafetyRecord {
         state, protocol_profile: PROFILE.into(), chain_id: CHAIN.into(), public_key: (0..1952).map(|i| (i % 251) as u8).collect(), instance_id: ID,
         counter, prev_digest, epoch: 1, hvr, hqr, last_vote: vote_item, last_timeout: None, last_proposal: None,
+        seal: None, set_hash: None, handoff_cert_hash: None,
     }
 }
 
@@ -1316,7 +1317,7 @@ fn the_record_and_marker_formats_match_the_independent_oracle() {
     let sig: Vec<u8> = (0..3309).map(|i| ((i * 7) % 251) as u8).collect();
     let item = SignedItem { round: 6, message: vote(1, 6, 0x11).encode().unwrap(), envelope: SignatureEnvelope { alg_id: ALG, signature: sig } };
     let fresh_digest: [u8; 32] = fresh[fresh.len() - 32..].try_into().unwrap();
-    assert_eq!(hex(&fresh_digest), "268eef095fd129ac02db9e6855c840e56202826f8dffd1dab0de1971fe037cab", "the digest is the sealing checksum");
+    assert_eq!(hex(&fresh_digest), "0012a9cc3883abbcad32a8942ee74f49b35b2603482c2f7f040e1aad0838359c", "the digest is the sealing checksum");
     let active = encode_record(&oracle_record(State::Active, 2, fresh_digest, Some(6), Some(5), Some(item))).unwrap();
     assert_eq!((active.len(), digest(&active).as_str()), ACTIVE_LEN_DIGEST);
     let marker = encode_marker(&Marker { protocol_profile: PROFILE.into(), chain_id: CHAIN.into(), public_key: (0..1952).map(|i| (i % 251) as u8).collect(), instance_id: ID }).unwrap();

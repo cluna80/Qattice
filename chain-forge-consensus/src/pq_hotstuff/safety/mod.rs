@@ -60,7 +60,7 @@ pub const MARKER_FILE: &str = "pq_hotstuff_safety.init";
 pub const STATE_TMP: &str = "pq_hotstuff_safety.state.tmp";
 pub const MARKER_TMP: &str = "pq_hotstuff_safety.init.tmp";
 
-pub const FORMAT_VERSION: u16 = 2;
+pub const FORMAT_VERSION: u16 = 3;
 /// Upper bound on a stored canonical message.
 pub const MAX_MESSAGE_LEN: usize = 4096;
 
@@ -108,6 +108,13 @@ pub struct SafetyRecord {
     pub last_vote: Option<SignedItem>,
     pub last_timeout: Option<SignedItem>,
     pub last_proposal: Option<SignedItem>,
+    /// Upper cutoff: once set to `(e_s, z_s)`, no new signature for epoch `e_s` at round `> z_s` is allowed (EC-6).
+    /// Set when the CommitCertificate for the epoch-change block is durable. Cleared on epoch advance.
+    pub seal: Option<(u64, u64)>,
+    /// SHA3-256 of the canonical V_new encoding accepted at the epoch transition. `None` in epoch 0.
+    pub set_hash: Option<[u8; 32]>,
+    /// SHA3-256 of the CommitCertificate that authorized the last epoch transition. `None` in epoch 0.
+    pub handoff_cert_hash: Option<[u8; 32]>,
 }
 
 impl SafetyRecord {
@@ -325,6 +332,10 @@ pub enum SignError {
     RoundBelowSigned { kind: &'static str, signed: u64, requested: u64 },
     #[error("{kind} at round {round} violates the persisted floor {floor}")]
     FloorViolation { kind: &'static str, round: u64, floor: u64 },
+    #[error("epoch {epoch} is sealed at round {seal_round}; round {round} is above the cutoff")]
+    SealViolation { epoch: u64, round: u64, seal_round: u64 },
+    #[error("round {round} is below the minimum for epoch {epoch} (must be >= 1)")]
+    RoundBelowEpochMinimum { epoch: u64, round: u64 },
     #[error("{0}")]
     Wire(#[from] WireError),
     #[error("the request does not match this validator: {0}")]
