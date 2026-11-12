@@ -175,8 +175,9 @@ fn spawn_child(mode: &str, counter_path: &std::path::Path) -> std::process::Outp
     std::process::Command::new(&exe)
         .env(ENV_CHILD_MODE, mode)
         .env(ENV_COUNTER_PATH, counter_path.to_str().unwrap())
-        // Run only the child entry point test.
-        .args(["--test-threads=1", "gate_b_child_entry"])
+        // --nocapture so println! inside the test function is visible in
+        // the captured stdout we check for CHILD_ACQUIRE_ERR / CHILD_ACQUIRE_OK.
+        .args(["--nocapture", "--test-threads=1", "gate_b_child_entry"])
         .output()
         .expect("spawn child")
 }
