@@ -1,5 +1,32 @@
 # Qattice — Public Testnet Alpha: ML-DSA-65 + PQ-HotStuff Launch Plan
 
+## QAT-07 Gate B complete — 2026-11-12
+
+**QAT-07 Gate B: OS-process TCP epoch-boundary + crash injection + file-based monotonic counter (Windows)**
+
+| Deliverable | Status |
+|---|---|
+| `FsCounter` — 44-byte file record: `value:u64 \|\| digest:[u8;32] \|\| crc32:u32` | Done |
+| CRC32 partial-write integrity guard (fail-closed on truncated/torn record) | Done |
+| Windows writer fencing: `GENERIC_WRITE \| FILE_SHARE_READ` → `ERROR_SHARING_VIOLATION` | Done |
+| B1: 7-step TCP epoch-boundary — SealViolation, RoundBelowEpochMinimum, EpochRegression, epoch-1 ML-DSA-65 frame | Done |
+| B2: 5 kill points (K0–K3 forced + K4 clean control) — crash-window recovery via `open()` | Done |
+| B3: 8 counter tests — truncated, CRC mismatch, stale session, CAS failure, F1/F2 two-process fencing | Done |
+| `gate-b-harness` feature flag — devnet harness disabled in production build | Done |
+| **9 Gate B acceptance tests pass Windows-confirmed** (BossKing MINGW64, `ba170eb`) | ✅ **Windows-confirmed** |
+
+**Windows confirmation (owner-run, 2026-11-12):** `cargo test -p chain-forge-consensus --features gate-b-harness --test gate_b_counter_fencing --test gate_b_tcp_epoch_boundary` on branch `feat/qat-07-safety-store-integration` at `ba170eb` — 8/8 counter fencing + 1/1 TCP epoch boundary passed.
+
+**Gate B scope document:** `docs/pq-hotstuff-2/gate-b-scope.md` at `d8bfdf9` — approved by owner 2026-11-12.
+
+**F1 fencing (Windows):** child blocked with `open_exclusive: The process cannot access the file because it is being used by another process. (os error 32)`; succeeded after `release_handle()`.
+
+**B1 TCP all 7 steps:** SealViolation ✅ · RoundBelowEpochMinimum ✅ · EpochRegression ✅ · epoch-1 ML-DSA-65 frame (3309-byte sig, verifies) ✅ · receiver saw exactly 2 frames.
+
+**Gate B crash injection confirmed at `7e8402b`:** `cargo test -p chain-forge-consensus --features gate-b-harness --test gate_b_crash_injection` — 6/6 passed (K0–K4 + summary).
+
+---
+
 ## QAT-07 Gate A complete — 2026-11-12
 
 **QAT-07 Gate A: epoch-boundary signing rules — R2 transition table, durable write order, R3-a/R3-b recovery**
@@ -39,7 +66,6 @@
 **Windows confirmation (owner-run, 2026-11-12):** `cargo test -p chain-forge-consensus --features pq-hotstuff` on branch `feat/qat-07-safety-store-integration` at `c77c567` — 204/204 passed.
 
 **Remaining QAT-07 scope:**
-- Gate B: TCP epoch-boundary test + crash injection over OS processes (Windows)
 - Epoch validator-set SSI switch-over in `on_commit`
 - Key rotation + next-block revocation
 - ML-DSA-only validator admission gate
