@@ -371,14 +371,13 @@ impl ConsensusEngine for PqHotStuffEngine {
         let idx = self.proposer_index(height, round);
         let proposer = self.validator_set.validators[idx].id.clone();
 
-        // Block hash placeholder: real hash uses wire::BlockIdInput + SHA3-256.
-        let block_hash = BlockHash(format!(
-            "pqhs-{}-{}-{}-{}",
-            self.config.chain_id, height, round,
-            sha3_hex(parent_hash.0.as_bytes())
-        ));
+        // Compute the canonical block hash so sync validation passes.
+        // compute_block_hash matches what SyncResponse handler in node.rs recomputes.
+        let block_hash = crate::compute_block_hash(
+            &self.config.chain_id, height, &parent_hash, &tx_data,
+        );
 
-        // Build block_id bytes for signing: take SHA3-256 of the placeholder string.
+        // Build block_id bytes for signing.
         let block_id_bytes = sha3_32(block_hash.0.as_bytes());
 
         // Sign via SafetyStore when a context is attached (QAT-07); otherwise sign-later.
