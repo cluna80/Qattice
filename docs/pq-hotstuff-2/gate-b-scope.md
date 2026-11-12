@@ -106,7 +106,7 @@ full durable advance but before cleanup — leaves the store in a state that (a)
 accepts, (b) the counter mismatch is correctly classified, and (c) the correct recovery
 path resumes signing without producing a conflicting signature.
 
-The R2 write order has four kill points plus a clean-shutdown control:
+The R2 write order has four forced kills (K0–K3) plus a clean-shutdown control (K4):
 
 | Kill point | Label | State file after kill | Counter after kill | Expected `open` outcome |
 |---|---|---|---|---|
@@ -174,8 +174,22 @@ OS-backed counter that survives process crashes.
 
 **On-disk layout:**
 
-The counter file holds a fixed-width record: `value: u64` (big-endian) `|| digest: [u8; 32]`
-(40 bytes total). `digest` is `SHA3-256(value_bytes)`.
+The counter file holds a fixed-width record of 44 bytes:
+
+```
+value:     u64  (big-endian, 8 bytes)   — the monotonic counter value
+digest:    [u8; 32]                      — the SafetyStore record digest bound to this value
+checksum:  u32  (big-endian, 4 bytes)   — CRC32 of (value_bytes || digest)
+```
+
+`digest` is the SafetyStore record digest supplied by the caller to `advance(value,
+digest)`. It is NOT derived from `value`; it is the digest of the safety record that was
+written at counter value `value`. K1 and K2 rely on this binding: `open` reads the
+counter file, extracts `(value, digest)`, and applies the existing equal-counter and
+one-step-ahead checks against the safety record on disk.
+
+`checksum` is the integrity field for detecting partial or mixed writes. It covers
+`value` and `digest` together.
 
 **Write path:** Writes call `FlushFileBuffers` before returning. The file is opened with
 `FILE_FLAG_WRITE_THROUGH` and `FILE_FLAG_NO_BUFFERING` with sector-aligned writes so that
@@ -185,22 +199,27 @@ power-loss caveat below).
 **Partial-write recovery:**
 
 `FILE_FLAG_WRITE_THROUGH` and `FlushFileBuffers` do not establish atomic replacement of
-the 40-byte record. A kill mid-write can leave a partial record. `read()` must therefore:
+the 44-byte record. A kill mid-write can leave a partial or mixed record. `read()` must
+therefore:
 
-1. Read all 40 bytes. If the read returns fewer than 40 bytes, the file is truncated
-   (interrupted write); fail closed: return `Err(CounterError::Truncated)`.
-2. Decode `value` from the first 8 bytes and `stored_digest` from the remaining 32.
-3. Recompute `expected = SHA3-256(value_bytes)`.
-4. If `stored_digest != expected`: fail closed: return `Err(CounterError::DigestMismatch)`.
-5. If both checks pass: return `Ok(value)`.
+1. Read all 44 bytes. If the read returns fewer than 44 bytes: fail closed,
+   `Err(CounterError::Truncated)`.
+2. Decode `value` (bytes 0–7), `digest` (bytes 8–39), `stored_checksum` (bytes 40–43).
+3. Recompute `expected_checksum = CRC32(value_bytes || digest)`.
+4. If `stored_checksum != expected_checksum`: fail closed,
+   `Err(CounterError::ChecksumMismatch)`.
+5. If both checks pass: return `Ok((value, digest))`.
 
 `open` in `SafetyStore` treats `Err(CounterError::Truncated)` and
-`Err(CounterError::DigestMismatch)` as fatal: the store does not open and the caller must
-not sign. This is the fail-closed contract. Recovery from a corrupted counter requires
-out-of-band restoration (not in Gate B scope).
+`Err(CounterError::ChecksumMismatch)` as fatal: the store does not open and the caller
+must not sign. Recovery from a corrupted counter requires out-of-band restoration (not
+in Gate B scope).
 
-The write-then-verify approach (write, flush, re-read and verify digest) is an
-alternative; either is acceptable provided the same fail-closed contract holds on `open`.
+SafetyStore's existing equal-counter check (`counter.value == file.counter`) and
+one-step-ahead check (`counter.value + 1 == file.counter`) operate on the `value` field.
+The `digest` field is verified separately against the safety record's own digest field.
+The checksum field is an integrity guard only; it carries no semantic meaning to
+SafetyStore beyond "this record was written completely".
 
 **Writer fencing across processes:**
 
@@ -261,7 +280,7 @@ Sandbox runs do not count (per CLAUDE.md test validation policy).
 |---|---|---|---|---|
 | Gate A epoch-boundary (13 tests) | In-process doubles | `TestSigner` (size-conformant stub, not real FIPS 204) | `TestCounter` (in-memory) | ✅ Windows-confirmed `7ca0aa7` |
 | B1 TCP epoch-boundary | Loopback TCP, two OS processes | Real FIPS 204 ML-DSA-65 | File counter | Required |
-| B2 crash injection × 5 (K0–K4) | `TerminateProcess`, file storage | Real FIPS 204 ML-DSA-65 | File counter | Required |
+| B2 crash injection — 4 forced kills (K0–K3) + 1 control (K4) | `TerminateProcess`, file storage | Real FIPS 204 ML-DSA-65 | File counter | Required |
 | B3 counter fencing (F1, F2) | Two OS processes, file counter | n/a | File counter | Required |
 
 After B1, B2, and B3 pass on Windows with pasted output, the epoch-transition flag may
