@@ -788,4 +788,131 @@ mod tests {
         assert_eq!(e.variant(), ConsensusVariant::PqHotStuff);
         assert_eq!(e.name(), "PQ-HotStuff-2");
     }
+
+    // ── Regression: timeout signing failure (R-TF-1 / R-TF-2) ────────────────
+
+    /// A signing context whose sign_timeout always returns Err.
+    struct FailingSignCtx;
+    impl crate::pq_hotstuff::signing::EngineSigningContext for FailingSignCtx {
+        fn restore(&self) -> crate::pq_hotstuff::signing::RestoredFloors {
+            crate::pq_hotstuff::signing::RestoredFloors::default()
+        }
+        fn sign_vote(&mut self, _: &str, _: u64, _: u64, _: [u8;32], _: [u8;32], _: u64, _: u64)
+            -> Result<crate::pq_hotstuff::signing::SignedVote, String> { Err("injected".into()) }
+        fn sign_timeout(&mut self, _: &str, _: u64, _: u64, _: u64)
+            -> Result<crate::pq_hotstuff::signing::SignedTimeout, String> { Err("injected".into()) }
+        fn sign_proposal(&mut self, _: u64, _: u64, _: [u8;32])
+            -> Result<crate::pq_hotstuff::signing::SignedProposal, String> { Err("injected".into()) }
+        fn write_seal(&mut self, _: u64, _: u64) -> Result<(), String> { Err("injected".into()) }
+        fn advance_epoch_record(&mut self, _: u64, _: [u8;32], _: [u8;32]) -> Result<(), String> { Err("injected".into()) }
+    }
+
+    // R-TF-1: sign_timeout failure must not abort the round advance.
+    // The pacemaker must record a timeout and round must increment.
+    #[tokio::test]
+    async fn timeout_signing_failure_still_advances_round() {
+        let mut e = engine().await;
+        e.attach_signing_context(Box::new(FailingSignCtx));
+
+        let round_before = e.current_round();
+        let timeout_ms_before = e.current_timeout_ms();
+
+        let vote = e.on_timeout(1, round_before).await
+            .expect("on_timeout must not propagate signing error");
+
+        // Round must have advanced.
+        assert_eq!(e.current_round(), round_before + 1,
+            "round must increment even when sign_timeout fails");
+
+        // The pacemaker must have doubled (on_timeout called).
+        assert!(e.current_timeout_ms() > timeout_ms_before,
+            "pacemaker must record a timeout");
+
+        // The returned vote must carry an empty signature — no signed bytes broadcast.
+        assert!(vote.signature.is_empty(),
+            "signature must be empty when signing fails (not broadcast)");
+
+        // The vote type must be Nil (timeout vote, not a precommit).
+        assert_eq!(vote.vote_type, crate::VoteType::Nil,
+            "timeout vote type must be Nil");
+    }
+
+    // R-TF-2: on_timeout with no signing context also advances round with empty sig.
+    #[tokio::test]
+    async fn timeout_no_signing_context_advances_round() {
+        let mut e = engine().await; // no signing context attached
+
+        let round_before = e.current_round();
+        let vote = e.on_timeout(1, round_before).await
+            .expect("on_timeout must succeed without signing context");
+
+        assert_eq!(e.current_round(), round_before + 1);
+        assert!(vote.signature.is_empty());
+        assert_eq!(vote.vote_type, crate::VoteType::Nil);
+    }
+
+    // ── Regression: locked_qc monotonicity (R-LM-1 / R-LM-2) ─────────────────
+
+    fn vote_for(height: u64, round: u32, block_hash: &str, validator: &str) -> Vote {
+        Vote {
+            vote_type: crate::VoteType::Precommit,
+            height,
+            round,
+            block_hash: Some(BlockHash(block_hash.into())),
+            validator: ValidatorId(validator.into()),
+            signature: vec![],
+            scheme: Vote::default_scheme(),
+        }
+    }
+
+    // R-LM-1: locked_qc.round never decreases within an epoch.
+    // After a QC forms at round R, stale votes for round R-1 must not lower the lock.
+    #[tokio::test]
+    async fn locked_qc_round_never_decreases_within_epoch() {
+        let mut e = engine().await;
+
+        // Drive two consecutive QCs at rounds 1 and 2 to trigger a commit and
+        // set locked_qc to round 2.  With 4 validators, threshold = 3.
+        for &vid in &["v0","v1","v2"] {
+            e.receive_vote(vote_for(1, 1, "block-r1", vid)).await.unwrap();
+        }
+        // locked_qc should now be round=1 (QC at round 1).
+        assert_eq!(e.locked_qc().round, 1, "locked_qc should be round 1 after first QC");
+        assert_eq!(e.current_round(), 2);
+
+        for &vid in &["v0","v1","v2"] {
+            e.receive_vote(vote_for(1, 2, "block-r2", vid)).await.unwrap();
+        }
+        assert_eq!(e.locked_qc().round, 2, "locked_qc should advance to round 2");
+        assert_eq!(e.current_round(), 3);
+
+        // Now deliver stale round=1 votes — rejected either by safe_to_vote
+        // (round < locked_qc.round) or by the defensive round filter.  Both
+        // paths keep the vote out of the accumulator; the lock must not move.
+        for &vid in &["v0","v1","v2","v3"] {
+            let _ = e.receive_vote(vote_for(1, 1, "block-r1", vid)).await;
+            assert_eq!(e.locked_qc().round, 2,
+                "locked_qc must not decrease after stale round-1 votes");
+        }
+    }
+
+    // R-LM-2: a timeout does not alter locked_qc.
+    #[tokio::test]
+    async fn timeout_does_not_change_locked_qc() {
+        let mut e = engine().await;
+
+        // Form a QC at round 1 to set locked_qc.
+        for &vid in &["v0","v1","v2"] {
+            e.receive_vote(vote_for(1, 1, "block-r1", vid)).await.unwrap();
+        }
+        let lock_before = e.locked_qc().round;
+        assert_eq!(lock_before, 1);
+
+        // Fire a timeout at round 2 (no quorum reached).
+        e.on_timeout(1, 2).await.unwrap();
+
+        assert_eq!(e.locked_qc().round, lock_before,
+            "timeout must not modify locked_qc");
+        assert_eq!(e.current_round(), 3);
+    }
 }
