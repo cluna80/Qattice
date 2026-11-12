@@ -1,5 +1,7 @@
 # Qattice — Public Testnet Alpha: ML-DSA-65 + PQ-HotStuff Launch Plan
 
+> **Start here:** [PQ-PoP-HotStuff-2 prerequisite](docs/PQ-POP-PREREQUISITE.md) defines the current protocol direction and the native Phase 0 and Phase 0.5 gates. Once those gates pass, continue the applicable milestones below with PQ-HotStuff-2 and defensive pruning. Earlier Tendermint, Ed25519, and QRC entries document historical plans and evidence.
+
 ## PQ-HotStuff-2 implementation status — 2026-11-09 (newest status; documentation-only; append-only)
 
 > **Status supersession, not gate completion.** This section records what the draft PR stack #133–#144 (plus one PR still to be opened) implements and which of it the owner has Windows-confirmed. It removes nothing: earlier sections, including the locked 2026-11-08 pruning requirements and the 2026-11-06 status below, stay as written. It changes no code, authorizes no merge, activation or deployment, and **marks no QAT gate complete**. Per `CLAUDE.md`, a sandbox/CI run never counts as confirmation, so **no ✅ is used here**: nothing below is merged, and the legend's ✅ means shipped.
