@@ -1,5 +1,32 @@
 # Qattice — Public Testnet Alpha: ML-DSA-65 + PQ-HotStuff Launch Plan
 
+## QAT-07 PQ-HotStuff-2 four-node devnet integration complete — 2026-11-12
+
+**QAT-07 Phase 2: `PqHotStuffEngine` wired into `chain-forge-node`; four-node ML-DSA-65 devnet commits blocks end-to-end**
+
+| Deliverable | Status |
+|---|---|
+| `ConsensusVariant::PqHotStuff` dispatch in `validate_block_payload` (feature-gated) | ✅ |
+| Gossip vote handler uses `cert.round` (not vote round) for proposal lookup | ✅ |
+| Own-vote handler uses `cert.round` for two-chain commit proposal lookup | ✅ |
+| `on_timeout` tolerates missing SafetyStore (empty sig, round still advances) | ✅ |
+| `locked_qc` updated unconditionally on each new QC (liveness over skipped rounds) | ✅ |
+| Defensive pruning: stale-round votes rejected before accumulator add | ✅ |
+| `on_commit` resets `high_qc` and `locked_qc` to genesis on height advance | ✅ |
+| `pqhs2_4node_reaches_target_height`: all 4 nodes reach height ≥ 3 within 60s | ✅ |
+| **`pqhs2_4node_live` integration test** (BossKing MINGW64, `82bfc88`+cleanup) | ✅ **Windows-confirmed** |
+
+**Windows confirmation (owner-run, 2026-11-12):** `cargo test -p chain-forge-node --features pq-hotstuff --test pqhs2_4node_live -- --nocapture` on branch `feat/qat-07-safety-store-integration` at `82bfc88` — 1/1 passed in 29.7s. All 4 ML-DSA-65 devnet nodes reached height 3.
+
+**Bugs fixed (this milestone):**
+- `on_timeout` sign failure (`map_err(Internal)?` → `unwrap_or_default()`) blocked round advance.
+- `locked_qc` conditional update (`new_qc.round == locked_qc.round + 1`) prevented two-chain commit after any timeout round.
+- Both commit paths in `node.rs` used `vote.round` for proposal lookup; two-chain cert has `round = R-1`, not `R`.
+- Stale round-(R-1) votes re-entering the accumulator after `advance_round` caused `check_quorum` to fire a spurious QC from the wrong bucket (8 stale votes ≥ threshold=3).
+- `on_commit` did not reset `high_qc`/`locked_qc`; at height H+1 round=1 the guard `new_qc.round > high_qc.round` always failed, stalling the chain after the first committed block.
+
+---
+
 ## QAT-07 key rotation and next-block revocation complete — 2026-11-12
 
 **QAT-07 key rotation and next-block revocation for pqc-native admission (`epoch-transition` feature flag)**

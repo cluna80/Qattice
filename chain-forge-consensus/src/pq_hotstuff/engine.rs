@@ -29,7 +29,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use tracing::{debug, info, warn};
+use tracing::debug;
 
 use crate::{
     BlockHash, BlockHeight, BlockProposal, CommitCertificate,
@@ -123,10 +123,7 @@ impl VoteAccumulator {
 
     fn clear(&mut self) { self.buckets.clear(); }
 
-    /// Total votes across all non-nil buckets (for diagnostics).
-    fn bucket_len_for_round(&self, _round: Round) -> usize {
-        self.buckets.values().map(|v| v.len()).sum()
-    }
+
 }
 
 // ── Engine ────────────────────────────────────────────────────────────────────
@@ -454,17 +451,9 @@ impl ConsensusEngine for PqHotStuffEngine {
         self.accumulator.add(idx, vote);
 
         let threshold = self.quorum_threshold();
-        let bucket_len = self.accumulator.bucket_len_for_round(round);
-        info!(
-            height, round, validator_idx = idx,
-            bucket_votes = bucket_len, threshold,
-            engine_round = self.round,
-            "pqhs2 vote accepted into accumulator"
-        );
 
         if let Some(new_qc) = self.accumulator.check_quorum(threshold, round, height) {
             if new_qc.round > self.high_qc.round {
-                info!(height, round, "pqhs2 QC formed — advancing round");
                 let prev_locked = self.locked_qc.clone();
                 // Always advance locked_qc to the latest QC so the two-chain
                 // commit can fire even when round 1 was skipped (timeout).
@@ -474,7 +463,6 @@ impl ConsensusEngine for PqHotStuffEngine {
                 self.advance_round(round + 1);
                 // Two-chain commit: commit prev_locked if locked_qc is its consecutive child
                 if let Some(cert) = self.try_two_chain_commit(&prev_locked) {
-                    warn!(height, round, "pqhs2 two-chain commit triggered");
                     return Ok(Some(cert));
                 }
             } else {
