@@ -13,141 +13,211 @@ only the additional acceptance criteria required to lift the flag from disabled 
 
 ---
 
-## What Gate A demonstrated (in-process doubles)
+## Gate A evidence record
 
-Gate A proved the signing rules using `MemStorage` and `TestCounter` — in-process test
-doubles with no TCP, no OS processes, and no hardware-backed monotonic counter. The 13
-acceptance tests confirm:
+Gate A used `MemStorage`, `TestCounter`, and `TestSigner` — in-process test doubles.
+`TestSigner` is a hedged test scheme that produces ML-DSA-65-sized signatures (3,309
+bytes) but does **not** call the real FIPS 204 signing primitive. The 13 acceptance
+tests confirm the write-order logic and signing-rule enforcement; they do not confirm
+real ML-DSA-65 signing behavior or OS-level write durability.
 
-- Seal enforced: no new epoch-0 signature above seal round after `write_seal`.
-- Incoming set blocked from epoch-0 signing after `advance_epoch_record`.
+What Gate A demonstrated:
+- Seal enforced: `SealViolation` on new epoch-0 signature above seal round after
+  `write_seal`.
+- `EpochRegression` on epoch-0 signature after `advance_epoch_record`.
 - `RoundBelowEpochMinimum`: epoch-1 round-0 is denied.
 - R3-a recovery: seal durable, epoch not yet advanced — `advance_epoch_record` completes
-  correctly on restart.
+  correctly on restart with in-memory doubles.
 - R3-b: `set_hash` and `handoff_cert_hash` survive a storage round-trip and are readable
-  on `open`.
-- Crash injection at steps 1, 2, and 3–4 of the R2 write order: each crash leaves the
-  store in a state that opens correctly and resumes from the right step.
+  on `open` with in-memory doubles.
+- Crash injection at steps 1, 2, and 3–4 of the R2 write order using `MemStorage` fault
+  injection (not OS-level process kills).
 
 What Gate A did NOT demonstrate:
-
-- A `MonotonicCounter` backed by an actual OS primitive (file, TPM, etc.).
-- Two OS processes where one crashes mid-commit and the other (or the restarted process)
-  detects the crash window via the counter mismatch on `open`.
-- Write-order step boundaries visible at the OS level (e.g., the counter advance
-  happening in a separate OS write from the state file write).
+- Real FIPS 204 ML-DSA-65 signing (TestSigner is a size-conformant stub).
+- A `MonotonicCounter` backed by an actual OS primitive.
+- Two OS processes where one is killed mid-commit and the other detects the crash window
+  via counter mismatch on `open`.
+- Write-order step boundaries visible at the OS level (counter advance is a separate OS
+  write from the state file write).
 - A live TCP connection where a vote is transmitted only after `write_seal` returns.
 
-Gate B closes all four gaps.
+Gate B closes all five gaps.
 
 ---
 
-## B1 — TCP epoch-boundary test (write-before-broadcast over a real socket)
+## B1 — TCP epoch-boundary test (write-before-broadcast, isolated seal checks)
 
-**What it tests:** a validator cannot transmit a signed epoch-0 vote after the seal is
-written, and cannot transmit an epoch-1 vote before `advance_epoch_record` completes.
+**What it tests:** the seal and epoch-advance checks are distinct. The seal fires before
+the epoch advances; the epoch-regression check fires after. An incoming vote before the
+durable advance must produce no wire frame.
 
 **Setup:**
 
 - Two OS processes on Windows (BossKing MINGW64): a sender process and a receiver process.
-- Sender holds a `SafetyStore` backed by real file storage (`fs::FsStorage`) and a
-  `MonotonicCounter` backed by a real OS counter (see B3).
-- Real ML-DSA-65 keys (generated for the test, not stored permanently).
-- The sender and receiver communicate over a loopback TCP socket.
+- Sender: `SafetyStore` backed by real file storage (`fs::FsStorage`) + real file-based
+  `MonotonicCounter` (see B3). Real FIPS 204 ML-DSA-65 keys generated for the test.
+- Sender and receiver communicate over a loopback TCP socket.
+- Receiver logs every frame it receives, tagged by epoch and round.
 
-**Scenario:**
+**Scenario and required assertions:**
 
 ```
-1. Sender votes at epoch=0, round=5 (B_child). Receiver logs the vote.
-2. Sender calls write_seal(0, 5). Receiver must NOT receive any new epoch-0 vote
-   at round > 5 after this point.
-3. Sender calls advance_epoch_record(1, set_hash, cert_hash).
-4. Sender attempts to sign epoch-0 round-6 vote — must get SealViolation.
-5. Sender signs epoch-1 round-1 vote — must succeed.
-6. Receiver receives the epoch-1 round-1 vote.
-7. No epoch-0 message at round > 5 ever appears on the socket.
+Step 1  Sender votes epoch=0 round=5 (B_child). Receiver logs frame (0,5). [OK]
+
+Step 2  Sender calls write_seal(0, 5). Seal is now durable. Epoch record still at 0.
+
+Step 3  Sender attempts to sign epoch=0 round=6 vote.
+        ASSERT: sign returns SealViolation { epoch:0, round:6, seal_round:5 }.
+        ASSERT: no (0,6) frame appears on the receiver socket.
+
+Step 4  Sender attempts to sign epoch=1 round=1 vote.
+        ASSERT: sign returns ProofNotDurable (advance_epoch_record not yet called).
+        ASSERT: no (1,1) frame appears on the receiver socket.
+
+Step 5  Sender calls advance_epoch_record(1, set_hash, cert_hash).
+        Epoch record now at 1.
+
+Step 6  Sender attempts to sign epoch=0 round=7 vote.
+        ASSERT: sign returns EpochRegression { record:1, requested:0 }.
+        ASSERT: no (0,7) frame appears on the receiver socket.
+
+Step 7  Sender signs epoch=1 round=1 vote. Sends frame.
+        ASSERT: sign succeeds with real ML-DSA-65 signature.
+        ASSERT: receiver logs frame (1,1) with valid signature bytes.
+        ASSERT: receiver has logged exactly one frame total at epoch=0 (step 1)
+                and exactly one frame at epoch=1 (step 7). No other frames.
 ```
 
-**Acceptance:** owner pastes the test output showing all 7 steps completed on Windows,
-no epoch-0 round-6 message received, epoch-1 round-1 message received.
+**Note on Step 4:** `ProofNotDurable` is the R2 table row for `req.epoch == rec.epoch+1,
+proof durable = FALSE`. If the signing context gates on proof delivery rather than the
+safety store, the error name may differ; the invariant is that no epoch-1 frame reaches
+the wire until `advance_epoch_record` returns `Ok`.
+
+**Acceptance:** owner pastes the test output on Windows showing all 7 steps completed
+with the stated assertions.
 
 ---
 
-## B2 — Crash injection over OS processes
+## B2 — Crash injection at exact OS-level kill points
 
-**What it tests:** a process crash at each step of the R2 write order leaves the store
-in a state that (a) `open` accepts, (b) the counter mismatch is correctly classified, and
-(c) the correct recovery path (R3-a or R3-b) resumes signing without producing a
-conflicting signature.
+**What it tests:** a `TerminateProcess` kill at each step boundary leaves the store in
+a state that (a) `open` accepts, (b) the counter mismatch is correctly classified, and
+(c) the correct recovery path resumes signing without producing a conflicting signature.
+Clean shutdown after a full advance is kept as a control, not a replacement for the kill cases.
 
-The four crash points from R2:
+The R2 write order has four boundaries and therefore four kill points:
 
-| Crash point | State after crash | Expected `open` outcome |
-|---|---|---|
-| After CommitCertificate written, before `write_seal` | No seal in record | Opens at epoch 0; R3-a caller writes seal then advances |
-| After `write_seal`, before `advance_epoch_record` | Seal in record, epoch 0 | Opens at epoch 0 with seal; R3-a advances |
-| After `advance_epoch_record`, before `signing_ctx.advance_epoch` | Epoch 1 in record | Opens at epoch 1; signing context re-attached |
-| After full advance, clean shutdown | Epoch 1, set_hash, cert_hash present | Opens at epoch 1 normally |
+| Kill point | Label | State file after kill | Counter after kill | Expected `open` outcome |
+|---|---|---|---|---|
+| K0 | After CommitCertificate written (block store); before `write_seal` | Record at epoch 0, no seal | Matches state file | Opens at epoch 0, no seal; R3-a: caller writes seal then advances |
+| K1 | After `write_seal` state file written; before counter advance | Record at epoch 0 with seal; counter one behind file | Crash window (counter+1 == file.counter) | Opens at epoch 0 with seal; R3-a: `advance_epoch_record` |
+| K2 | After `advance_epoch_record` state file written; before counter advance | Record at epoch 1 with set_hash/cert_hash; counter one behind | Crash window | Opens at epoch 1; R3-b: verify hashes, restore floors |
+| K3 (control) | After full advance, clean `into_parts()` | Record at epoch 1 | Matches state file | Opens at epoch 1 normally |
 
-**Crash mechanism:** the test process is killed with `TerminateProcess` (Windows) at a
-controlled point between OS writes, then a second process opens the same files. The
-second process must not be able to produce a conflicting epoch-0 message at any round
-above the seal round.
+**For K1 and K2 (crash window):** `open` adopts the durable file and completes the
+counter advance. This is the standard crash-window recovery path in `store::open`. The
+key additional assertion for Gate B is:
 
-**Acceptance:** owner pastes output from each of the four crash scenarios showing:
-- The restarted process opens successfully (or fails closed for the one scenario where it
-  should fail).
+- After adopting a K1 state: the signer cannot produce a new epoch-0 signature at any
+  round above the seal round (SealViolation fires before any new signing attempt).
+- After adopting a K2 state: the signer cannot produce an epoch-0 signature
+  (EpochRegression fires). It can produce an epoch-1 signature at round ≥ 1.
+
+**Signing blocked until handoff proof reconciles (R3-a):**
+
+After a K0 or K1 crash, the caller must run R3-a before attaching the signing context.
+Specifically:
+- Load `CommitCertificate` from block store. Fail closed if missing.
+- Verify cert against V_old public keys. Fail closed if invalid.
+- If seal not in record: `write_seal`. If seal already in record: skip.
+- `advance_epoch_record(1, set_hash, cert_hash)`.
+- Only then attach signing context.
+
+The test verifies that any attempt to produce a signature between `open` and R3-a
+completion returns an error (signing context not attached), not a stale epoch-0 signature.
+
+**Crash mechanism:** `TerminateProcess(GetCurrentProcess(), 1)` called from the sender
+process at a controlled point, exercised in a child process launched by the test harness.
+The test harness opens the resulting files in a second process and runs the assertions.
+
+**Acceptance:** owner pastes output from each of the four kill points showing:
+- The restarted process opens successfully (or fails closed if appropriate).
 - No conflicting signature is produced.
-- The correct recovery step (`write_seal` or `advance_epoch_record`) runs idempotently.
+- The correct recovery step runs idempotently.
+- Signing is blocked until R3-a or R3-b completes.
 
 ---
 
-## B3 — Real `MonotonicCounter` on Windows
+## B3 — File-based `MonotonicCounter` for devnet testing
 
-Gate A used `TestCounter` (in-memory, not a trusted mechanism). Gate B requires a real
-OS-backed counter. Two options; owner chooses before implementation begins:
+Gate A used `TestCounter` (in-memory, not a trusted mechanism). Gate B requires an
+OS-backed counter that survives process crashes.
 
-**Option A — File-based counter (simplest, no hardware dependency):**
-A counter file holding `(value: u64, digest: [u8; 32])` written with `FILE_FLAG_WRITE_THROUGH`
-and `FlushFileBuffers` on Windows. The fencing token is a named mutex or file lock.
-Not TPM-backed, but durable across process crashes. Sufficient for Gate B.
+**Specification:**
 
-**Option B — Windows DPAPI-sealed counter:**
-Counter value sealed with `CryptProtectData` to the machine identity. Provides
-machine-binding but requires Windows CNG. Higher implementation cost; not required for
-Gate B unless owner decides it is.
+The counter file holds a fixed-width record: `value: u64` (big-endian) `|| digest: [u8; 32]`.
+Writes use `FILE_FLAG_WRITE_THROUGH` and call `FlushFileBuffers` before returning.
 
-**Default for Gate B:** Option A (file-based, `FILE_FLAG_WRITE_THROUGH`).
+**Writer fencing across processes:** the counter file is opened with `GENERIC_WRITE |
+FILE_SHARE_READ` and no write-share flag. A second process attempting to advance the
+counter will receive `ERROR_SHARING_VIOLATION` and fail closed. This is the fencing
+mechanism: only the holder of the open file handle can advance the counter.
 
-The counter implementation ships as a new crate (`chain-forge-counter`) or as a
-`fs` module inside `chain-forge-consensus`'s safety directory, feature-gated behind
-`monotonic-counter-fs`.
+The `acquire_session()` call opens the counter file. `into_parts()` closes it, releasing
+the fence. A process killed without calling `into_parts()` releases the fence when the
+OS closes the handle on process exit.
+
+**Recovery of `(value, digest)` after crash:** `read()` decodes the file. Because writes
+are `FILE_FLAG_WRITE_THROUGH`, a killed process leaves either the previous record or the
+new record, never a partial write (assuming the OS honours the write-through guarantee,
+which is the standard Windows contract for `FILE_FLAG_WRITE_THROUGH` with sector-aligned
+writes or on NTFS). The `open` logic in `SafetyStore` already handles both outcomes via
+the crash-window classification.
+
+**What this does NOT cover:**
+
+- **Power-loss durability:** `FILE_FLAG_WRITE_THROUGH` reaches the OS page cache and the
+  disk controller's write-back buffer. Reaching the platter or flash on a power loss
+  requires `FILE_FLAG_NO_BUFFERING` with sector-aligned writes, or a hardware-level
+  `FlushFileBuffers` on a device that honours it. This is not required for Gate B devnet
+  testing but must be addressed before production deployment. Record this as an open
+  obligation.
+- **Rollback resistance:** a user with filesystem access can overwrite the counter file
+  with an older value. A hardware-backed counter (TPM NV index, secure enclave) prevents
+  this. Record this as an open obligation. For devnet, the file counter provides
+  process-crash resistance; physical-access resistance is out of scope.
+
+**Counter crate:** ships as `chain-forge-consensus/src/pq_hotstuff/safety/fs_counter.rs`
+(or a new crate `chain-forge-counter`), feature-gated behind `monotonic-counter-fs`.
+Not enabled in the default build or existing tests.
 
 ---
 
-## B4 — Acceptance criteria summary
+## B4 — Acceptance criteria
 
 Both B1 and B2 must be run by the owner on BossKing MINGW64 and the output pasted.
 Sandbox runs do not count (per CLAUDE.md test validation policy).
 
-| Test | Transport | Counter | Required |
-|---|---|---|---|
-| Gate A epoch-boundary (13 tests) | In-process doubles | `TestCounter` | ✅ Windows-confirmed at `7ca0aa7` |
-| B1 TCP epoch-boundary | Loopback TCP, OS processes | Real file counter | Required for Gate B |
-| B2 crash injection × 4 | OS `TerminateProcess`, file storage | Real file counter | Required for Gate B |
+| Test | Transport | Signer | Counter | Required |
+|---|---|---|---|---|
+| Gate A epoch-boundary (13 tests) | In-process doubles | `TestSigner` (size-conformant stub, not real FIPS 204) | `TestCounter` (in-memory) | ✅ Windows-confirmed `7ca0aa7` |
+| B1 TCP epoch-boundary | Loopback TCP, two OS processes | Real FIPS 204 ML-DSA-65 | File counter (`FILE_FLAG_WRITE_THROUGH`) | Required |
+| B2 crash injection × 4 (K0–K3) | `TerminateProcess`, file storage | Real FIPS 204 ML-DSA-65 | File counter | Required |
 
-After B1 and B2 pass on Windows, the epoch-transition flag may be enabled in a devnet
-configuration with separate owner approval.
+After B1 and B2 pass on Windows with pasted output, the epoch-transition flag may be
+enabled in a devnet configuration with separate owner approval.
 
 ---
 
-## Open obligations carried forward from Gate A
+## Open obligations (not Gate B blockers)
 
-These are not Gate B blockers but must be resolved before the competing-candidates
-argument and the delayed-proof window can be cited as model-verified results:
+These must be resolved before the following claims can be cited as model-verified:
 
-| Obligation | Required for |
+| Obligation | Blocks |
 |---|---|
 | `crash_t3_disjoint` re-run with saved log and restart witness | R3 citing PO-4 |
-| Compete scenario (SetB non-empty) exhaustive safety | R4 BFT argument |
-| Delayed-proof window safety (SnapSync crash witness) | R2 seal-timing argument |
+| Compete scenario (SetB non-empty) exhaustive safety | R4 BFT argument for competing candidates |
+| Delayed-proof window safety (SnapSync crash witness) | R2 seal-timing BFT argument |
+| Power-loss durability for `MonotonicCounter` | Production deployment of file counter |
+| Rollback resistance for `MonotonicCounter` | Production deployment without hardware backing |
