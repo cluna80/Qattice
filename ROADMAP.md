@@ -1,5 +1,37 @@
 # Qattice — Public Testnet Alpha: ML-DSA-65 + PQ-HotStuff Launch Plan
 
+## QAT-07 authenticated epoch-change devnet complete — 2026-11-12
+
+**QAT-07 Phase 3: authenticated epoch-change end-to-end — `pqhs2_4node_epoch_change_reaches_new_epoch` passes on Windows with real ML-DSA-65 signatures**
+
+| Deliverable | Status |
+|---|---|
+| `PQHS-EC1:` epoch-change payload injected in `propose_and_broadcast_multinode` at configured `at_height` | ✅ |
+| `validate_block_payload` bypasses `BlockPayload` version check for `PQHS-EC1:` proposals | ✅ |
+| `verify_handoff_proof` uses `chain_forge_crypto::verify_consensus` (dilithium3) under `real-crypto`, symmetric with `sign_vote` | ✅ |
+| `epoch_transition_records_seal_round` unit test updated to sign with dilithium3 (consistent with devnet key format) | ✅ |
+| `gate_b_admission` 7/7 tests continue to pass with `epoch-transition` only (Fips204Verifier path retained under `not(real-crypto)`) | ✅ |
+| All 4 nodes commit h2 (epoch-change block, epoch=0), then h3–h5 in epoch=1; no fork across any height | ✅ |
+| **`pqhs2_4node_epoch_change_reaches_new_epoch`** (BossKing MINGW64, `bab3f7d`) | ✅ **Windows-confirmed** |
+
+**Windows confirmation (owner-run, 2026-11-12):** `cargo test -p chain-forge-node --features pq-hotstuff --test pqhs2_4node_epoch_live -- --nocapture` on branch `feat/qat-07-safety-store-integration` at `bab3f7d` — 1/1 passed in 62.94s. All 4 ML-DSA-65 devnet nodes reached height 5 and agreed at every height:
+
+```
+height 2  epoch=0  block_hash=a1fa3b76c60daf51e882a083298d4b24434007941e114523b9e6406e08d1fffe
+height 3  epoch=1  block_hash=df06d4aca5b44021081a4dd7c47e8735ebb37a8d8921bcd644c2875ee63f151f
+height 4  epoch=1  block_hash=a2dfbe20a86dc54ac288da067cc274fc6cebd51646ddfbddcd3e2d75d1ceaa51
+height 5  epoch=1  block_hash=2e549efacc215f1f731b66159c481ec3c6c1264d3f4ab001ddf2bcf5551ee936
+```
+
+No fork at any height. `verify_handoff_proof` accepted the outgoing-set ML-DSA-65 signatures at h2, epoch transitioned to 1 immediately on `on_commit`, and h3–h5 finalized in epoch 1 with the same validator set. The two-chain commit rule (consecutive QCs at the same engine height) confirmed.
+
+**Key bugs fixed (this milestone):**
+- `propose_and_broadcast_multinode` did not inject the PQHS-EC1 epoch-change payload; only the `propose_fresh` path (not taken by PQ-HotStuff) did. Fixed to mirror the same genesis-config lookup.
+- `validate_block_payload` decoded PQHS-EC1 bytes as `BlockPayload`, got version=0 (default), and rejected them with "payload version 0 is not the required 1". Fixed with an early-return bypass for proposals starting with `EPOCH_CHANGE_MAGIC`.
+- `verify_handoff_proof` used `Fips204Verifier` (FIPS 204 ML-DSA-65, ~3309-byte signatures, context parameter) but devnet votes are signed with `pqcrypto_dilithium::dilithium3` (~2420 bytes, no context) via `sign_vote` → `chain_forge_crypto::sign_consensus`. Completely incompatible. Fixed to use `chain_forge_crypto::verify_consensus` under `#[cfg(feature = "real-crypto")]`, symmetric with `sign_vote`.
+
+---
+
 ## QAT-07 PQ-HotStuff-2 four-node devnet integration complete — 2026-11-12
 
 **QAT-07 Phase 2: `PqHotStuffEngine` wired into `chain-forge-node`; four-node ML-DSA-65 devnet commits blocks end-to-end**

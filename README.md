@@ -18,7 +18,8 @@ workspace with no borrowed consensus or state-machine code from any other chain.
 
 | Area | Status |
 |---|---|
-| BFT consensus (Tendermint-style, pluggable) | ✅ Running — 4-node, block-producing; supported devnet validators use ML-DSA-65-format keys on the legacy consensus cryptography backend |
+| BFT consensus (Tendermint-style, pluggable) | ✅ Running — 4-node, block-producing; ML-DSA-65 validators |
+| **PQ-HotStuff-2 consensus** (`pq-hotstuff` feature) | ✅ 4-node devnet blocks committed; authenticated epoch-change (epoch 0→1) with real ML-DSA-65 signatures verified end-to-end — Windows-confirmed 2026-11-12 |
 | ML-DSA-65 user transactions | ✅ Legacy devnet transactions tested; separate FIPS 204-based signing-v2 implementation tested on a fresh private integration fixture, not enabled on the supported devnet |
 | Replay / nonce protection | ✅ All rejection cases pass |
 | Timestamp monotonicity | ✅ Enforced and regression-tested |
@@ -30,9 +31,7 @@ workspace with no borrowed consensus or state-machine code from any other chain.
 
 **Not yet working / out of scope for Phase 0:**
 
-- **Validator keys versus cryptographic backend:** The supported four-node devnet (`tests/devnet/genesis-4node-mldsa.json`) declares `validator_scheme: ml-dsa-65` and `signature_scheme: pqc-native`; its validator public keys use the ML-DSA-65 format (1,952 bytes). **Consensus votes and block signatures still use the legacy ML-DSA backend, not the FIPS 204-based signing-v2 transaction backend.** Migration and verification of validator/consensus signing remain open (QAT-01/02 / legacy ML-DSA roadmap work). Ed25519 validator keys remain in classical-compatibility test fixtures, not the supported ML-DSA devnet.
-- **FIPS 204 scope:** `chain-forge-execution/src/signing_v2.rs` uses the `fips204_backend` for **user transaction** authorization only, under the `signing-v2` feature and an explicit chain commitment profile. It does not upgrade validator votes or block signatures. Four-node signing-v2 integration tests do not establish FIPS 204 conformity of consensus signing.
-- PQ-HotStuff consensus is not implemented or deployed; the supported devnet uses the Tendermint-style engine.
+- **FIPS 204 scope:** `chain-forge-execution/src/signing_v2.rs` uses the `fips204_backend` for **user transaction** authorization only, under the `signing-v2` feature and an explicit chain commitment profile. Consensus votes use `pqcrypto_dilithium::dilithium3` (the devnet key format); migration to a FIPS 204-conformant consensus-signing backend is a future milestone.
 - No public testnet — devnet is single-operator
 - No resource marketplace (removed; may return as an optional module post-Phase 0)
 - No independent cryptographic audit of DIS transcript format (return gate documented)
@@ -75,6 +74,21 @@ cargo test -p chain-forge-node --test timestamp_monotonic_live -- --nocapture
 
 # Fee settlement across 5 nodes
 cargo test -p chain-forge-node --test fee_settle_live -- --nocapture
+```
+
+**PQ-HotStuff-2 devnet tests** (requires the `pq-hotstuff` feature):
+
+```sh
+cargo build -p chain-forge-node --features pq-hotstuff
+
+# Four-node PQ-HotStuff-2 block production (heights 1–3, ML-DSA-65)
+cargo test -p chain-forge-node --features pq-hotstuff \
+  --test pqhs2_4node_live -- --nocapture
+
+# Authenticated epoch-change: epoch 0→1 at height 2, verify_handoff_proof
+# with real ML-DSA-65 signatures, finalization through height 5
+cargo test -p chain-forge-node --features pq-hotstuff \
+  --test pqhs2_4node_epoch_live -- --nocapture
 ```
 
 Tests spawn real node processes, use dynamic ports, and clean up after themselves.
