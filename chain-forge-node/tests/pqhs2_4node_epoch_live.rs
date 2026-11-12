@@ -7,15 +7,15 @@
 //! The engine starts at epoch 0; the first transition produces epoch 1.
 //!
 //! Timeline:
-//!   Height 2: epoch-change block committed in epoch 0
-//!   Height 3: child block; outgoing (epoch-0) validators sign the QC that closes the two-chain
-//!   Height 4: first block in epoch 1 (new validator set active)
-//!   Height 5: continued finalization confirms epoch 1 is stable
+//!   Height 2: epoch-change block committed in epoch 0 (on_commit fires, epoch → 1)
+//!   Height 3: first block committed after the epoch transition (epoch 1)
+//!   Height 4: continued finalization in epoch 1
+//!   Height 5: epoch 1 is stable
 //!
 //! Assertions:
 //!   - All 4 nodes agree on block_hash + state_root at heights 2-5
-//!   - epoch field = 0 at heights 2 and 3 (committed under epoch 0)
-//!   - epoch field = 1 at heights 4 and 5 (committed under epoch 1)
+//!   - epoch field = 0 at height 2 (epoch-change block committed under epoch 0)
+//!   - epoch field = 1 at heights 3, 4, and 5 (committed after the epoch transition)
 //!
 //! Run (Windows/Linux):
 //!   cargo build -p chain-forge-node --features pq-hotstuff
@@ -351,13 +351,13 @@ fn pqhs2_4node_epoch_change_reaches_new_epoch() {
     // Target height 5: heights 2–4 cover the boundary; 5 confirms epoch 2 is stable
     poll_until_height(&mut nodes, 5, timeout, &log_dir);
 
-    // Epoch-change block: committed in epoch 0 (engine starts at epoch 0)
+    // Epoch-change block: committed in epoch 0; on_commit fires immediately → epoch=1
     assert_agreement_and_epoch(&nodes, 2, 0);
-    // Child block: outgoing epoch-0 validators sign the QC that closes the two-chain
-    assert_agreement_and_epoch(&nodes, 3, 0);
-    // First block in epoch 1 (epoch 0 → 1 is the first transition)
-    assert_agreement_and_epoch(&nodes, 4, 1);
+    // First block after the transition: on_commit already incremented epoch to 1
+    assert_agreement_and_epoch(&nodes, 3, 1);
     // Continued finalization in epoch 1
+    assert_agreement_and_epoch(&nodes, 4, 1);
+    // Epoch 1 is stable
     assert_agreement_and_epoch(&nodes, 5, 1);
 
     println!("\n[pqhs2_4node_epoch_change_reaches_new_epoch] PASS");
