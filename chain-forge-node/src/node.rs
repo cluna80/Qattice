@@ -5639,6 +5639,15 @@ impl Node {
                 "block payload is {} bytes, limit max_block_bytes {max_block_bytes}", proposal.tx_data.len()
             ));
         }
+        // PQ-HotStuff epoch-change payloads use the PQHS-EC1 binary format, not
+        // BlockPayload. Skip the BlockPayload checks for them entirely; the engine
+        // validates them in on_commit via decode_epoch_change_payload.
+        #[cfg(feature = "pq-hotstuff")]
+        if self.consensus.variant() == ConsensusVariant::PqHotStuff
+            && proposal.tx_data.starts_with(chain_forge_consensus::EPOCH_CHANGE_MAGIC)
+        {
+            return Ok(());
+        }
         let payload = BlockPayload::decode(&proposal.tx_data);
         if payload.version != BLOCK_PAYLOAD_VERSION {
             return Err(format!(
