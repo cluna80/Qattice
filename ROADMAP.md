@@ -14,9 +14,13 @@
 | Defensive pruning: stale-round votes rejected before accumulator add | ✅ |
 | `on_commit` resets `high_qc` and `locked_qc` to genesis on height advance | ✅ |
 | `pqhs2_4node_reaches_target_height`: all 4 nodes reach height ≥ 3 within 60s | ✅ |
-| **`pqhs2_4node_live` integration test** (BossKing MINGW64, `82bfc88`+cleanup) | ✅ **Windows-confirmed** |
+| `propose()` uses `compute_block_hash` (sync validation fix — lagging node Dave) | ✅ |
+| Regression checks: `timeout_signing_failure_still_advances_round` (R-TF-1/R-TF-2), `locked_qc_round_never_decreases_within_epoch` (R-LM-1/R-LM-2) — 10/10 engine unit tests | ✅ |
+| **`pqhs2_4node_live` integration test** (BossKing MINGW64, `8f44075`) | ✅ **Windows-confirmed** |
 
-**Windows confirmation (owner-run, 2026-11-12):** `cargo test -p chain-forge-node --features pq-hotstuff --test pqhs2_4node_live -- --nocapture` on branch `feat/qat-07-safety-store-integration` at `82bfc88` — 1/1 passed in 29.7s. All 4 ML-DSA-65 devnet nodes reached height 3.
+**Windows confirmation (owner-run, 2026-11-12):** `cargo test -p chain-forge-node --features pq-hotstuff --test pqhs2_4node_live -- --nocapture` on branch `feat/qat-07-safety-store-integration` at `8f44075` — 1/1 passed in 29.8s. All 4 ML-DSA-65 devnet nodes reached height 3: `qcb1alice=3 qcb1bob=3 qcb1carol=3 qcb1dave=3`.
+
+State root consistency (run at `23868f4`, Alice/Bob/Carol): `state_root=a92a28fed791f2c03bb88f7899807e131fc9e38729164c2abd86d4c11013e08e` at every committed height 1–4 — identical across all three quorum nodes. Dave sync unblocked at `8f44075`.
 
 **Bugs fixed (this milestone):**
 - `on_timeout` sign failure (`map_err(Internal)?` → `unwrap_or_default()`) blocked round advance.
@@ -24,6 +28,7 @@
 - Both commit paths in `node.rs` used `vote.round` for proposal lookup; two-chain cert has `round = R-1`, not `R`.
 - Stale round-(R-1) votes re-entering the accumulator after `advance_round` caused `check_quorum` to fire a spurious QC from the wrong bucket (8 stale votes ≥ threshold=3).
 - `on_commit` did not reset `high_qc`/`locked_qc`; at height H+1 round=1 the guard `new_qc.round > high_qc.round` always failed, stalling the chain after the first committed block.
+- `propose()` stored a placeholder block hash; `SyncResponse` handler in `node.rs` recomputes via `compute_block_hash` and rejected every sync response from a lagging node.
 
 ---
 
