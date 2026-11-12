@@ -493,8 +493,11 @@ impl ConsensusEngine for PqHotStuffEngine {
     ) -> ConsensusResult<()> {
         if let Some(vs) = new_validator_set {
             // R1: verify two-chain finality before accepting the new set.
-            // The certificate must carry consecutive rounds (locked_qc.round + 1 == high_qc.round)
-            // and ≥ 2f+1 signatures from the outgoing set over the epoch-change block.
+            // Without epoch-transition: ID-membership quorum check (count only, no sig verify).
+            // With epoch-transition: verify_handoff_proof (ML-DSA-65 sigs + consecutive rounds)
+            // runs below, superseding this call. Keep the lightweight check here as a gate for
+            // the non-authenticated path.
+            #[cfg(not(feature = "epoch-transition"))]
             self.verify_commit(&certificate, &self.validator_set.clone())
                 .map_err(|e| ConsensusError::Internal(format!("epoch-change cert invalid: {e}")))?;
 
@@ -511,7 +514,13 @@ impl ConsensusEngine for PqHotStuffEngine {
             };
             let handoff_cert_hash = sha3_32(&cert_bytes);
 
-            // Canonical V_new hash: sorted validator IDs + powers.
+            // Canonical V_new hash: sorted validator IDs + ML-DSA-65 public keys + powers.
+            // Uses epoch_handoff::canonical_set_hash when available; falls back to the
+            // ID+power encoding otherwise. The authenticated path is enforced at
+            // verify_handoff_proof time, before the seal is written.
+            #[cfg(feature = "epoch-transition")]
+            let set_hash = crate::pq_hotstuff::epoch_handoff::canonical_set_hash(&vs);
+            #[cfg(not(feature = "epoch-transition"))]
             let set_hash = {
                 let mut b = Vec::new();
                 for v in &vs.validators {
@@ -520,6 +529,22 @@ impl ConsensusEngine for PqHotStuffEngine {
                 }
                 sha3_32(&b)
             };
+
+            // Authenticated handoff verification (epoch-transition feature).
+            // Runs before the seal is written; a rejection leaves the store, epoch,
+            // and active set unchanged.
+            #[cfg(feature = "epoch-transition")]
+            {
+                let child_qc_round = self.high_qc.round;
+                crate::pq_hotstuff::epoch_handoff::verify_handoff_proof(
+                    &self.config.chain_id,
+                    &certificate,
+                    &self.validator_set,
+                    child_qc_round,
+                    &vs,
+                    set_hash,
+                ).map_err(|e| ConsensusError::Internal(format!("handoff proof rejected: {e}")))?;
+            }
 
             // R2 durable write order:
             // Step 1: CommitCertificate in block store (caller's responsibility before on_commit).

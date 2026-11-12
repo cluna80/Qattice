@@ -29,6 +29,10 @@ pq-hotstuff-fips204 = ["pq-hotstuff", "dep:fips204-crypto"]
 # Gate B devnet test harness (QAT-07). Two OS processes, loopback TCP, real ML-DSA-65, file-based counter.
 # DISABLED by default. Enable only for the Windows acceptance test run. Epoch-transition activation is a separate decision.
 gate-b-harness = ["pq-hotstuff-fips204", "dep:crc32fast"]
+# Authenticated epoch-transition handoff: ML-DSA-65 verification of the outgoing-set
+# signatures in CommitCertificate, canonical set_hash with public keys, and consecutive-
+# round parent-link check. Disabled until PQ-HotStuff-2 passes its Phase 2 gate on Windows.
+epoch-transition = ["pq-hotstuff-fips204"]
 
 [dev-dependencies]
 tokio = { workspace = true }
