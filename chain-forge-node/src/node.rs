@@ -5617,6 +5617,12 @@ impl Node {
             }
             return Ok(());
         }
+        // PQ-HotStuff-2 uses a two-chain commit internal to the engine; block
+        // payloads carry no last_commit certificate. Skip the Tendermint-specific
+        // commit-evidence check for this variant.
+        if self.consensus.variant() == ConsensusVariant::PqHotStuff {
+            return Ok(());
+        }
         let lc = payload.last_commit.as_ref()
             .ok_or("missing last_commit evidence for the previous block")?;
         let prev = proposal.height - 1;
