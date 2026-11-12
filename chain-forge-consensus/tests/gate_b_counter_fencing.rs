@@ -14,8 +14,8 @@ use chain_forge_consensus::pq_hotstuff::safety::{
 };
 use std::path::PathBuf;
 
-fn tmp_dir() -> PathBuf {
-    let d = std::env::temp_dir().join(format!("gate_b_ctr_{}", std::process::id()));
+fn tmp_dir(label: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("gate_b_ctr_{}_{}", label, std::process::id()));
     std::fs::create_dir_all(&d).unwrap();
     d
 }
@@ -28,7 +28,7 @@ fn test_binding() -> CounterBinding {
 
 #[test]
 fn b3_truncated_record_fails_closed() {
-    let dir = tmp_dir();
+    let dir = tmp_dir("truncated");
     let path = dir.join("ctr.bin");
 
     // Write a truncated file (< 44 bytes).
@@ -42,7 +42,7 @@ fn b3_truncated_record_fails_closed() {
 
 #[test]
 fn b3_digest_mismatch_fails_closed() {
-    let dir = tmp_dir();
+    let dir = tmp_dir("digmismatch");
     let path = dir.join("ctr.bin");
 
     // Write a 44-byte record where the last 4 bytes (CRC32) are wrong.
@@ -65,7 +65,7 @@ fn b3_digest_mismatch_fails_closed() {
 
 #[test]
 fn b3_create_and_advance() {
-    let dir = tmp_dir();
+    let dir = tmp_dir("create_adv");
     let path = dir.join("ctr.bin");
 
     let mut ctr = FsCounter::create(&path, test_binding()).unwrap();
@@ -94,7 +94,7 @@ fn b3_create_and_advance() {
 
 #[test]
 fn b3_stale_session_rejected() {
-    let dir = tmp_dir();
+    let dir = tmp_dir("stale_sess");
     let path = dir.join("ctr.bin");
 
     let mut ctr = FsCounter::create(&path, test_binding()).unwrap();
@@ -111,7 +111,7 @@ fn b3_stale_session_rejected() {
 
 #[test]
 fn b3_wrong_expected_rejected() {
-    let dir = tmp_dir();
+    let dir = tmp_dir("wrong_exp");
     let path = dir.join("ctr.bin");
 
     let mut ctr = FsCounter::create(&path, test_binding()).unwrap();
@@ -177,7 +177,7 @@ fn spawn_child(mode: &str, counter_path: &std::path::Path) -> std::process::Outp
 /// F1: second writer blocked while first holds handle; succeeds after into_parts().
 #[test]
 fn b3_f1_fencing_while_alive() {
-    let dir = tmp_dir();
+    let dir = tmp_dir("f1");
     let path = dir.join("ctr_f1.bin");
 
     // Create and acquire session in this process.
@@ -224,7 +224,7 @@ fn b3_f1_fencing_while_alive() {
 /// The kill is simulated here by dropping the counter (which closes the handle).
 #[test]
 fn b3_f2_reacquisition_after_kill() {
-    let dir = tmp_dir();
+    let dir = tmp_dir("f2");
     let path = dir.join("ctr_f2.bin");
 
     // Create the counter. value=1, digest=[0xCC;32] after first advance.

@@ -228,13 +228,22 @@ impl MonotonicCounter for FsCounter {
     }
 
     fn acquire_session(&mut self) -> Result<Session, CounterError> {
-        // Open the file with exclusive write access (or fail if another process holds it).
-        let f = open_exclusive(&self.path)?;
-        // Re-read state from the file we just opened.
-        let buf = read_file(&f)?;
-        let (value, digest) = decode_record(&buf)?;
-        self.state = CounterState { value, digest };
-        self.handle = Some(f);
+        if self.handle.is_none() {
+            // No open handle — open the file with exclusive write access.
+            // Fails with ERROR_SHARING_VIOLATION on Windows if another process holds it.
+            let f = open_exclusive(&self.path)?;
+            let buf = read_file(&f)?;
+            let (value, digest) = decode_record(&buf)?;
+            self.state = CounterState { value, digest };
+            self.handle = Some(f);
+        } else {
+            // Handle already held (e.g. from create()). Re-read state from the open file
+            // without attempting a second open — that would hit ERROR_SHARING_VIOLATION
+            // on Windows since we already hold the exclusive lock ourselves.
+            let buf = read_file(self.handle.as_ref().unwrap())?;
+            let (value, digest) = decode_record(&buf)?;
+            self.state = CounterState { value, digest };
+        }
         self.session_token += 1;
         self.current_token = self.session_token;
         Ok(Session::new(self.current_token))
