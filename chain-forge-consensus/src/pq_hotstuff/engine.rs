@@ -600,6 +600,11 @@ impl ConsensusEngine for PqHotStuffEngine {
         self.round = 1;
         self.accumulator.clear();
         self.pending_proposal = None;
+        // Reset per-height QC state so round counters from the previous height
+        // don't block quorum at round 1 of the new height (high_qc.round check).
+        let genesis_qc = Qc::genesis();
+        self.locked_qc = genesis_qc.clone();
+        self.high_qc = genesis_qc;
         Ok(())
     }
 
