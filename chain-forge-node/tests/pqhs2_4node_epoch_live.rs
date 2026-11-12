@@ -1,20 +1,21 @@
 //! PQ-HotStuff-2 four-node authenticated epoch-change integration test.
 //!
 //! Starts four `chain-forge-node` processes against `genesis-4node-pqhs2-epoch.json`.
-//! The genesis configures an epoch-change at height 2 (same 4 validators, epoch 1 → 2).
+//! The genesis configures an epoch-change at height 2 (same 4 validators, epoch 0 → 1).
 //! The proposer at height 2 injects a typed `PQHS-EC1:` epoch-change payload; the engine
 //! runs `verify_handoff_proof` with real ML-DSA-65 signatures (epoch-transition feature).
+//! The engine starts at epoch 0; the first transition produces epoch 1.
 //!
 //! Timeline:
-//!   Height 2: epoch-change block committed in epoch 1
-//!   Height 3: child block; outgoing (epoch-1) validators sign the QC that closes the two-chain
-//!   Height 4: first block in epoch 2 (new validator set active)
-//!   Height 5: continued finalization confirms epoch 2 is stable
+//!   Height 2: epoch-change block committed in epoch 0
+//!   Height 3: child block; outgoing (epoch-0) validators sign the QC that closes the two-chain
+//!   Height 4: first block in epoch 1 (new validator set active)
+//!   Height 5: continued finalization confirms epoch 1 is stable
 //!
 //! Assertions:
 //!   - All 4 nodes agree on block_hash + state_root at heights 2-5
-//!   - epoch field = 1 at heights 2 and 3 (committed under epoch 1)
-//!   - epoch field = 2 at heights 4 and 5 (committed under epoch 2)
+//!   - epoch field = 0 at heights 2 and 3 (committed under epoch 0)
+//!   - epoch field = 1 at heights 4 and 5 (committed under epoch 1)
 //!
 //! Run (Windows/Linux):
 //!   cargo build -p chain-forge-node --features pq-hotstuff
@@ -343,21 +344,21 @@ fn pqhs2_4node_epoch_change_reaches_new_epoch() {
     println!("   binary:  {bin:?}");
     println!("   genesis: {genesis:?}");
     println!("   logs:    {log_dir:?}");
-    println!("   epoch-change: height 2 (epoch 1 → 2)");
+    println!("   epoch-change: height 2 (epoch 0 → 1)");
     println!("   target:  height >= 5  timeout: {timeout_secs}s\n");
 
     let mut nodes = spawn_nodes(&bin, &log_dir);
     // Target height 5: heights 2–4 cover the boundary; 5 confirms epoch 2 is stable
     poll_until_height(&mut nodes, 5, timeout, &log_dir);
 
-    // Epoch-change block: committed in epoch 1
-    assert_agreement_and_epoch(&nodes, 2, 1);
-    // Child block: outgoing epoch-1 validators sign the QC that closes the two-chain
-    assert_agreement_and_epoch(&nodes, 3, 1);
-    // First block in epoch 2
-    assert_agreement_and_epoch(&nodes, 4, 2);
-    // Continued finalization in epoch 2
-    assert_agreement_and_epoch(&nodes, 5, 2);
+    // Epoch-change block: committed in epoch 0 (engine starts at epoch 0)
+    assert_agreement_and_epoch(&nodes, 2, 0);
+    // Child block: outgoing epoch-0 validators sign the QC that closes the two-chain
+    assert_agreement_and_epoch(&nodes, 3, 0);
+    // First block in epoch 1 (epoch 0 → 1 is the first transition)
+    assert_agreement_and_epoch(&nodes, 4, 1);
+    // Continued finalization in epoch 1
+    assert_agreement_and_epoch(&nodes, 5, 1);
 
     println!("\n[pqhs2_4node_epoch_change_reaches_new_epoch] PASS");
 }
