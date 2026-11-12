@@ -5620,6 +5620,7 @@ impl Node {
         // PQ-HotStuff-2 uses a two-chain commit internal to the engine; block
         // payloads carry no last_commit certificate. Skip the Tendermint-specific
         // commit-evidence check for this variant.
+        #[cfg(feature = "pq-hotstuff")]
         if self.consensus.variant() == ConsensusVariant::PqHotStuff {
             return Ok(());
         }
