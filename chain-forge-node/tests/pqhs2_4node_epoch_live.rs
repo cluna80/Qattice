@@ -118,6 +118,30 @@ fn fetch_block_epoch(api_port: u16, height: u64) -> Option<u64> {
         .and_then(|s| s.trim().parse().ok())
 }
 
+/// Extract `last_commit.epoch` from a block's API JSON.
+///
+/// The block JSON contains the block's own `"epoch":` first, then inside
+/// `"last_commit":{...}` there is a second `"epoch":`. We skip the first
+/// occurrence and take the second.
+fn fetch_last_commit_cert_epoch(api_port: u16, height: u64) -> Option<u64> {
+    let body = http_get_body(api_port, &format!("/api/blocks/{height}"))?;
+    body.split("\"epoch\":")
+        .nth(2)   // 0=before first, 1=block epoch, 2=last_commit epoch
+        .and_then(|s| s.split([',', '}']).next())
+        .and_then(|s| s.trim().parse().ok())
+}
+
+/// Extract `last_commit.height` from a block's API JSON.
+fn fetch_last_commit_cert_height(api_port: u16, height: u64) -> Option<u64> {
+    let body = http_get_body(api_port, &format!("/api/blocks/{height}"))?;
+    // last_commit appears as `"last_commit":{"height":<n>,...}`
+    let after_lc = body.split("\"last_commit\":").nth(1)?;
+    after_lc.split("\"height\":")
+        .nth(1)
+        .and_then(|s| s.split([',', '}']).next())
+        .and_then(|s| s.trim().parse().ok())
+}
+
 // ── RAII process guard ────────────────────────────────────────────────────────
 
 struct NodeProcess {
@@ -361,4 +385,112 @@ fn pqhs2_4node_epoch_change_reaches_new_epoch() {
     assert_agreement_and_epoch(&nodes, 5, 1);
 
     println!("\n[pqhs2_4node_epoch_change_reaches_new_epoch] PASS");
+}
+
+// ── QC cert-epoch boundary assertion ─────────────────────────────────────────
+
+/// Check that every node's `last_commit` certificate at `block_height` carries
+/// `expected_cert_epoch` and certifies `expected_cert_height`.
+fn assert_cert_epoch(
+    nodes: &[NodeProcess],
+    block_height: u64,
+    expected_cert_height: u64,
+    expected_cert_epoch: u64,
+) {
+    println!(
+        "\n── Cert check: block {block_height} → last_commit for h{expected_cert_height} \
+         (expected cert epoch {expected_cert_epoch}) ──"
+    );
+    for node in nodes {
+        let cert_epoch = fetch_last_commit_cert_epoch(node.api_port, block_height)
+            .unwrap_or_else(|| panic!(
+                "{} block {block_height} last_commit.epoch unavailable", node.validator
+            ));
+        let cert_height = fetch_last_commit_cert_height(node.api_port, block_height)
+            .unwrap_or_else(|| panic!(
+                "{} block {block_height} last_commit.height unavailable", node.validator
+            ));
+        println!(
+            "   {}  last_commit.height={}  last_commit.epoch={}",
+            node.validator, cert_height, cert_epoch
+        );
+        assert_eq!(
+            cert_height, expected_cert_height,
+            "{} block {block_height}: last_commit.height={cert_height}, expected {expected_cert_height}",
+            node.validator
+        );
+        assert_eq!(
+            cert_epoch, expected_cert_epoch,
+            "{} block {block_height}: last_commit.epoch={cert_epoch}, expected {expected_cert_epoch}",
+            node.validator
+        );
+    }
+    println!(
+        "   ✓ block {block_height}: last_commit certifies h{expected_cert_height} epoch={expected_cert_epoch}"
+    );
+}
+
+/// PQ-HotStuff-2 QC cert-epoch boundary test.
+///
+/// Same devnet as `pqhs2_4node_epoch_change_reaches_new_epoch` (epoch-change at h2,
+/// epoch 0 → 1). Additionally asserts the **certificate** epochs carried in each
+/// block's `last_commit` field, verifying the two-chain boundary rule:
+///
+///   Block h3 carries last_commit that certifies h2: cert.epoch = 0  (outgoing set signed)
+///   Block h4 carries last_commit that certifies h3: cert.epoch = 0  (outgoing set still signed h3)
+///   Block h5 carries last_commit that certifies h4: cert.epoch = 1  (incoming set signed h4)
+///
+/// This confirms that ML-DSA-65 signatures are bound to the correct epoch in v2
+/// signing bytes, and that the boundary is at the right height.
+#[test]
+fn pqhs2_4node_qc_cert_epoch_boundary() {
+    let bin = node_binary();
+    if !bin.exists() {
+        println!(
+            "SKIP: node binary not found at {bin:?}. \
+             Run `cargo build -p chain-forge-node --features pq-hotstuff` first."
+        );
+        return;
+    }
+
+    let genesis = genesis_path();
+    if !genesis.exists() {
+        println!("SKIP: genesis file not found at {genesis:?}");
+        return;
+    }
+
+    let timeout_secs: u64 = std::env::var("DEVNET_TIMEOUT_SECS")
+        .ok().and_then(|s| s.parse().ok()).unwrap_or(90);
+    let timeout = Duration::from_secs(timeout_secs);
+
+    let log_dir = std::env::temp_dir().join("pqhs2_4node_qc_epoch_boundary");
+    std::fs::create_dir_all(&log_dir).expect("create log dir");
+
+    println!("\n╔══════════════════════════════════════════════════════╗");
+    println!("║  PQ-HotStuff-2 · QC cert-epoch boundary · ML-DSA-65 ║");
+    println!("╚══════════════════════════════════════════════════════╝\n");
+    println!("   binary:  {bin:?}");
+    println!("   genesis: {genesis:?}");
+    println!("   logs:    {log_dir:?}");
+    println!("   epoch-change: height 2 (epoch 0 → 1)");
+    println!("   target:  height >= 5  timeout: {timeout_secs}s\n");
+
+    let mut nodes = spawn_nodes(&bin, &log_dir);
+    poll_until_height(&mut nodes, 5, timeout, &log_dir);
+
+    // Block-epoch assertions (same as the companion test)
+    assert_agreement_and_epoch(&nodes, 2, 0);
+    assert_agreement_and_epoch(&nodes, 3, 1);
+    assert_agreement_and_epoch(&nodes, 4, 1);
+    assert_agreement_and_epoch(&nodes, 5, 1);
+
+    // QC cert-epoch boundary assertions:
+    //   h3.last_commit certifies h2, signed by outgoing set → cert.epoch = 0
+    assert_cert_epoch(&nodes, 3, 2, 0);
+    //   h4.last_commit certifies h3, still signed by outgoing set → cert.epoch = 0
+    assert_cert_epoch(&nodes, 4, 3, 0);
+    //   h5.last_commit certifies h4, signed by incoming set → cert.epoch = 1
+    assert_cert_epoch(&nodes, 5, 4, 1);
+
+    println!("\n[pqhs2_4node_qc_cert_epoch_boundary] PASS");
 }
