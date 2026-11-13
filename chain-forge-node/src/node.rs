@@ -2070,7 +2070,7 @@ impl Node {
             vote_signing_bytes_v2(chain_id, &vote.vote_type, vote.height, vote.round,
                                   vote.epoch, &set_hash, vote.block_hash.as_ref())
         };
-        #[cfg(not(feature = "epoch-transition"))]
+        #[cfg(not(feature = "pq-hotstuff"))]
         let bytes = vote_signing_bytes(
             chain_id, &vote.vote_type, vote.height, vote.round,
             vote.block_hash.as_ref(),
@@ -2150,7 +2150,7 @@ impl Node {
             vote_signing_bytes_v2(chain_id, &vote.vote_type, vote.height, vote.round,
                                   vote.epoch, &set_hash, vote.block_hash.as_ref())
         };
-        #[cfg(not(feature = "epoch-transition"))]
+        #[cfg(not(feature = "pq-hotstuff"))]
         let msg = chain_forge_consensus::vote_signing_bytes(
             chain_id,
             &vote.vote_type,
@@ -5847,7 +5847,7 @@ impl Node {
                     vote_signing_bytes_v2(&self.genesis.chain_id, &vote.vote_type, vote.height,
                                          vote.round, vote.epoch, &set_hash, vote.block_hash.as_ref())
                 };
-                #[cfg(not(feature = "epoch-transition"))]
+                #[cfg(not(feature = "pq-hotstuff"))]
                 let msg = chain_forge_consensus::vote_signing_bytes(
                     &self.genesis.chain_id, &vote.vote_type, vote.height, vote.round,
                     vote.block_hash.as_ref(),
