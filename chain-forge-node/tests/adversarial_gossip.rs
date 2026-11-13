@@ -474,6 +474,7 @@ async fn adversarial_unknown_validator() {
         block_hash: Some(BlockHash("fake_block_hash_000000000000000".to_string())),
         signature:  vec![0xde, 0xad, 0xbe, 0xef],
         scheme:     Vote::default_scheme(),
+        epoch:      0,
     };
 
     eprintln!("   [attacker] sending vote from unknown validator qcb1evil...");
@@ -564,6 +565,7 @@ async fn adversarial_equivocation_over_gossip() {
             block_hash: Some(BlockHash(block_hash.to_string())),
             signature:  vec![],
             scheme:     Vote::default_scheme(),
+            epoch:      0,
         };
         let bytes = vote_signing_bytes(
             "qcb-devnet-4node", &vote.vote_type, vote.height, vote.round,
@@ -789,6 +791,7 @@ async fn adversarial_garbage_signature() {
             block_hash: Some(BlockHash("block_h_r0_garbage_sig_00000000".to_string())),
             signature:  garbage.clone(),
             scheme:     Vote::default_scheme(),
+            epoch:      0,
         };
         // Publish immediately: attacker_publish_vote sleeps 2s first, by
         // which time the nodes have usually passed attack_height and drop

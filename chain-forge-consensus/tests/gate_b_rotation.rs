@@ -27,7 +27,7 @@ use chain_forge_consensus::pq_hotstuff::epoch_handoff::{
 };
 use chain_forge_consensus::pq_hotstuff::safety::{ConsensusSigner, CTX_VOTE, Fips204Signer};
 use chain_forge_consensus::{
-    BlockHash, BlockHeight, CommitCertificate, Round, VoteType, Vote, vote_signing_bytes,
+    BlockHash, BlockHeight, CommitCertificate, Round, VoteType, Vote, vote_signing_bytes_v2,
 };
 use chain_forge_vca_pq::{
     ContributionScore, IdentityHandle, PersonhoodFactor, StakeAmount,
@@ -72,9 +72,11 @@ fn sign_precommit(
     id: &str,
     height: BlockHeight,
     round: Round,
+    epoch: u64,
+    set_hash: &[u8; 32],
     bh: &BlockHash,
 ) -> Vote {
-    let msg = vote_signing_bytes(CHAIN, &VoteType::Precommit, height, round, Some(bh));
+    let msg = vote_signing_bytes_v2(CHAIN, &VoteType::Precommit, height, round, epoch, set_hash, Some(bh));
     let sig = signer.sign(CTX_VOTE, &msg).unwrap();
     Vote {
         vote_type: VoteType::Precommit,
@@ -84,6 +86,7 @@ fn sign_precommit(
         block_hash: Some(bh.clone()),
         signature: sig,
         scheme: "ml-dsa-65".into(),
+        epoch,
     }
 }
 
@@ -176,25 +179,25 @@ fn kr6_end_to_end_rotation() {
         }],
     };
 
-    let bh = BlockHash("epoch-rotate-test".into());
-    let precommit = sign_precommit(&mut outgoing_signer, "outgoing", 10, 5, &bh);
-    let cert = CommitCertificate {
-        height: 10,
-        round: 5,
-        block_hash: bh,
-        precommits: vec![precommit],
-    };
-
     // Incoming registry: alice starts with key 0x01, then rotates to key 0x02.
     let mut reg = VcaRegistry::new(2, wc());
     add_validator(&mut reg, "alice", mldsa65_key(0x01));
     reg.rotate_consensus_key(&ValidatorId("alice".into()), mldsa65_key(0x02)).unwrap();
 
     let incoming = admit_pq_native(&reg, HEIGHT).unwrap();
-    // Admitted set must carry the rotated key.
     assert_eq!(incoming.validators[0].public_key, mldsa65_key(0x02));
-
     let set_hash = canonical_set_hash(&incoming);
-    verify_handoff_proof(CHAIN, &cert, &out, 6, &incoming, set_hash).unwrap();
+
+    let bh = BlockHash("epoch-rotate-test".into());
+    let precommit = sign_precommit(&mut outgoing_signer, "outgoing", 10, 5, 0, &set_hash, &bh);
+    let cert = CommitCertificate {
+        height: 10,
+        round: 5,
+        block_hash: bh,
+        precommits: vec![precommit],
+        epoch: 0,
+    };
+
+    verify_handoff_proof(CHAIN, &cert, &out, 6, &incoming, set_hash, 0).unwrap();
     println!("[KR-6] end-to-end rotation PASS");
 }

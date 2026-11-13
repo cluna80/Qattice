@@ -18,7 +18,7 @@
 #![cfg(feature = "epoch-transition")]
 
 use chain_forge_consensus::{
-    vote_signing_bytes, BlockHash, BlockHeight, CommitCertificate, Round, ValidatorId,
+    vote_signing_bytes_v2, BlockHash, BlockHeight, CommitCertificate, Round, ValidatorId,
     ValidatorSet, Vote, VoteType,
 };
 use chain_forge_consensus::pq_hotstuff::epoch_handoff::{
@@ -50,11 +50,9 @@ fn sign_precommit(
     round: Round,
     epoch: u64,
     bh: &BlockHash,
+    set_hash: &[u8; 32],
 ) -> Vote {
-    // Signs with v1 vote_signing_bytes (the current path used by verify_handoff_proof
-    // under not(real-crypto)). Epoch is threaded through Vote.epoch for consistency
-    // but is not yet in the signed bytes (v2 wiring is a later milestone).
-    let msg = vote_signing_bytes(CHAIN, &VoteType::Precommit, height, round, Some(bh));
+    let msg = vote_signing_bytes_v2(CHAIN, &VoteType::Precommit, height, round, epoch, set_hash, Some(bh));
     let sig = signer.sign(CTX_VOTE, &msg).expect("sign");
     Vote {
         vote_type: VoteType::Precommit,
@@ -74,9 +72,10 @@ fn build_cert(
     round: Round,
     epoch: u64,
     bh: &BlockHash,
+    set_hash: &[u8; 32],
 ) -> CommitCertificate {
     let precommits: Vec<Vote> = signers.iter_mut()
-        .map(|(s, info)| sign_precommit(s, &info.id.0.clone(), height, round, epoch, bh))
+        .map(|(s, info)| sign_precommit(s, &info.id.0.clone(), height, round, epoch, bh, set_hash))
         .collect();
     CommitCertificate { height, round, block_hash: bh.clone(), precommits, epoch }
 }
@@ -120,33 +119,23 @@ fn p3_p7_valid_pair_epoch_0() {
     let bh2 = BlockHash("epoch-change-block-h2".to_string());
     let bh3 = BlockHash("boundary-child-h3".to_string());
 
-    let cert_h2 = build_cert(&mut signers, 2, 5, 0, &bh2);
-    let cert_h3 = build_cert(&mut signers, 3, 6, 0, &bh3);
+    let cert_h2 = build_cert(&mut signers, 2, 5, 0, &bh2, &set_hash);
+    let cert_h3 = build_cert(&mut signers, 3, 6, 0, &bh3, &set_hash);
 
     // h2 cert: child_qc_round = cert_h2.round + 1 = 6
-    verify_handoff_proof(CHAIN, &cert_h2, &out, 6, &inc, set_hash)
+    verify_handoff_proof(CHAIN, &cert_h2, &out, 6, &inc, set_hash, 0)
         .expect("h2 cert must pass verify_handoff_proof");
 
     // h3 cert: child_qc_round = cert_h3.round + 1 = 7
-    verify_handoff_proof(CHAIN, &cert_h3, &out, 7, &inc, set_hash)
+    verify_handoff_proof(CHAIN, &cert_h3, &out, 7, &inc, set_hash, 0)
         .expect("h3 cert must pass verify_handoff_proof");
 }
 
 // ── P3/P7: Mixed-epoch vote (epoch-independent failure) ───────────────────────
 
-/// A certificate where one precommit is re-signed with epoch=1 bytes while
-/// the rest use epoch=0 bytes fails signature verification. This exercises the
-/// epoch check independently of key mismatch or signature corruption.
-///
-/// Note: with v1 vote_signing_bytes, epoch is not yet in the signed bytes.
-/// The mismatch is simulated by signing a vote with DIFFERENT round bytes
-/// (round+1) while keeping the original round in the Vote struct, so the
-/// certificate carries a signature that does not match the round the verifier
-/// reconstructs. This demonstrates the structural independence of the epoch
-/// rejection path once v2 signing lands.
-///
-/// TODO: replace the round-mismatch simulation with a real epoch-bytes mismatch
-/// once vote_signing_bytes_v2 is wired into sign_vote and verify_handoff_proof.
+/// A certificate where one precommit is re-signed with epoch=1 v2 bytes while
+/// the rest use epoch=0 v2 bytes fails signature verification. The verifier
+/// reconstructs v2 bytes with epoch=0, so the epoch=1 vote fails.
 #[test]
 fn p3_p7_mixed_epoch_vote_fails() {
     let mut signers: Vec<_> = ["qcb1alice", "qcb1bob", "qcb1carol", "qcb1dave"]
@@ -158,17 +147,16 @@ fn p3_p7_mixed_epoch_vote_fails() {
 
     let bh = BlockHash("epoch-change-block".to_string());
 
-    // Build a valid h2 cert but then corrupt one vote's signature by re-signing
-    // with round+100 bytes (simulates a cross-epoch / wrong-bytes scenario).
-    let mut cert = build_cert(&mut signers, 2, 5, 0, &bh);
+    // Build a valid epoch=0 cert.
+    let mut cert = build_cert(&mut signers, 2, 5, 0, &bh, &set_hash);
 
-    // Replace alice's signature with one over round=105 (wrong round).
-    let corrupt_msg = vote_signing_bytes(CHAIN, &VoteType::Precommit, 2, 105, Some(&bh));
+    // Replace alice's signature with one signed under epoch=1 v2 bytes.
+    let corrupt_msg = vote_signing_bytes_v2(CHAIN, &VoteType::Precommit, 2, 5, 1, &set_hash, Some(&bh));
     let corrupt_sig = signers[0].0.sign(CTX_VOTE, &corrupt_msg).expect("sign corrupt");
     cert.precommits[0].signature = corrupt_sig;
 
-    let err = verify_handoff_proof(CHAIN, &cert, &out, 6, &inc, set_hash)
-        .expect_err("corrupted vote must fail verify_handoff_proof");
+    let err = verify_handoff_proof(CHAIN, &cert, &out, 6, &inc, set_hash, 0)
+        .expect_err("epoch-1 vote in epoch-0 cert must fail");
     assert!(
         matches!(err, HandoffError::SignatureInvalid { .. }),
         "expected SignatureInvalid, got: {err}"
@@ -189,10 +177,10 @@ fn p3_p7_wrong_child_qc_round() {
     let set_hash = canonical_set_hash(&inc);
 
     let bh = BlockHash("epoch-change-block".to_string());
-    let cert = build_cert(&mut signers, 2, 5, 0, &bh);
+    let cert = build_cert(&mut signers, 2, 5, 0, &bh, &set_hash);
 
     // child_qc_round = 5, but cert.round + 1 = 6 — gap of 1.
-    let err = verify_handoff_proof(CHAIN, &cert, &out, 5, &inc, set_hash)
+    let err = verify_handoff_proof(CHAIN, &cert, &out, 5, &inc, set_hash, 0)
         .expect_err("wrong child_qc_round must fail");
     assert!(
         matches!(err, HandoffError::ConsecutiveRoundsViolation { cert_round: 5, child_round: 5 }),
@@ -200,7 +188,7 @@ fn p3_p7_wrong_child_qc_round() {
     );
 
     // child_qc_round = 10 (too far ahead).
-    let err2 = verify_handoff_proof(CHAIN, &cert, &out, 10, &inc, set_hash)
+    let err2 = verify_handoff_proof(CHAIN, &cert, &out, 10, &inc, set_hash, 0)
         .expect_err("wrong child_qc_round must fail");
     assert!(
         matches!(err2, HandoffError::ConsecutiveRoundsViolation { cert_round: 5, child_round: 10 }),
@@ -210,16 +198,9 @@ fn p3_p7_wrong_child_qc_round() {
 
 // ── P3/P7: Wrong child cert epoch (future v2 path) ───────────────────────────
 
-/// A certificate where the cert.epoch field is inconsistent with the expected
-/// outgoing epoch fails once verify_handoff_proof checks CommitCertificate.epoch.
-///
-/// Currently verify_handoff_proof does not inspect cert.epoch (the v2 wiring
-/// is a future change). This test records the EXPECTED failure so the check
-/// can be added and the test promoted from compile-only to assertion.
-///
-/// TODO: uncomment the assertion once verify_handoff_proof checks cert.epoch.
+/// A certificate where cert.epoch=1 but expected_epoch=0 fails with EpochMismatch.
 #[test]
-fn p3_p7_wrong_cert_epoch_placeholder() {
+fn p3_p7_wrong_cert_epoch() {
     let mut signers: Vec<_> = ["qcb1alice", "qcb1bob", "qcb1carol", "qcb1dave"]
         .iter().map(|id| make_signer_and_info(id, 1)).collect();
 
@@ -228,17 +209,15 @@ fn p3_p7_wrong_cert_epoch_placeholder() {
     let set_hash = canonical_set_hash(&inc);
 
     let bh = BlockHash("epoch-change-block".to_string());
-    let mut cert = build_cert(&mut signers, 2, 5, 0, &bh);
-    // Stamp the wrong epoch on the certificate itself.
-    cert.epoch = 1;  // cert claims epoch=1 but was signed with epoch=0 bytes
+    let mut cert = build_cert(&mut signers, 2, 5, 0, &bh, &set_hash);
+    cert.epoch = 1;  // cert claims epoch=1 but expected_epoch=0
 
-    // Current behaviour: verify_handoff_proof ignores cert.epoch, so it passes.
-    // Expected future behaviour: Err(EpochMismatch { cert_epoch: 1, expected_epoch: 0 }).
-    // TODO: once cert.epoch is checked, change this to:
-    //   verify_handoff_proof(CHAIN, &cert, &out, 6, &inc, set_hash)
-    //       .expect_err("wrong cert.epoch must fail");
-    let _ = verify_handoff_proof(CHAIN, &cert, &out, 6, &inc, set_hash);
-    // Placeholder: compiles and runs; promotes to an error assertion once the check lands.
+    let err = verify_handoff_proof(CHAIN, &cert, &out, 6, &inc, set_hash, 0)
+        .expect_err("wrong cert.epoch must fail");
+    assert!(
+        matches!(err, HandoffError::EpochMismatch { cert_epoch: 1, expected_epoch: 0 }),
+        "expected EpochMismatch, got: {err}"
+    );
 }
 
 // ── P3/P7: Insufficient quorum ────────────────────────────────────────────────
@@ -254,11 +233,11 @@ fn p3_p7_insufficient_quorum() {
     let set_hash = canonical_set_hash(&inc);
 
     let bh = BlockHash("epoch-change-block".to_string());
-    let mut cert = build_cert(&mut signers, 2, 5, 0, &bh);
+    let mut cert = build_cert(&mut signers, 2, 5, 0, &bh, &set_hash);
     // Keep only the first precommit.
     cert.precommits.truncate(1);
 
-    let err = verify_handoff_proof(CHAIN, &cert, &out, 6, &inc, set_hash)
+    let err = verify_handoff_proof(CHAIN, &cert, &out, 6, &inc, set_hash, 0)
         .expect_err("1-of-4 quorum must fail");
     assert!(
         matches!(err, HandoffError::InsufficientPower { .. }),
@@ -277,13 +256,14 @@ fn p3_p7_set_hash_mismatch() {
 
     let out = outgoing_set(&signers);
     let inc = fresh_incoming_set();
+    let set_hash = canonical_set_hash(&inc);
 
     let bh = BlockHash("epoch-change-block".to_string());
-    let cert = build_cert(&mut signers, 2, 5, 0, &bh);
+    let cert = build_cert(&mut signers, 2, 5, 0, &bh, &set_hash);
 
     // Pass a wrong set_hash (all zeros).
     let wrong_hash = [0u8; 32];
-    let err = verify_handoff_proof(CHAIN, &cert, &out, 6, &inc, wrong_hash)
+    let err = verify_handoff_proof(CHAIN, &cert, &out, 6, &inc, wrong_hash, 0)
         .expect_err("wrong set_hash must fail");
     assert!(
         matches!(err, HandoffError::SetHashMismatch { .. }),

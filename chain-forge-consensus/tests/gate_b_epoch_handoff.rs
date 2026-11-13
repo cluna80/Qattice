@@ -21,7 +21,7 @@
 
 use chain_forge_consensus::{
     BlockHash, BlockHeight, CommitCertificate, Round, ValidatorId, ValidatorSet,
-    VoteType, Vote, vote_signing_bytes,
+    VoteType, Vote, vote_signing_bytes_v2,
 };
 use chain_forge_consensus::pq_hotstuff::epoch_handoff::{
     canonical_set_hash, verify_handoff_proof, HandoffError,
@@ -47,14 +47,16 @@ fn validator_set(vs: Vec<ValidatorInfo>) -> ValidatorSet {
     ValidatorSet { height: 1, validators: vs }
 }
 
-/// Build a valid precommit Vote signed by `signer` for the given cert parameters.
+/// Build a valid precommit Vote (v2 bytes) signed by `signer`.
 fn signed_precommit(
     signer: &mut Fips204Signer,
     height: BlockHeight,
     round: Round,
+    epoch: u64,
+    set_hash: &[u8; 32],
     block_hash: &BlockHash,
 ) -> Vote {
-    let msg = vote_signing_bytes(CHAIN, &VoteType::Precommit, height, round, Some(block_hash));
+    let msg = vote_signing_bytes_v2(CHAIN, &VoteType::Precommit, height, round, epoch, set_hash, Some(block_hash));
     let sig = signer.sign(CTX_VOTE, &msg).unwrap();
     Vote {
         vote_type: VoteType::Precommit,
@@ -65,6 +67,7 @@ fn signed_precommit(
         block_hash: Some(block_hash.clone()),
         signature: sig,
         scheme: "ml-dsa-65".into(),
+        epoch,
     }
 }
 
@@ -74,19 +77,22 @@ fn signed_precommit_as(
     id: &str,
     height: BlockHeight,
     round: Round,
+    epoch: u64,
+    set_hash: &[u8; 32],
     block_hash: &BlockHash,
 ) -> Vote {
-    let mut v = signed_precommit(signer, height, round, block_hash);
+    let mut v = signed_precommit(signer, height, round, epoch, set_hash, block_hash);
     v.validator = ValidatorId(id.into());
     v
 }
 
-fn cert(height: BlockHeight, round: Round, block_hash: &str, precommits: Vec<Vote>) -> CommitCertificate {
+fn cert(height: BlockHeight, round: Round, epoch: u64, block_hash: &str, precommits: Vec<Vote>) -> CommitCertificate {
     CommitCertificate {
         height,
         round,
         block_hash: BlockHash(block_hash.into()),
         precommits,
+        epoch,
     }
 }
 
@@ -105,19 +111,19 @@ fn eh7_happy_path() {
         validator("v1", pk1.clone(), 1),
         validator("v2", pk2.clone(), 1),
     ]);
-    let bh = BlockHash("epoch-change-block".into());
-    let precommits = vec![
-        signed_precommit_as(&mut s0, "v0", 10, 5, &bh),
-        signed_precommit_as(&mut s1, "v1", 10, 5, &bh),
-        signed_precommit_as(&mut s2, "v2", 10, 5, &bh),
-    ];
-    let c = cert(10, 5, "epoch-change-block", precommits);
-
     let (_, pk_new) = make_signer();
     let incoming = validator_set(vec![validator("v_new", pk_new.clone(), 1)]);
     let set_hash = canonical_set_hash(&incoming);
 
-    verify_handoff_proof(CHAIN, &c, &out, 6, &incoming, set_hash).unwrap();
+    let bh = BlockHash("epoch-change-block".into());
+    let precommits = vec![
+        signed_precommit_as(&mut s0, "v0", 10, 5, 0, &set_hash, &bh),
+        signed_precommit_as(&mut s1, "v1", 10, 5, 0, &set_hash, &bh),
+        signed_precommit_as(&mut s2, "v2", 10, 5, 0, &set_hash, &bh),
+    ];
+    let c = cert(10, 5, 0, "epoch-change-block", precommits);
+
+    verify_handoff_proof(CHAIN, &c, &out, 6, &incoming, set_hash, 0).unwrap();
     println!("[EH-7] happy path PASS");
 }
 
@@ -126,14 +132,14 @@ fn eh7_happy_path() {
 fn eh6_invalid_child_link() {
     let (mut s0, pk0) = make_signer();
     let out = validator_set(vec![validator("v0", pk0.clone(), 1)]);
-    let bh = BlockHash("b".into());
-    let c = cert(1, 3, "b", vec![signed_precommit_as(&mut s0, "v0", 1, 3, &bh)]);
     let (_, pk_new) = make_signer();
     let inc = validator_set(vec![validator("vn", pk_new, 1)]);
     let sh = canonical_set_hash(&inc);
+    let bh = BlockHash("b".into());
+    let c = cert(1, 3, 0, "b", vec![signed_precommit_as(&mut s0, "v0", 1, 3, 0, &sh, &bh)]);
 
     // child_qc_round=3 but expected cert.round+1=4
-    let err = verify_handoff_proof(CHAIN, &c, &out, 3, &inc, sh).unwrap_err();
+    let err = verify_handoff_proof(CHAIN, &c, &out, 3, &inc, sh, 0).unwrap_err();
     assert!(matches!(err, HandoffError::ConsecutiveRoundsViolation { cert_round: 3, child_round: 3 }),
         "EH-6: expected ConsecutiveRoundsViolation, got: {err}");
     println!("[EH-6] ConsecutiveRoundsViolation PASS: {err}");
@@ -145,14 +151,14 @@ fn eh1_wrong_key() {
     let (_, pk0) = make_signer(); // key registered in outgoing set
     let (mut impostor, _) = make_signer(); // signs with a DIFFERENT key
     let out = validator_set(vec![validator("v0", pk0.clone(), 1)]);
-    let bh = BlockHash("b".into());
-    let precommit = signed_precommit_as(&mut impostor, "v0", 1, 1, &bh);
-    let c = cert(1, 1, "b", vec![precommit]);
     let (_, pk_new) = make_signer();
     let inc = validator_set(vec![validator("vn", pk_new, 1)]);
     let sh = canonical_set_hash(&inc);
+    let bh = BlockHash("b".into());
+    let precommit = signed_precommit_as(&mut impostor, "v0", 1, 1, 0, &sh, &bh);
+    let c = cert(1, 1, 0, "b", vec![precommit]);
 
-    let err = verify_handoff_proof(CHAIN, &c, &out, 2, &inc, sh).unwrap_err();
+    let err = verify_handoff_proof(CHAIN, &c, &out, 2, &inc, sh, 0).unwrap_err();
     assert!(matches!(err, HandoffError::SignatureInvalid { .. }),
         "EH-1: expected SignatureInvalid, got: {err}");
     println!("[EH-1] SignatureInvalid (wrong key) PASS: {err}");
@@ -163,17 +169,16 @@ fn eh1_wrong_key() {
 fn eh2_corrupt_signature() {
     let (mut s0, pk0) = make_signer();
     let out = validator_set(vec![validator("v0", pk0.clone(), 1)]);
-    let bh = BlockHash("b".into());
-    let mut precommit = signed_precommit_as(&mut s0, "v0", 1, 1, &bh);
-    // Flip one byte in the middle of the signature.
-    let mid = precommit.signature.len() / 2;
-    precommit.signature[mid] ^= 0xFF;
-    let c = cert(1, 1, "b", vec![precommit]);
     let (_, pk_new) = make_signer();
     let inc = validator_set(vec![validator("vn", pk_new, 1)]);
     let sh = canonical_set_hash(&inc);
+    let bh = BlockHash("b".into());
+    let mut precommit = signed_precommit_as(&mut s0, "v0", 1, 1, 0, &sh, &bh);
+    let mid = precommit.signature.len() / 2;
+    precommit.signature[mid] ^= 0xFF;
+    let c = cert(1, 1, 0, "b", vec![precommit]);
 
-    let err = verify_handoff_proof(CHAIN, &c, &out, 2, &inc, sh).unwrap_err();
+    let err = verify_handoff_proof(CHAIN, &c, &out, 2, &inc, sh, 0).unwrap_err();
     assert!(matches!(err, HandoffError::SignatureInvalid { .. }),
         "EH-2: expected SignatureInvalid, got: {err}");
     println!("[EH-2] SignatureInvalid (corrupt sig) PASS: {err}");
@@ -185,18 +190,17 @@ fn eh3_duplicate_signer() {
     let (mut s0, pk0) = make_signer();
     let out = validator_set(vec![
         validator("v0", pk0.clone(), 1),
-        validator("v1", pk0.clone(), 1), // different id, same key (not the dup)
+        validator("v1", pk0.clone(), 1),
     ]);
-    let bh = BlockHash("b".into());
-    // Two precommits both claiming to be "v0"
-    let p0a = signed_precommit_as(&mut s0, "v0", 1, 1, &bh);
-    let p0b = signed_precommit_as(&mut s0, "v0", 1, 1, &bh);
-    let c = cert(1, 1, "b", vec![p0a, p0b]);
     let (_, pk_new) = make_signer();
     let inc = validator_set(vec![validator("vn", pk_new, 1)]);
     let sh = canonical_set_hash(&inc);
+    let bh = BlockHash("b".into());
+    let p0a = signed_precommit_as(&mut s0, "v0", 1, 1, 0, &sh, &bh);
+    let p0b = signed_precommit_as(&mut s0, "v0", 1, 1, 0, &sh, &bh);
+    let c = cert(1, 1, 0, "b", vec![p0a, p0b]);
 
-    let err = verify_handoff_proof(CHAIN, &c, &out, 2, &inc, sh).unwrap_err();
+    let err = verify_handoff_proof(CHAIN, &c, &out, 2, &inc, sh, 0).unwrap_err();
     assert!(matches!(err, HandoffError::DuplicateSigner { .. }),
         "EH-3: expected DuplicateSigner, got: {err}");
     println!("[EH-3] DuplicateSigner PASS: {err}");
@@ -214,40 +218,37 @@ fn eh4_insufficient_quorum() {
         validator("v1", pk1.clone(), 1),
         validator("v2", pk2.clone(), 1),
     ]);
-    let bh = BlockHash("b".into());
-    // Only v0 signs; total power = 1, quorum = ceil(2*3/3)+0 = 3? Let's check quorum.
-    // quorum_power = floor(2*3/3) + 1 = 2 + 1 = 3; we have power 1 → insufficient.
-    let c = cert(1, 1, "b", vec![signed_precommit_as(&mut s0, "v0", 1, 1, &bh)]);
     let (_, pk_new) = make_signer();
     let inc = validator_set(vec![validator("vn", pk_new, 1)]);
     let sh = canonical_set_hash(&inc);
+    let bh = BlockHash("b".into());
+    let c = cert(1, 1, 0, "b", vec![signed_precommit_as(&mut s0, "v0", 1, 1, 0, &sh, &bh)]);
 
-    let err = verify_handoff_proof(CHAIN, &c, &out, 2, &inc, sh).unwrap_err();
+    let err = verify_handoff_proof(CHAIN, &c, &out, 2, &inc, sh, 0).unwrap_err();
     assert!(matches!(err, HandoffError::InsufficientPower { .. }),
         "EH-4: expected InsufficientPower, got: {err}");
     println!("[EH-4] InsufficientPower PASS: {err}");
 }
 
 /// EH-5: set_hash in the call doesn't match canonical_set_hash(incoming_set).
-/// Simulates an attacker substituting a validator's public key in the incoming set
-/// after computing the hash.
 #[test]
 fn eh5_substituted_incoming_key() {
     let (mut s0, pk0) = make_signer();
     let out = validator_set(vec![validator("v0", pk0.clone(), 1)]);
-    let bh = BlockHash("b".into());
-    let c = cert(1, 1, "b", vec![signed_precommit_as(&mut s0, "v0", 1, 1, &bh)]);
 
     // Compute set_hash for the REAL incoming set.
     let (_, pk_real) = make_signer();
     let real_incoming = validator_set(vec![validator("vn", pk_real.clone(), 1)]);
     let real_set_hash = canonical_set_hash(&real_incoming);
 
+    let bh = BlockHash("b".into());
+    let c = cert(1, 1, 0, "b", vec![signed_precommit_as(&mut s0, "v0", 1, 1, 0, &real_set_hash, &bh)]);
+
     // Supply an ALTERED incoming set (different public key) but the ORIGINAL hash.
     let (_, pk_attacker) = make_signer();
     let altered_incoming = validator_set(vec![validator("vn", pk_attacker.clone(), 1)]);
 
-    let err = verify_handoff_proof(CHAIN, &c, &out, 2, &altered_incoming, real_set_hash).unwrap_err();
+    let err = verify_handoff_proof(CHAIN, &c, &out, 2, &altered_incoming, real_set_hash, 0).unwrap_err();
     assert!(matches!(err, HandoffError::SetHashMismatch { .. }),
         "EH-5: expected SetHashMismatch, got: {err}");
     println!("[EH-5] SetHashMismatch (substituted incoming key) PASS: {err}");

@@ -257,7 +257,7 @@ impl PqHotStuffEngine {
                 round: to_commit.round,
                 block_hash: to_commit.block_hash.clone(),
                 precommits: to_commit.precommits.clone(),
-                epoch: 0,
+                epoch: self.epoch,
             });
         }
         None
@@ -584,6 +584,7 @@ impl ConsensusEngine for PqHotStuffEngine {
                     child_qc_round,
                     &vs,
                     set_hash,
+                    self.epoch,
                 ).map_err(|e| ConsensusError::Internal(format!("handoff proof rejected: {e}")))?;
             }
 
@@ -908,6 +909,7 @@ mod tests {
             validator: ValidatorId(validator.into()),
             signature: vec![],
             scheme: Vote::default_scheme(),
+            epoch: 0,
         }
     }
 
