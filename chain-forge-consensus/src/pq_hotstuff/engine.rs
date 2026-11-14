@@ -202,6 +202,7 @@ impl PqHotStuffEngine {
     /// any `propose` / `receive_vote` / `on_timeout`. After attaching, call
     /// `restore_floors` to reload hvr/hqr from the durable record.
     pub fn attach_signing_context(&mut self, ctx: Box<dyn EngineSigningContext>) {
+        tracing::info!("PqHotStuffEngine: attach_signing_context called (ptr={:p})", &*ctx);
         self.signing_ctx = Some(ctx);
     }
 
@@ -680,9 +681,15 @@ impl ConsensusEngine for PqHotStuffEngine {
         qc_round: u64,
     ) -> Result<Vec<u8>, String> {
         if let Some(ctx) = self.signing_ctx.as_mut() {
-            ctx.sign_vote(chain_id, epoch, round, block_id, parent_id, parent_round, qc_round)
-                .map(|s| s.signature)
+            let result = ctx.sign_vote(chain_id, epoch, round, block_id, parent_id, parent_round, qc_round)
+                .map(|s| s.signature);
+            match &result {
+                Ok(sig) => tracing::debug!(chain_id, epoch, round, sig_len = sig.len(), "sign_local_vote: signed"),
+                Err(e) => tracing::warn!(chain_id, epoch, round, error = %e, "sign_local_vote: signing error"),
+            }
+            result
         } else {
+            tracing::warn!(chain_id, epoch, round, height = self.height, "sign_local_vote: signing_ctx is None — returning empty sig");
             Ok(vec![])
         }
     }
@@ -695,9 +702,15 @@ impl ConsensusEngine for PqHotStuffEngine {
         high_qc_round: u64,
     ) -> Result<Vec<u8>, String> {
         if let Some(ctx) = self.signing_ctx.as_mut() {
-            ctx.sign_timeout(chain_id, epoch, round, high_qc_round)
-                .map(|s| s.signature)
+            let result = ctx.sign_timeout(chain_id, epoch, round, high_qc_round)
+                .map(|s| s.signature);
+            match &result {
+                Ok(sig) => tracing::debug!(chain_id, epoch, round, sig_len = sig.len(), "sign_local_timeout: signed"),
+                Err(e) => tracing::warn!(chain_id, epoch, round, error = %e, "sign_local_timeout: signing error"),
+            }
+            result
         } else {
+            tracing::warn!(chain_id, epoch, round, height = self.height, "sign_local_timeout: signing_ctx is None — returning empty sig");
             Ok(vec![])
         }
     }
