@@ -434,14 +434,17 @@ fn assert_cert_epoch(
 ///
 /// Same devnet as `pqhs2_4node_epoch_change_reaches_new_epoch` (epoch-change at h2,
 /// epoch 0 → 1). Additionally asserts the **certificate** epochs carried in each
-/// block's `last_commit` field, verifying the two-chain boundary rule:
+/// block's `last_commit` field.
 ///
-///   Block h3 carries last_commit that certifies h2: cert.epoch = 0  (outgoing set signed)
-///   Block h4 carries last_commit that certifies h3: cert.epoch = 0  (outgoing set still signed h3)
-///   Block h5 carries last_commit that certifies h4: cert.epoch = 1  (incoming set signed h4)
+/// `last_commit` for block H is the CommitCertificate for block H itself
+/// (the QC passed to commit_block by the two-chain rule).
 ///
-/// This confirms that ML-DSA-65 signatures are bound to the correct epoch in v2
-/// signing bytes, and that the boundary is at the right height.
+///   Block h2: epoch-change block committed under epoch 0 → cert.epoch = 0
+///   Block h3: first block after the transition → cert.epoch = 1
+///   Block h4: continued finalization in epoch 1 → cert.epoch = 1
+///
+/// This confirms ML-DSA-65 signatures are bound to the correct epoch in v2
+/// signing bytes and that the boundary is at the right height.
 #[test]
 fn pqhs2_4node_qc_cert_epoch_boundary() {
     let bin = node_binary();
@@ -484,13 +487,16 @@ fn pqhs2_4node_qc_cert_epoch_boundary() {
     assert_agreement_and_epoch(&nodes, 4, 1);
     assert_agreement_and_epoch(&nodes, 5, 1);
 
-    // QC cert-epoch boundary assertions:
-    //   h3.last_commit certifies h2, signed by outgoing set → cert.epoch = 0
-    assert_cert_epoch(&nodes, 3, 2, 0);
-    //   h4.last_commit certifies h3, still signed by outgoing set → cert.epoch = 0
-    assert_cert_epoch(&nodes, 4, 3, 0);
-    //   h5.last_commit certifies h4, signed by incoming set → cert.epoch = 1
-    assert_cert_epoch(&nodes, 5, 4, 1);
+    // QC cert-epoch boundary assertions.
+    // `last_commit` for block H is the CommitCertificate for block H itself
+    // (the QC that the two-chain rule passed to commit_block).
+    //
+    //   h2: epoch-change block committed under epoch 0 → cert.epoch = 0
+    assert_cert_epoch(&nodes, 2, 2, 0);
+    //   h3: first block committed after the transition → cert.epoch = 1
+    assert_cert_epoch(&nodes, 3, 3, 1);
+    //   h4: continued finalization in epoch 1 → cert.epoch = 1
+    assert_cert_epoch(&nodes, 4, 4, 1);
 
     println!("\n[pqhs2_4node_qc_cert_epoch_boundary] PASS");
 }

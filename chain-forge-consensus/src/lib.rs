@@ -335,15 +335,17 @@ pub struct CommitCertificate {
     pub round: Round,
     pub block_hash: BlockHash,
 
-    /// The pre-commit votes that form the quorum. Must cover ≥ 2/3+1 power.
-    pub precommits: Vec<Vote>,
-
     /// Consensus epoch at QC formation time (vote-format v2).
     /// Set when the quorum threshold is crossed, before `on_commit` fires.
     /// Must match every constituent vote's `epoch` field.
     /// Defaults to 0 for v1 certificates (backward-compatible deserialization).
+    /// Serialized before `precommits` so the JSON field order is deterministic
+    /// and test parsers can find it via simple string splitting.
     #[serde(default)]
     pub epoch: u64,
+
+    /// The pre-commit votes that form the quorum. Must cover ≥ 2/3+1 power.
+    pub precommits: Vec<Vote>,
 }
 
 // ── Engine-driven consensus (Tendermint state machine) ────────────────────────
