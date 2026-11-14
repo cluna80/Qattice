@@ -39,6 +39,72 @@ cargo test -p chain-forge-crypto --features real-pqc --test prop_sign_verify -- 
 
 ---
 
+## Native-node fixed-set pruning complete — 2026-11-14
+
+✅ **Windows-confirmed** (owner-run, 2026-11-14 at `d638f1a`)
+
+**Branch:** `feat/vote-format-v2` — commits `795d9f2` → `e3d95cd` → `fad230d` → `d638f1a`
+
+**What landed:**
+
+1. **`CHAIN_STORE_KEEP = 20` constant** in `chain-forge-node/src/node.rs`: retention window for the in-memory `chain_store: BTreeMap<u64, ...>`. After each commit at height H, entries below `H - CHAIN_STORE_KEEP + 1` are removed.
+
+2. **`chain_store_watermark`** in `NodeStatus`: exposed on `/api/status`; advances monotonically as blocks are pruned. Initialized to 0; first advances to 2 at block 21 (removes height 1).
+
+3. **`pqhs2_4node_pruning_live.rs`**: 8-phase integration test — 4-node ML-DSA-65 PQ-HotStuff devnet, fixed validator set, no epoch change.
+
+| Phase | Assertion |
+|---|---|
+| 1 | All 4 nodes reach height 21 within 240 s |
+| 2 | `chain_store_watermark >= 1` on all 4 nodes |
+| 3 | Poll (500 ms interval, 30 s timeout) for a committed gen-* snapshot (manifest.json present) on alice whose `chain_store.json` lacks key "1" |
+| 4 | All 4 nodes agree on `block_hash` and `state_root` at height 21 |
+| 5 | Kill dave; alice/bob/carol advance to height 23 |
+| 6 | Restart dave from its pruned data directory |
+| 7 | Dave catches up to height 23 within timeout |
+| 8 | Dave agrees with alice/bob/carol on `block_hash` and `state_root` at height 23 |
+
+**Genesis:** `tests/devnet/genesis-4node-pqhs2.json` (`block_time_ms=2000`; actual devnet rate ~9 s/block on Windows due to two-chain PQ-HotStuff + ML-DSA-65 overhead)
+
+**Run command:**
+```
+cargo test -p chain-forge-node --features pq-hotstuff --test pqhs2_4node_pruning_live -- --nocapture
+```
+
+**Windows confirmation (owner-run, 2026-11-14):** `feat/vote-format-v2` at `d638f1a` — BossKing MINGW64. 1/1 passed in 217.44s.
+
+```
+── All nodes reached height 21 in 174.0s ──
+  qcb1alice=21  qcb1bob=21  qcb1carol=21  qcb1dave=21
+
+── Phase 2: verifying chain_store_watermark > 0 on all nodes ──
+   qcb1alice  chain_store_watermark = 2
+   qcb1bob  chain_store_watermark = 2
+   qcb1carol  chain_store_watermark = 2
+   qcb1dave  chain_store_watermark = 2
+
+── Phase 3: verifying height 1 is absent from alice's chain_store.json ──
+   latest pruned gen: gen-000021
+   chain_store.json height keys: ["10", "11", "12", "13", "14", "15"]
+   ✓ height 1 is absent from chain_store.json (pruned)
+
+── Phase 4: agreement check at height 21 ──
+   (all 4 nodes: block_hash=e6fb3f49...  state_root=a92a28fe...)
+   ✓ all nodes agree on block_hash and state_root at height 21
+
+── Phase 7: waiting for dave to catch up to height 23 ──
+   [ 6.0s]  all nodes at height 23 (dave restarted from pruned storage)
+
+── Phase 8: agreement check at height 23 ──
+   ✓ dave (restarted from pruned storage) agrees with peers at height 23
+
+pqhs2_4node_fixed_set_pruning  PASS
+```
+
+**Epoch-handoff design note:** pruning across validator-set changes (V0 ≠ V1) requires the 6 items listed in `docs/pq-hotstuff-002-handoff-trace.md` and remains gated on owner decisions. This milestone covers fixed-set operation only.
+
+---
+
 ## PQ-HotStuff v2 signing wiring + QC cert-epoch boundary — 2026-11-14
 
 ✅ **Windows-confirmed** (re-confirmed 2026-11-14 at `e80214e` with structured JSON verification)
