@@ -31,12 +31,13 @@ The stack is clean. #164 is ready to merge into #161 when #161 and #160 are appr
 
 ## PQ-HotStuff-2 DIS TX + pruned restart — `pqhs2_4node_dis_tx_and_pruned_restart` Windows-confirmed — 2026-11-14
 
-**Branch:** `feat/pqhs2-fips204-signing` — head `606ee48`
+**Branch:** `feat/pqhs2-fips204-signing` — head `606ee48` (acceptance) / `81e013b` (hardening commit: view-collision guard + R-PV-1/R-PV-2 regressions)
 
 **What landed:**
 
 - `pqhs2_4node_dis_tx_live.rs` — 9-phase 4-node PQ-HotStuff-2 integration test: ML-DSA-65 DIS-signed transfer TX, 4-node state-root agreement, replay rejection, prune to watermark ≥ 1, kill + sync restart of pruned node, no-double-execution check.
 - **Root cause fixed (proposal signing floor):** `PqHotStuffEngine::propose` passed `round as u64` (raw per-height round, resets to 1 each height) to `sign_proposal` on the safety store. The safety store's `Proposal` slot persisted across heights within an epoch. After height H committed at round R, the slot held `round = R`. Signing a proposal for round 1 of height H+1 triggered `RoundBelowSigned` (1 < R), causing the proposer to silently fail (debug-logged), set `last_proposed`, and never retry — so every height required R rounds of stall timeouts before round R+1 could finally succeed. Fix: use `QuorumCertificate::view(height, round) = height * 10_000 + round` for proposal signing (the same global view number already used for vote and timeout signing), ensuring the proposal slot is monotonically increasing across height boundaries.
+- **Post-confirmation hardening (`81e013b`):** Added `MAX_ROUNDS_PER_HEIGHT = 10_000` constant to lib.rs with `debug_assert!` in `QuorumCertificate::view()` to catch collision at round ≥ 10_000 in test builds. Deleted dead `sign_local_precommit` method (had the same raw-round bug, never called from production). Added two regressions: R-PV-1 (`proposal_view_monotonic_across_heights`) uses a `MonotonicSignCtx` mock — propose(h=1,r=5) sets slot=10005, propose(h=2,r=1) must succeed with view=20001; R-PV-2 (`view_no_collision_within_safe_range`) verifies adjacent-height difference = 10_000, adjacent-round difference = 1, and view(H,R) < view(H+1,1) for all R in 1..9999. All 11 engine unit tests pass in sandbox.
 
 **Acceptance gate:**
 
