@@ -1641,10 +1641,23 @@ pub struct QuorumCertificate {
     pub votes:      Vec<Vote>,
 }
 
+/// Maximum rounds per height before the global view formula `height × MAX_ROUNDS_PER_HEIGHT + round`
+/// would produce a collision between height H round R and height H+1 round R-MAX_ROUNDS_PER_HEIGHT.
+/// A round this high is impossible in practice (even one round per millisecond for 10 seconds
+/// gives only 10 000 rounds), but `view()` asserts this in debug builds so the invariant is
+/// machine-checked in tests.
+pub const MAX_ROUNDS_PER_HEIGHT: u32 = 10_000;
+
 impl QuorumCertificate {
     /// Canonical view number: used for ordering QCs across heights and rounds.
+    /// `round` must be < MAX_ROUNDS_PER_HEIGHT (asserted in debug builds).
     pub fn view(height: BlockHeight, round: Round) -> u64 {
-        (height as u64) * 10_000 + (round as u64)
+        debug_assert!(
+            round < MAX_ROUNDS_PER_HEIGHT,
+            "round {round} >= MAX_ROUNDS_PER_HEIGHT ({MAX_ROUNDS_PER_HEIGHT}): \
+             view(H, R) would collide with view(H+1, R - MAX_ROUNDS_PER_HEIGHT)"
+        );
+        (height as u64) * (MAX_ROUNDS_PER_HEIGHT as u64) + (round as u64)
     }
 
     /// Total voting power represented in this QC.

@@ -268,48 +268,6 @@ impl PqHotStuffEngine {
         self.pending_proposal = None;
     }
 
-    /// Produce a signed precommit vote for the local validator (QAT-07).
-    /// Returns the signature bytes; the caller builds the wire `VoteMessage`.
-    /// Returns empty vec when no signing context is attached (sign-later mode).
-    pub fn sign_local_precommit(
-        &mut self,
-        block_hash: &BlockHash,
-        parent_hash: &BlockHash,
-        parent_round: Round,
-        qc_round: Round,
-    ) -> Result<Vec<u8>, ConsensusError> {
-        if let Some(ctx) = self.signing_ctx.as_mut() {
-            let block_id = sha3_32(block_hash.0.as_bytes());
-            let parent_id = sha3_32(parent_hash.0.as_bytes());
-            match ctx.sign_vote(
-                &self.config.chain_id,
-                self.epoch,
-                self.round as u64,
-                block_id,
-                parent_id,
-                parent_round as u64,
-                qc_round as u64,
-            ) {
-                Ok(s) => Ok(s.signature),
-                // FloorViolation: safety store floor is above the current round, which
-                // happens when a validator restarts without its persisted chain state and
-                // the view has not yet caught up to the previous session's floor.
-                // Return an empty sig so the validator acts as an observer until the view
-                // advances above the floor. Any other error is fatal.
-                Err(ref e) if e.contains("FloorViolation") => {
-                    tracing::warn!(
-                        epoch = self.epoch, round = self.round, height = self.height,
-                        error = %e,
-                        "sign_local_precommit: FloorViolation — returning empty sig (observer mode until view catches up)"
-                    );
-                    Ok(vec![])
-                }
-                Err(e) => Err(ConsensusError::Internal(e)),
-            }
-        } else {
-            Ok(vec![])
-        }
-    }
 
     /// Return the proposer `ValidatorId` for a given (height, round).
     pub fn proposer_for(&self, height: BlockHeight, round: Round) -> Option<ValidatorId> {
@@ -1037,5 +995,107 @@ mod tests {
         assert_eq!(e.locked_qc().round, lock_before,
             "timeout must not modify locked_qc");
         assert_eq!(e.current_round(), 3);
+    }
+
+    // ── Regression: proposal signing uses global view (R-PV-1) ───────────────
+    //
+    // Before the fix, `propose()` passed raw `round as u64` to `sign_proposal`.
+    // The safety store's Proposal slot persists across heights within an epoch, so
+    // after committing height=1 at round=5 (slot round=5), signing a proposal for
+    // round=1 of height=2 triggered RoundBelowSigned (1 < 5).  Every new height then
+    // needed R rounds of stall timeouts before the first proposal could succeed.
+    //
+    // The fix passes `QuorumCertificate::view(height, round)` = height×10_000+round,
+    // so view(1,5)=10005 and view(2,1)=20001 — strictly increasing across heights.
+    //
+    // This mock enforces the same RoundBelowSigned rule as the real SafetyStore, so
+    // the test fails under the unfixed code and passes after the fix.
+
+    struct MonotonicProposalCtx {
+        last_view: u64,
+    }
+    impl crate::pq_hotstuff::signing::EngineSigningContext for MonotonicProposalCtx {
+        fn restore(&self) -> crate::pq_hotstuff::signing::RestoredFloors {
+            crate::pq_hotstuff::signing::RestoredFloors::default()
+        }
+        fn sign_vote(&mut self, _: &str, _: u64, _: u64, _: [u8;32], _: [u8;32], _: u64, _: u64)
+            -> Result<crate::pq_hotstuff::signing::SignedVote, String>
+        {
+            Ok(crate::pq_hotstuff::signing::SignedVote { message: vec![], signature: vec![], resent: false })
+        }
+        fn sign_timeout(&mut self, _: &str, _: u64, _: u64, _: u64)
+            -> Result<crate::pq_hotstuff::signing::SignedTimeout, String>
+        {
+            Ok(crate::pq_hotstuff::signing::SignedTimeout { message: vec![], signature: vec![], resent: false })
+        }
+        fn sign_proposal(&mut self, _epoch: u64, round: u64, _block_id: [u8; 32])
+            -> Result<crate::pq_hotstuff::signing::SignedProposal, String>
+        {
+            if round <= self.last_view {
+                return Err(format!(
+                    "RoundBelowSigned: slot {} >= requested {}",
+                    self.last_view, round
+                ));
+            }
+            self.last_view = round;
+            Ok(crate::pq_hotstuff::signing::SignedProposal {
+                message: vec![], signature: vec![], resent: false,
+            })
+        }
+        fn write_seal(&mut self, _: u64, _: u64) -> Result<(), String> { Ok(()) }
+        fn advance_epoch_record(&mut self, _: u64, _: [u8;32], _: [u8;32]) -> Result<(), String> { Ok(()) }
+    }
+
+    // R-PV-1: proposal at round=1 of height=2 must succeed after height=1 committed at round=5.
+    // Raw-round regression: slot=5, then round=1 → RoundBelowSigned (1 < 5).
+    // Global-view fix:       slot=10005, then view(2,1)=20001 > 10005 → OK.
+    #[tokio::test]
+    async fn proposal_view_monotonic_across_heights() {
+        let parent = BlockHash("genesis_h1".into());
+
+        // Establish a slot at view(1, 5) = 10005.
+        let mut e = engine().await;
+        e.attach_signing_context(Box::new(MonotonicProposalCtx { last_view: 0 }));
+        e.propose(1, 5, parent.clone(), vec![]).await
+            .expect("propose(h=1, r=5) should succeed");
+
+        // Now propose at the START of the next height (round=1 resets).
+        // view(2, 1) = 20001 > 10005 → must succeed.
+        // Under the unfixed code (raw round): 1 < 5 → RoundBelowSigned.
+        let result = e.propose(2, 1, parent, vec![]).await;
+        assert!(
+            result.is_ok(),
+            "propose(h=2, r=1) must succeed after propose(h=1, r=5): \
+             global view 20001 > 10005. \
+             RoundBelowSigned here means the fix regressed (raw round used instead of view): {result:?}"
+        );
+    }
+
+    // R-PV-2: view collision boundary — round must stay below MAX_ROUNDS_PER_HEIGHT.
+    // view(H, MAX_ROUNDS_PER_HEIGHT) would equal view(H+1, 0), and
+    // view(H, MAX_ROUNDS_PER_HEIGHT+1) would equal view(H+1, 1).
+    // debug_assert! in QuorumCertificate::view catches this in test builds.
+    #[test]
+    fn view_no_collision_within_safe_range() {
+        // Any two (height, round) pairs with round < MAX_ROUNDS_PER_HEIGHT must have distinct views.
+        let mrph = 10_000u64; // = MAX_ROUNDS_PER_HEIGHT
+        // Adjacent heights, same round → views differ by exactly MAX_ROUNDS_PER_HEIGHT.
+        for round in 1u32..=5 {
+            let v1 = crate::QuorumCertificate::view(1, round);
+            let v2 = crate::QuorumCertificate::view(2, round);
+            assert_eq!(v2 - v1, mrph, "adjacent heights must differ by MAX_ROUNDS_PER_HEIGHT");
+        }
+        // Same height, adjacent rounds → views differ by 1.
+        for round in 1u32..=4 {
+            let v1 = crate::QuorumCertificate::view(3, round);
+            let v2 = crate::QuorumCertificate::view(3, round + 1);
+            assert_eq!(v2 - v1, 1, "adjacent rounds in same height must differ by 1");
+        }
+        // view(H, R) is strictly less than view(H+1, 1) for all R < MAX_ROUNDS_PER_HEIGHT.
+        for round in 1u32..9_999 {
+            let vH = crate::QuorumCertificate::view(7, round);
+            let vH1 = crate::QuorumCertificate::view(8, 1);
+            assert!(vH < vH1, "view(H, {round}) must be < view(H+1, 1)");
+        }
     }
 }
