@@ -2317,7 +2317,12 @@ impl Node {
                 std::fs::create_dir_all(&dir)
                     .map_err(|e| format!("cannot create pq-safety dir {:?}: {e}", dir))?;
                 let counter_path = dir.join("counter.bin");
-                let fresh = !dir.join("safety_state.cbor").exists();
+                // Use the counter file as the existence indicator: FsCounter::create
+                // writes it on first init; FsCounter::open reads it on restart.
+                // Previously we checked safety_state.cbor, but SafetyStore uses a
+                // different internal marker that can exist even when safety_state.cbor
+                // does not, causing initialize_fresh to fail on restart.
+                let fresh = !counter_path.exists();
                 if fresh {
                     let st = FsStorage::new(&dir)
                         .map_err(|e| format!("FsStorage: {e}"))?;
