@@ -4559,6 +4559,11 @@ impl Node {
                 ));
             }
         }
+        // PQ-HotStuff embeds the CommitCertificate in the engine, not the block payload.
+        // Use `cert` directly; Tendermint nodes embed last_commit in the payload.
+        #[cfg(feature = "pq-hotstuff")]
+        let participation = Some(cert.clone());
+        #[cfg(not(feature = "pq-hotstuff"))]
         let participation = payload.last_commit.clone();
         let txs: Vec<Transaction> = payload.txs;
         self.remove_committed_from_mempool(&txs);
