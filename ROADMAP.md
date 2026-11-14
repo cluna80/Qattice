@@ -106,6 +106,15 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 cargo test -p chain-forge-node --features pq-hotstuff --test pqhs2_4node_epoch_live -- --nocapture
 ```
 
+**Open design question (different-set handoff, not blocking this milestone):**
+See `docs/pq-hotstuff-002-handoff-trace.md`. This milestone confirmed the
+same-validator-set trace. Before dynamic membership (V0 ≠ V1) is approved,
+three distinct claims in `verify_handoff_proof` must be evaluated: quorum
+signature (currently established), finality under the same-height
+consecutive-round rule (gap: trigger QC not stored), and outgoing cutoff for
+removed validators. The spec §6 commit rule description also needs correction
+to match the implementation. Branch unchanged pending owner decisions.
+
 ---
 
 ## QAT-07 authenticated epoch-change devnet complete — 2026-11-12
