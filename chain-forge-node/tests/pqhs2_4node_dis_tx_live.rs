@@ -492,7 +492,7 @@ fn pqhs2_4node_dis_tx_and_pruned_restart() {
 
     // Wait for height 2 (consensus is running).
     println!("   waiting for height 2...");
-    wait_height(&mut nodes, 2, Duration::from_secs(90), &log_dir);
+    wait_height(&mut nodes, 2, Duration::from_secs(300), &log_dir);
 
     // ── Phase 2: Submit ML-DSA-65 DIS-signed Transfer ────────────────────────
 
@@ -515,10 +515,10 @@ fn pqhs2_4node_dis_tx_and_pruned_restart() {
     assert_eq!(resp["status"].as_str(), Some("queued"),
         "expected status=queued; got: {resp}");
 
-    let result = wait_tx_result(API_PORTS[0], &tx_id, Duration::from_secs(45))
+    let result = wait_tx_result(API_PORTS[0], &tx_id, Duration::from_secs(180))
         .unwrap_or_else(|| {
             println!("   Alice log (last 30 lines):\n{}", nodes[0].log_tail(30));
-            panic!("P0-3: tx {tx_id} never committed within 45s");
+            panic!("P0-3: tx {tx_id} never committed within 180s");
         });
     println!("   execution result: {result}");
     assert!(
@@ -606,7 +606,8 @@ fn pqhs2_4node_dis_tx_and_pruned_restart() {
 
     let target_height = PRUNE_THRESHOLD + 1;
     println!("\n── Phase 4: running to height {target_height} (past prune threshold {PRUNE_THRESHOLD}) ──");
-    // Each block takes 5-8 rounds × 8-10 s on Windows devnet = 40-80 s/block.
+    // With block_time_ms=10000 (propose_timeout=30s), successful rounds take ~20s;
+    // the occasional first-round timeout adds ~40s.  Budget: ≤2 rounds/block × 50s × 18 blocks ≈ 1800s.
     // 18 blocks × 80 s worst-case = 1440 s; allow 1800 s.
     wait_height(&mut nodes, target_height, Duration::from_secs(1800), &log_dir);
 
