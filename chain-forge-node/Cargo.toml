@@ -195,3 +195,13 @@ required-features = ["pq-hotstuff"]
 name = "pqhs2_4node_pruning_live"
 path = "tests/pqhs2_4node_pruning_live.rs"
 required-features = ["pq-hotstuff"]
+
+[[test]]
+name = "h0_4_nonce_replay_live"
+path = "tests/h0_4_nonce_replay_live.rs"
+required-features = ["pq-hotstuff"]
+
+[[test]]
+name = "h0_6_keybind_race_live"
+path = "tests/h0_6_keybind_race_live.rs"
+required-features = ["pq-hotstuff"]
