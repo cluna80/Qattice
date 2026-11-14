@@ -1,5 +1,32 @@
 # Qattice — Public Testnet Alpha: ML-DSA-65 + PQ-HotStuff Launch Plan
 
+## Full stack re-confirmation — 2026-11-14
+
+✅ **All five suites Windows-confirmed on integration candidate** (owner-run, BossKing MINGW64, `feat/vote-format-v2` at `a7c2f5a`)
+
+Re-run after stack review of PRs #160 → #161 → #164. All production src changes were present at their tested revision; the five suites cover the entire diff of #164.
+
+| Suite | Features | Result | Time |
+|---|---|---|---|
+| `prop_vote_format` | `pq-hotstuff` | 12/12 ✅ | 0.17s |
+| `prop_handoff` | `epoch-transition` | 6/6 ✅ | 0.30s |
+| `prop_sign_verify` | `real-pqc` | 6/6 ✅ | 1.24s |
+| `pqhs2_4node_epoch_live` (2 tests) | `pq-hotstuff` | 2/2 ✅ | 63.17s |
+| `pqhs2_4node_pruning_live` | `pq-hotstuff` | 1/1 ✅ | 223.45s |
+
+**Run commands:**
+```
+cargo test -p chain-forge-consensus --features pq-hotstuff --test prop_vote_format -- --nocapture
+cargo test -p chain-forge-consensus --features epoch-transition --test prop_handoff -- --nocapture
+cargo test -p chain-forge-crypto --features real-pqc --test prop_sign_verify -- --nocapture
+cargo test -p chain-forge-node --features pq-hotstuff --test pqhs2_4node_epoch_live -- --nocapture
+cargo test -p chain-forge-node --features pq-hotstuff --test pqhs2_4node_pruning_live -- --nocapture
+```
+
+The stack is clean. #164 is ready to merge into #161 when #161 and #160 are approved.
+
+---
+
 ## vote-format v2 property tests — sandbox pass, Windows pending — 2026-11-12
 
 **Branch:** `feat/vote-format-v2` — commits `2037c7a` (format change) + `3813fe2` (property tests)
