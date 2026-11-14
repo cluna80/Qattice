@@ -344,16 +344,23 @@ fn pqhs2_4node_fixed_set_pruning() {
     // persisted snapshot and must reflect the prune that fires at block 21.
     let alice_dir      = dat_dir.join("alice");
     let snaps_dir      = alice_dir.join("snapshots");
+    // The write protocol writes manifest.json LAST as the commit signal; any gen-*
+    // directory that exists but lacks a manifest.json is a mid-write in-progress
+    // generation and must be skipped.  Pick the highest-numbered committed one.
     let mut gens: Vec<String> = std::fs::read_dir(&snaps_dir)
         .unwrap_or_else(|e| panic!("cannot read alice/snapshots/: {e}"))
         .filter_map(|e| {
-            let name = e.ok()?.file_name().to_string_lossy().into_owned();
-            if name.starts_with("gen-") { Some(name) } else { None }
+            let entry = e.ok()?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with("gen-") { return None; }
+            // Only include committed (fully-written) generations.
+            if !snaps_dir.join(&name).join("manifest.json").exists() { return None; }
+            Some(name)
         })
         .collect();
     gens.sort();  // zero-padded names sort numerically
     let latest_gen = gens.last()
-        .unwrap_or_else(|| panic!("no gen-* directories found under alice/snapshots/"));
+        .unwrap_or_else(|| panic!("no committed gen-* directories found under alice/snapshots/"));
     let alice_cs_path = snaps_dir.join(latest_gen).join("chain_store.json");
     println!("   latest gen: {latest_gen}  reading {alice_cs_path:?}");
     let cs_text = std::fs::read_to_string(&alice_cs_path)
