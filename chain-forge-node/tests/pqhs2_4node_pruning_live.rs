@@ -334,46 +334,69 @@ fn pqhs2_4node_fixed_set_pruning() {
     // every commit_block call.
 
     println!("\n── Phase 3: verifying height 1 is absent from alice's chain_store.json ──");
-    // Give alice's process a moment to finish writing the snapshot after height 21.
-    std::thread::sleep(Duration::from_millis(500));
-    // State is persisted under data_dir/snapshots/gen-NNNNNN/ (generation-based
-    // snapshot layout).  CURRENT may still point to gen-000020 (the snapshot written
-    // at state-height 20, containing chain_store keys 1..=20) if the atomic rename
-    // for gen-000021 hasn't landed yet.  Avoid that race by scanning all gen-*
-    // directories and reading the highest-numbered one, which is the most recent
-    // persisted snapshot and must reflect the prune that fires at block 21.
-    let alice_dir      = dat_dir.join("alice");
-    let snaps_dir      = alice_dir.join("snapshots");
-    // The write protocol writes manifest.json LAST as the commit signal; any gen-*
-    // directory that exists but lacks a manifest.json is a mid-write in-progress
-    // generation and must be skipped.  Pick the highest-numbered committed one.
-    let mut gens: Vec<String> = std::fs::read_dir(&snaps_dir)
-        .unwrap_or_else(|e| panic!("cannot read alice/snapshots/: {e}"))
-        .filter_map(|e| {
-            let entry = e.ok()?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if !name.starts_with("gen-") { return None; }
-            // Only include committed (fully-written) generations.
-            if !snaps_dir.join(&name).join("manifest.json").exists() { return None; }
-            Some(name)
-        })
-        .collect();
-    gens.sort();  // zero-padded names sort numerically
-    let latest_gen = gens.last()
-        .unwrap_or_else(|| panic!("no committed gen-* directories found under alice/snapshots/"));
-    let alice_cs_path = snaps_dir.join(latest_gen).join("chain_store.json");
-    println!("   latest gen: {latest_gen}  reading {alice_cs_path:?}");
-    let cs_text = std::fs::read_to_string(&alice_cs_path)
-        .unwrap_or_else(|e| panic!("cannot read {alice_cs_path:?}: {e}"));
-    let cs: serde_json::Value = serde_json::from_str(&cs_text)
-        .unwrap_or_else(|e| panic!("chain_store.json is not valid JSON: {e}"));
-    let keys: Vec<&str> = cs.as_object()
-        .map(|m| { let mut v: Vec<&str> = m.keys().map(|s| s.as_str()).collect(); v.sort(); v })
-        .unwrap_or_default();
-    println!("   chain_store.json height keys: {:?}", &keys[..keys.len().min(6)]);
-    assert!(!keys.contains(&"1"),
-        "chain_store.json still contains height 1 after pruning (watermark=2);\
-         \n  latest gen: {latest_gen}  all keys: {keys:?}");
+    // State is persisted under data_dir/snapshots/gen-NNNNNN/.  The key timing
+    // issue: /api/status returns height=21 BEFORE persist_state() fires (the
+    // status lock is updated earlier in commit_block).  So when Phase 2 finishes
+    // and we arrive here, alice's gen-000020 may still be the latest committed
+    // snapshot (height 20's snapshot with keys 1..=20); gen-000021 may not yet
+    // exist or may be mid-write.
+    //
+    // Strategy: poll until we find a committed generation (has manifest.json)
+    // whose chain_store.json does NOT contain key "1", with a 30 s timeout.
+    // Phase 2 already confirmed watermark=2 so the prune will fire; we are only
+    // waiting for the persist to land.
+    let alice_dir  = dat_dir.join("alice");
+    let snaps_dir  = alice_dir.join("snapshots");
+    let p3_deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let (pruned_gen, pruned_keys) = loop {
+        // Collect only committed generations (manifest.json present).
+        let mut gens: Vec<String> = std::fs::read_dir(&snaps_dir)
+            .unwrap_or_else(|e| panic!("cannot read alice/snapshots/: {e}"))
+            .filter_map(|e| {
+                let entry = e.ok()?;
+                let name  = entry.file_name().to_string_lossy().into_owned();
+                if !name.starts_with("gen-") { return None; }
+                if !snaps_dir.join(&name).join("manifest.json").exists() { return None; }
+                Some(name)
+            })
+            .collect();
+        gens.sort();  // zero-padded names sort numerically (highest last)
+        // Check from newest to oldest; stop at the first one without key "1".
+        let found = gens.iter().rev().find_map(|gen| {
+            let path = snaps_dir.join(gen).join("chain_store.json");
+            let text = std::fs::read_to_string(&path).ok()?;
+            let cs: serde_json::Value = serde_json::from_str(&text).ok()?;
+            let obj = cs.as_object()?;
+            if obj.contains_key("1") { return None; }
+            let mut keys: Vec<String> = obj.keys().cloned().collect();
+            keys.sort();
+            Some((gen.clone(), keys))
+        });
+        if let Some(result) = found {
+            break result;
+        }
+        if std::time::Instant::now() >= p3_deadline {
+            // Dump what we found for diagnostics.
+            let latest = gens.last().map(|s| s.as_str()).unwrap_or("(none)");
+            let keys_msg = gens.last().and_then(|gen| {
+                let p = snaps_dir.join(gen).join("chain_store.json");
+                let t = std::fs::read_to_string(p).ok()?;
+                let cs: serde_json::Value = serde_json::from_str(&t).ok()?;
+                let mut ks: Vec<String> = cs.as_object()?.keys().cloned().collect();
+                ks.sort();
+                Some(format!("{ks:?}"))
+            }).unwrap_or_else(|| "(unreadable)".into());
+            panic!(
+                "timed out waiting for a committed gen without height 1 (30s);\
+                 \n  latest committed gen: {latest}  all keys: {keys_msg}"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    println!("   latest pruned gen: {pruned_gen}");
+    println!("   chain_store.json height keys: {:?}", &pruned_keys[..pruned_keys.len().min(6)]);
+    assert!(!pruned_keys.iter().any(|k| k == "1"),
+        "chain_store.json still contains height 1 (this branch should be unreachable)");
     println!("   ✓ height 1 is absent from chain_store.json (pruned)");
 
     // ── Phase 4: Agreement at current tip ────────────────────────────────────
