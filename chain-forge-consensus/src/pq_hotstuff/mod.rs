@@ -5,3 +5,7 @@
 pub mod wire;
 pub mod safety;
 pub mod engine;
+pub mod signing;
+#[cfg(feature = "epoch-transition")]
+pub mod epoch_handoff;
+pub mod epoch_payload;

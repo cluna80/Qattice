@@ -696,6 +696,9 @@ pub trait ConsensusEngine: Send + Sync {
 
     /// Restore voting state persisted at the current height (after restart).
     fn restore_lock_state(&mut self, _state: LockState) -> ConsensusResult<()> { Ok(()) }
+
+    /// Current epoch number. Default 1 (non-breaking for Tendermint / HotStuff).
+    fn current_epoch(&self) -> u64 { 1 }
 }
 
 // ── Personhood power cap enforcement ─────────────────────────────────────────
@@ -1402,6 +1405,12 @@ pub mod pq_hotstuff;
 
 #[cfg(feature = "pq-hotstuff")]
 pub use pq_hotstuff::engine::PqHotStuffEngine;
+
+#[cfg(feature = "pq-hotstuff")]
+pub use pq_hotstuff::epoch_payload::{
+    decode_epoch_change_payload, encode_epoch_change_payload, EPOCH_CHANGE_MAGIC,
+};
+
 
 pub mod tendermint {
     use super::*;

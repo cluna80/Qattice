@@ -223,7 +223,9 @@ None of these are predictions. They are possibilities the verification primitive
 
 Validator voting power is weighted by verified personhood, not stake. Each verified human can control a bounded amount of validator influence regardless of how much QCB they hold. This directly ties consensus security to the same identity primitive that governs Grand Challenge reward claims and governance votes.
 
-> **Implementation status:** Tendermint-style BFT confirmed operational on a 4-node devnet. HotStuff-style and XRPL-inspired FBA variants also implemented and tested — all three share the same pluggable ConsensusEngine interface. Partition tolerance, liveness slashing, equivocation detection, and adversarial libp2p gossip tests all confirmed on the live devnet. Personhood-weighting overlay is the next Phase 1 milestone.
+> **Implementation status:** Tendermint-style BFT confirmed operational on a 4-node devnet. HotStuff-style and XRPL-inspired FBA variants also implemented and tested — all three share the same pluggable ConsensusEngine interface. Partition tolerance, liveness slashing, equivocation detection, and adversarial libp2p gossip tests all confirmed on the live devnet.
+>
+> **PQ-HotStuff-2** (`pq-hotstuff` feature, November 2026): the native PQ-HotStuff-2 engine is implemented and running on a 4-node ML-DSA-65 devnet. Authenticated epoch-change (epoch 0→1) with real ML-DSA-65 signatures has been demonstrated end-to-end: `verify_handoff_proof` verifies the outgoing-set signatures on the epoch-change commit certificate, the validator set transitions, and blocks continue finalizing in epoch 1 — all confirmed on Windows (BossKing, MINGW64). Personhood-weighting overlay is the next milestone.
 
 ### 3.2 Why Not Proof of Work or Plain Proof of Stake
 

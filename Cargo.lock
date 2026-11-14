@@ -787,6 +787,8 @@ dependencies = [
  "chain-forge-core",
  "chain-forge-crypto",
  "chain-forge-vca-pq",
+ "crc32fast",
+ "hex",
  "serde",
  "serde_json",
  "sha3",

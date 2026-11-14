@@ -281,6 +281,8 @@ pub struct BlockSummary {
     /// Round in which the block was decided.
     pub round:      u32,
     pub state_root: String,
+    /// Epoch number at the time this block was committed (1-based; advances on epoch-change commits).
+    pub epoch: u64,
     pub timestamp_ms: u64,
     pub tx_count:   usize,
     pub tx_ids:     Vec<String>,
@@ -1203,6 +1205,15 @@ impl Node {
             chain_forge_core::BftVariant::HotStuff   => ConsensusVariant::HotStuffStyle,
             chain_forge_core::BftVariant::Fba        => ConsensusVariant::XrplInspired,
             chain_forge_core::BftVariant::Tendermint => ConsensusVariant::TendermintStyle,
+            chain_forge_core::BftVariant::PqHotStuff => {
+                #[cfg(not(feature = "pq-hotstuff"))]
+                return Err(NodeError::Genesis(
+                    "genesis selects pq-hotstuff but the node was built without \
+                     --features pq-hotstuff; rebuild with that feature enabled".to_string()
+                ));
+                #[cfg(feature = "pq-hotstuff")]
+                ConsensusVariant::PqHotStuff
+            }
         };
         if desired_variant != ConsensusVariant::TendermintStyle {
             tracing::warn!(variant = ?desired_variant,
@@ -1234,6 +1245,13 @@ impl Node {
             }
             ConsensusVariant::XrplInspired => {
                 let mut e = FbaEngine::new();
+                e.init(consensus_cfg, genesis_vs).await
+                    .map_err(|e| NodeError::Consensus(e.to_string()))?;
+                Box::new(e)
+            }
+            #[cfg(feature = "pq-hotstuff")]
+            ConsensusVariant::PqHotStuff => {
+                let mut e = chain_forge_consensus::PqHotStuffEngine::new();
                 e.init(consensus_cfg, genesis_vs).await
                     .map_err(|e| NodeError::Consensus(e.to_string()))?;
                 Box::new(e)
@@ -2777,6 +2795,7 @@ impl Node {
                         round:        cert.round,
                         state_root:   root_after(proposal.height)
                             .unwrap_or_else(|| proposal.block_hash.0.clone()),
+                        epoch:        1, // replay path: epoch not tracked in block store
                         timestamp_ms: proposal.timestamp_ms,
                         tx_count:     tx_ids.len(),
                         tx_ids,
@@ -3398,8 +3417,25 @@ impl Node {
                         } else {
                             match self.cast_and_broadcast_own_votes(&proposal).await {
                                 Ok(Some(cert)) => {
-                                    if let Err(e) = self.commit_block(cert, &proposal).await {
-                                        error!(error = %e, "commit failed after reaching quorum via own vote");
+                                    // The two-chain commit cert is for the previous
+                                    // locked QC (cert.round = R-1), not the current
+                                    // proposal's round (R). Use cert coords to find it.
+                                    let commit_proposal = if cert.round == proposal.round {
+                                        Some(proposal.clone())
+                                    } else {
+                                        self.pending_proposals
+                                            .get(&(cert.height, cert.round))
+                                            .cloned()
+                                    };
+                                    match commit_proposal {
+                                        Some(p) => {
+                                            if let Err(e) = self.commit_block(cert, &p).await {
+                                                error!(error = %e, "commit failed after reaching quorum via own vote");
+                                            }
+                                        }
+                                        None => {
+                                            self.pending_certs.insert((cert.height, cert.round), cert);
+                                        }
                                     }
                                 }
                                 Ok(None) => {}
@@ -3491,8 +3527,11 @@ impl Node {
                                 let epoch = self.consensus.current_height();
                                 self.handle_drained_equivocations(eqs, epoch);
 
+                                // The two-chain commit cert is for the *previous*
+                                // locked QC (cert.round = R-1), not the vote's
+                                // round (R). Look up the proposal by cert's coords.
                                 let proposal = self.pending_proposals
-                                    .get(&(vote.height, vote.round))
+                                    .get(&(cert.height, cert.round))
                                     .cloned();
                                 match proposal {
                                     Some(p) => {
@@ -3509,13 +3548,13 @@ impl Node {
                                         // can commit the moment the body lands, without
                                         // needing to call receive_vote again.
                                         warn!(
-                                            height = vote.height,
-                                            round  = vote.round,
+                                            height = cert.height,
+                                            round  = cert.round,
                                             "quorum reached but proposal not yet seen; \
                                              parking certificate for deferred commit"
                                         );
                                         self.pending_certs
-                                            .insert((vote.height, vote.round), cert);
+                                            .insert((cert.height, cert.round), cert);
                                     }
                                 }
                             }
@@ -4451,6 +4490,21 @@ impl Node {
 
     /// is unchanged and still used for the solo-devnet (no peers) path,
     /// where the proposer synthesises every validator's vote itself.
+    /// Decode the epoch-change payload from a committed proposal, if any.
+    /// Returns `Ok(None)` for ordinary blocks, `Ok(Some(vs))` for a valid
+    /// epoch-change payload, or `Err` when the magic is present but the
+    /// content is malformed (fails closed — caller must NOT proceed with commit).
+    #[cfg(feature = "pq-hotstuff")]
+    fn decode_epoch_change(
+        &self,
+        proposal: &chain_forge_consensus::BlockProposal,
+    ) -> Result<Option<chain_forge_consensus::ValidatorSet>, String> {
+        if self.consensus.variant() != chain_forge_consensus::ConsensusVariant::PqHotStuff {
+            return Ok(None);
+        }
+        chain_forge_consensus::decode_epoch_change_payload(&proposal.tx_data)
+    }
+
     async fn commit_block(
         &mut self,
         cert: chain_forge_consensus::CommitCertificate,
@@ -5391,7 +5445,21 @@ impl Node {
 
         self.sync_registry_pop_from_validator_set();
 
-        self.consensus.on_commit(cert.clone(), None).await
+        // Capture the epoch of the block being committed (before on_commit advances it).
+        let committed_epoch = self.consensus.current_epoch();
+
+        #[cfg(feature = "pq-hotstuff")]
+        let epoch_change_vs = match self.decode_epoch_change(proposal) {
+            Ok(vs) => vs,
+            Err(e) => {
+                warn!(height = cert.height, "epoch-change payload malformed, rejecting commit: {e}");
+                return Err(e);
+            }
+        };
+        #[cfg(not(feature = "pq-hotstuff"))]
+        let epoch_change_vs: Option<chain_forge_consensus::ValidatorSet> = None;
+
+        self.consensus.on_commit(cert.clone(), epoch_change_vs).await
             .map_err(|e| e.to_string())?;
 
         {
@@ -5426,6 +5494,7 @@ impl Node {
                 block_hash:   cert.block_hash.0.clone(),
                 round:        cert.round,
                 state_root:   exec_result.state_root.clone(),
+                epoch:        committed_epoch,
                 timestamp_ms: block_ts,
                 tx_count:     tx_ids.len(),
                 tx_ids,
@@ -5570,6 +5639,15 @@ impl Node {
                 "block payload is {} bytes, limit max_block_bytes {max_block_bytes}", proposal.tx_data.len()
             ));
         }
+        // PQ-HotStuff epoch-change payloads use the PQHS-EC1 binary format, not
+        // BlockPayload. Skip the BlockPayload checks for them entirely; the engine
+        // validates them in on_commit via decode_epoch_change_payload.
+        #[cfg(feature = "pq-hotstuff")]
+        if self.consensus.variant() == ConsensusVariant::PqHotStuff
+            && proposal.tx_data.starts_with(chain_forge_consensus::EPOCH_CHANGE_MAGIC)
+        {
+            return Ok(());
+        }
         let payload = BlockPayload::decode(&proposal.tx_data);
         if payload.version != BLOCK_PAYLOAD_VERSION {
             return Err(format!(
@@ -5599,6 +5677,13 @@ impl Node {
             if payload.last_commit.is_some() {
                 return Err("a height-0 block cannot carry a last_commit".into());
             }
+            return Ok(());
+        }
+        // PQ-HotStuff-2 uses a two-chain commit internal to the engine; block
+        // payloads carry no last_commit certificate. Skip the Tendermint-specific
+        // commit-evidence check for this variant.
+        #[cfg(feature = "pq-hotstuff")]
+        if self.consensus.variant() == ConsensusVariant::PqHotStuff {
             return Ok(());
         }
         let lc = payload.last_commit.as_ref()
@@ -6167,6 +6252,26 @@ impl Node {
               evidence_precommits = payload.last_commit.as_ref().map_or(0, |c| c.precommits.len()),
               included_txs = txs.len(),
               "propose context");
+        // PQ-HotStuff epoch-change: if genesis configures an epoch-change at this
+        // height, replace tx_bytes with the typed PQHS-EC1 epoch-change payload.
+        #[cfg(feature = "pq-hotstuff")]
+        let tx_bytes = {
+            let ec_height = self.genesis.pqhs_epoch_change.as_ref()
+                .and_then(|v| v.get("at_height"))
+                .and_then(|h| h.as_u64());
+            if ec_height == Some(height)
+                && self.consensus.variant() == chain_forge_consensus::ConsensusVariant::PqHotStuff
+            {
+                let new_epoch = self.genesis.pqhs_epoch_change.as_ref()
+                    .and_then(|v| v.get("new_epoch"))
+                    .and_then(|e| e.as_u64())
+                    .unwrap_or(2);
+                let vs = self.consensus.validator_set().clone();
+                chain_forge_consensus::encode_epoch_change_payload(new_epoch, &vs)
+            } else {
+                tx_bytes
+            }
+        };
         let parent = BlockHash(format!("genesis_h{height}"));
         match self.consensus.propose(height, round, parent, tx_bytes).await {
             Ok(proposal) => {
@@ -6204,6 +6309,26 @@ impl Node {
               evidence_precommits = payload.last_commit.as_ref().map_or(0, |c| c.precommits.len()),
               included_txs = txs.len(),
               "propose context");
+        // PQ-HotStuff epoch-change: if genesis configures an epoch-change at this
+        // height, replace tx_bytes with the typed PQHS-EC1 epoch-change payload.
+        #[cfg(feature = "pq-hotstuff")]
+        let tx_bytes = {
+            let ec_height = self.genesis.pqhs_epoch_change.as_ref()
+                .and_then(|v| v.get("at_height"))
+                .and_then(|h| h.as_u64());
+            if ec_height == Some(height)
+                && self.consensus.variant() == chain_forge_consensus::ConsensusVariant::PqHotStuff
+            {
+                let new_epoch = self.genesis.pqhs_epoch_change.as_ref()
+                    .and_then(|v| v.get("new_epoch"))
+                    .and_then(|e| e.as_u64())
+                    .unwrap_or(2);
+                let vs = self.consensus.validator_set().clone();
+                chain_forge_consensus::encode_epoch_change_payload(new_epoch, &vs)
+            } else {
+                tx_bytes
+            }
+        };
 
         let proposal = self.consensus
             .propose(height, round, parent_hash, tx_bytes)
@@ -6248,6 +6373,27 @@ impl Node {
         let mut txs = payload.txs.clone();
         let evidence = payload.evidence.clone();
         let tx_bytes = payload.encode();
+
+        // PQ-HotStuff epoch-change: if genesis configures an epoch-change at this
+        // height, replace tx_bytes with the typed PQHS-EC1 epoch-change payload.
+        #[cfg(feature = "pq-hotstuff")]
+        let tx_bytes = {
+            let ec_height = self.genesis.pqhs_epoch_change.as_ref()
+                .and_then(|v| v.get("at_height"))
+                .and_then(|h| h.as_u64());
+            if ec_height == Some(height)
+                && self.consensus.variant() == chain_forge_consensus::ConsensusVariant::PqHotStuff
+            {
+                let new_epoch = self.genesis.pqhs_epoch_change.as_ref()
+                    .and_then(|v| v.get("new_epoch"))
+                    .and_then(|e| e.as_u64())
+                    .unwrap_or(2);
+                let vs = self.consensus.validator_set().clone();
+                chain_forge_consensus::encode_epoch_change_payload(new_epoch, &vs)
+            } else {
+                tx_bytes
+            }
+        };
 
         // Produce a proposal
         let proposal = self.consensus
@@ -6737,8 +6883,31 @@ impl Node {
 
         self.sync_registry_pop_from_validator_set();
 
+        // Capture the epoch of the block being committed (before on_commit advances it).
+        let committed_epoch = self.consensus.current_epoch();
+
+        // Look up the COMMITTED proposal (cert.height, cert.round), not the
+        // current proposal (which is for the NEXT height). The two-chain commit
+        // fires when processing height H+1, so `proposal` is at H+1 here.
+        #[cfg(feature = "pq-hotstuff")]
+        let epoch_change_vs = {
+            let committed_proposal = self.pending_proposals
+                .get(&(cert.height, cert.round))
+                .cloned();
+            match committed_proposal.as_ref().map(|p| self.decode_epoch_change(p)) {
+                Some(Ok(vs)) => vs,
+                Some(Err(e)) => {
+                    warn!(height = cert.height, "epoch-change payload malformed, rejecting commit: {e}");
+                    return Err(e);
+                }
+                None => None,
+            }
+        };
+        #[cfg(not(feature = "pq-hotstuff"))]
+        let epoch_change_vs: Option<chain_forge_consensus::ValidatorSet> = None;
+
         // Advance consensus to next height
-        self.consensus.on_commit(cert.clone(), None).await
+        self.consensus.on_commit(cert.clone(), epoch_change_vs).await
             .map_err(|e| e.to_string())?;
 
         // Update shared status
@@ -6777,6 +6946,7 @@ impl Node {
                 block_hash:   cert.block_hash.0.clone(),
                 round:        cert.round,
                 state_root:   exec_result.state_root.clone(),
+                epoch:        committed_epoch,
                 timestamp_ms: block_ts,
                 tx_count:     tx_ids.len(),
                 tx_ids,

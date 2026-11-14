@@ -406,6 +406,14 @@ pub struct GenesisConfig {
     /// runtime flag or environment variable can override it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<GenesisIdentity>,
+
+    /// PQ-HotStuff authenticated epoch-change configuration (devnet use only).
+    /// When present, the proposer at `at_height` injects a typed epoch-change
+    /// payload (`PQHS-EC1:` magic + JSON) into the block's `tx_data`. The new
+    /// validator set is built from the outgoing set at that height. Absent in
+    /// all production genesis files; absence is identical to omitting the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pqhs_epoch_change: Option<serde_json::Value>,
 }
 
 /// See `GenesisConfig::identity`.
@@ -611,6 +619,8 @@ pub enum BftVariant {
     HotStuff,
     /// XRPL-inspired federated agreement.
     Fba,
+    /// PQ-HotStuff-2: ML-DSA-65 two-chain HotStuff (devnet gate 2).
+    PqHotStuff,
 }
 
 /// Resolved, validated reward-eligibility policy.
@@ -1206,8 +1216,9 @@ impl GenesisConfig {
             None | Some("tendermint") | Some("TendermintStyle") => BftVariant::Tendermint,
             Some("hotstuff") | Some("HotStuffStyle") => BftVariant::HotStuff,
             Some("xrpl")     | Some("XrplInspired")  => BftVariant::Fba,
+            Some("pq-hotstuff") | Some("PqHotStuff") => BftVariant::PqHotStuff,
             Some(other) => return Err(format!(
-                "consensus.bft_variant {other:?} is not one of \"tendermint\", \"hotstuff\", \"xrpl\""
+                "consensus.bft_variant {other:?} is not one of \"tendermint\", \"hotstuff\", \"xrpl\", \"pq-hotstuff\""
             )),
         };
         if variant != BftVariant::Tendermint && self.environment.mode != "devnet" {
@@ -1504,6 +1515,19 @@ mod tests {
         }
         assert_eq!(genesis_with_variant("devnet", Some("hotstuff")).bft_variant(), Ok(BftVariant::HotStuff));
         assert_eq!(genesis_with_variant("devnet", Some("xrpl")).bft_variant(), Ok(BftVariant::Fba));
+    }
+
+    #[test]
+    fn pq_hotstuff_devnet_only() {
+        for v in ["pq-hotstuff", "PqHotStuff"] {
+            for mode in ["testnet", "mainnet", "staging"] {
+                let err = genesis_with_variant(mode, Some(v)).bft_variant()
+                    .expect_err(&format!("{v} must not run with environment.mode = {mode}"));
+                assert!(err.contains("environment.mode") && err.contains("safety review"), "{err}");
+            }
+        }
+        assert_eq!(genesis_with_variant("devnet", Some("pq-hotstuff")).bft_variant(), Ok(BftVariant::PqHotStuff));
+        assert_eq!(genesis_with_variant("devnet", Some("PqHotStuff")).bft_variant(), Ok(BftVariant::PqHotStuff));
     }
 
     /// A misspelled variant must not silently select an engine.

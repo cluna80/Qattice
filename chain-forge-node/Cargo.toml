@@ -28,6 +28,7 @@ path = "src/bin/gc-daemon.rs"
 [dependencies]
 chain-forge-core      = { path = "../chain-forge-core" }
 chain-forge-consensus = { path = "../chain-forge-consensus", features = ["real-crypto"] }
+chain-forge-vca-pq    = { path = "../chain-forge-vca-pq", optional = true }
 chain-forge-state     = { path = "../chain-forge-state" }
 chain-forge-execution = { path = "../chain-forge-execution" }
 chain-forge-p2p       = { path = "../chain-forge-p2p", features = ["real-network"] }
@@ -66,6 +67,16 @@ public-alpha = ["signing-v2"]
 # Without this feature, VerifyIdentityWithProof txs are accepted as a tx type
 # but execution fails closed ("no pop_verifier configured").
 zk-vrc = ["chain-forge-personhood"]
+# Devnet wiring for PQ-HotStuff-2 (ML-DSA-65 two-chain HotStuff). Enables the
+# pq-hotstuff-fips204 and gate-b-harness features in chain-forge-consensus so
+# that FsCounter is available for the devnet signing context, and pulls in
+# chain-forge-vca-pq for admission. Never enable for testnet or mainnet.
+pq-hotstuff = [
+    "chain-forge-consensus/pq-hotstuff-fips204",
+    "chain-forge-consensus/gate-b-harness",
+    "chain-forge-consensus/epoch-transition",
+    "chain-forge-vca-pq",
+]
 # Devnet bootstrap only: lets a devnet genesis opt into identity parameters
 # weaker than production (identity.insecure_dev_identity_overrides).
 # Never enable for testnet or mainnet builds.
@@ -168,3 +179,13 @@ required-features = ["fault-injection"]
 [[test]]
 name = "validator_precommit_delay_live"
 path = "tests/validator_precommit_delay_live.rs"
+
+[[test]]
+name = "pqhs2_4node_live"
+path = "tests/pqhs2_4node_live.rs"
+required-features = ["pq-hotstuff"]
+
+[[test]]
+name = "pqhs2_4node_epoch_live"
+path = "tests/pqhs2_4node_epoch_live.rs"
+required-features = ["pq-hotstuff"]

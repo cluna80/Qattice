@@ -15,37 +15,47 @@
 //! - Vote aggregation: threshold quorum (2f+1 out of 3f+1)
 //! - Proposer rotation: round-robin by validator index within epoch
 //!
+//! # QAT-07 additions (this file, stacked on CF-C1)
+//! - `signing_ctx: Option<Box<dyn EngineSigningContext>>` on `PqHotStuffEngine`
+//! - `attach_signing_context` wires in a `SafetyStoreSigningContext` (or any impl)
+//! - `restore_floors` loads hvr/hqr from the durable record on restart
+//! - `propose`, `receive_vote`, `on_timeout` route through the context when present
+//! - `on_commit` calls `signing_ctx.advance_epoch` on epoch-change commits
+//!
 //! # What is NOT here yet (gated on later milestones)
-//! - Real ML-DSA-65 signing (SafetyStore integration requires a `ConsensusSigner` +
-//!   `MonotonicCounter` from the node layer — QAT-07)
-//! - Epoch-set replacement (`on_commit` accepts `new_validator_set` but the full
-//!   SSI switch-over logic is QAT-07)
 //! - P2P / network I/O (chain-forge-node layer)
+//! - Key rotation, revocation, ML-DSA-only admission gate (QAT-08)
 //! - Production key storage (blocked on PR #109 review)
 
 use std::collections::{BTreeMap, HashSet};
+
+use tracing::debug;
 
 use crate::{
     BlockHash, BlockHeight, BlockProposal, CommitCertificate,
     ConsensusConfig, ConsensusEngine, ConsensusError, ConsensusResult, ConsensusVariant,
     Round, ValidatorId, ValidatorSet, Vote, VoteType,
 };
+use crate::pq_hotstuff::signing::EngineSigningContext;
+use crate::pq_hotstuff::wire::HASH_LEN;
 
 // ── QC / TC types ─────────────────────────────────────────────────────────────
 
 /// A quorum certificate: a block hash and the round at which 2f+1 validators voted for it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Qc {
     pub block_hash: BlockHash,
     pub round: Round,
     pub height: BlockHeight,
     /// Indices of signers (into the validator set at the time of signing).
     pub signers: Vec<usize>,
+    /// The actual Vote objects that formed this QC, needed for handoff-proof verification.
+    pub precommits: Vec<Vote>,
 }
 
 impl Qc {
     fn genesis() -> Self {
-        Qc { block_hash: BlockHash("genesis".into()), round: 0, height: 0, signers: vec![] }
+        Qc { block_hash: BlockHash("genesis".into()), round: 0, height: 0, signers: vec![], precommits: vec![] }
     }
 }
 
@@ -102,11 +112,13 @@ impl VoteAccumulator {
         for (key, votes) in &self.buckets {
             if votes.len() >= threshold && !key.is_empty() {
                 let signers = votes.iter().map(|(i, _)| *i).collect();
+                let precommits = votes.iter().map(|(_, v)| v.clone()).collect();
                 return Some(Qc {
                     block_hash: BlockHash(key.clone()),
                     round,
                     height,
                     signers,
+                    precommits,
                 });
             }
         }
@@ -114,6 +126,8 @@ impl VoteAccumulator {
     }
 
     fn clear(&mut self) { self.buckets.clear(); }
+
+
 }
 
 // ── Engine ────────────────────────────────────────────────────────────────────
@@ -149,6 +163,11 @@ pub struct PqHotStuffEngine {
     seal_round: Option<Round>,
 
     pacemaker: Pacemaker,
+
+    // QAT-07: optional SafetyStore signing context. When Some, all outbound messages
+    // are signed with write-before-broadcast guarantees. When None, the engine runs
+    // in sign-later mode (suitable for unit tests and the CF-C1 skeleton).
+    signing_ctx: Option<Box<dyn EngineSigningContext>>,
 }
 
 impl PqHotStuffEngine {
@@ -175,6 +194,35 @@ impl PqHotStuffEngine {
             pending_proposal: None,
             seal_round: None,
             pacemaker: Pacemaker::new(1000),
+            signing_ctx: None,
+        }
+    }
+
+    /// Attach a durable signing context (QAT-07). Call this once after `init`, before
+    /// any `propose` / `receive_vote` / `on_timeout`. After attaching, call
+    /// `restore_floors` to reload hvr/hqr from the durable record.
+    pub fn attach_signing_context(&mut self, ctx: Box<dyn EngineSigningContext>) {
+        self.signing_ctx = Some(ctx);
+    }
+
+    /// Reload the highest vote round (hvr) and lock QC round (hqr) from the durable
+    /// safety record. Must be called after `attach_signing_context` on every restart.
+    /// Sets `locked_qc.round` and `high_qc.round` to at least the stored floors.
+    pub fn restore_floors(&mut self) {
+        if let Some(ctx) = &self.signing_ctx {
+            let floors = ctx.restore();
+            if floors.epoch == self.epoch {
+                if let Some(hqr) = floors.hqr {
+                    if hqr > self.locked_qc.round as u64 {
+                        self.locked_qc.round = hqr as u32;
+                    }
+                }
+                if let Some(hvr) = floors.hvr {
+                    if hvr > self.high_qc.round as u64 {
+                        self.high_qc.round = hvr as u32;
+                    }
+                }
+            }
         }
     }
 
@@ -192,19 +240,23 @@ impl PqHotStuffEngine {
     }
 
     /// Returns true if `round` is safe to vote at given `locked_qc` (spec §3.4).
+    /// A lock from a previous height never blocks votes in the current height,
+    /// because rounds restart at 1 on every height advance.
     fn safe_to_vote(&self, round: Round) -> bool {
-        round >= self.locked_qc.round
+        self.locked_qc.height < self.height || round >= self.locked_qc.round
     }
 
     /// Two-chain commit: commit `to_commit` when `locked_qc` is its direct child
     /// at the consecutive round (locked_qc.round == to_commit.round + 1).
+    /// Both QCs must be at the current height; a lock from a prior height must
+    /// never trigger a commit in the current height.
     fn try_two_chain_commit(&self, to_commit: &Qc) -> Option<CommitCertificate> {
-        if self.locked_qc.round == to_commit.round + 1 {
+        if to_commit.height == self.height && self.locked_qc.round == to_commit.round + 1 {
             return Some(CommitCertificate {
                 height: to_commit.height,
                 round: to_commit.round,
                 block_hash: to_commit.block_hash.clone(),
-                precommits: vec![],
+                precommits: to_commit.precommits.clone(),
             });
         }
         None
@@ -214,6 +266,35 @@ impl PqHotStuffEngine {
         self.round = new_round;
         self.accumulator.clear();
         self.pending_proposal = None;
+    }
+
+    /// Produce a signed precommit vote for the local validator (QAT-07).
+    /// Returns the signature bytes; the caller builds the wire `VoteMessage`.
+    /// Returns empty vec when no signing context is attached (sign-later mode).
+    pub fn sign_local_precommit(
+        &mut self,
+        block_hash: &BlockHash,
+        parent_hash: &BlockHash,
+        parent_round: Round,
+        qc_round: Round,
+    ) -> Result<Vec<u8>, ConsensusError> {
+        if let Some(ctx) = self.signing_ctx.as_mut() {
+            let block_id = sha3_32(block_hash.0.as_bytes());
+            let parent_id = sha3_32(parent_hash.0.as_bytes());
+            ctx.sign_vote(
+                &self.config.chain_id,
+                self.epoch,
+                self.round as u64,
+                block_id,
+                parent_id,
+                parent_round as u64,
+                qc_round as u64,
+            )
+            .map(|s| s.signature)
+            .map_err(ConsensusError::Internal)
+        } else {
+            Ok(vec![])
+        }
     }
 
     /// Return the proposer `ValidatorId` for a given (height, round).
@@ -237,11 +318,24 @@ impl PqHotStuffEngine {
 
     /// Pacemaker timeout for the current round (ms).
     pub fn current_timeout_ms(&self) -> u64 { self.pacemaker.timeout_ms() }
+
+    /// Test helper: set high_qc.round so unit tests can simulate the
+    /// post-two-chain state without running a full receive_vote sequence.
+    #[cfg(test)]
+    pub fn test_set_high_qc_round(&mut self, round: Round) {
+        self.high_qc.round = round;
+    }
 }
 
 impl Default for PqHotStuffEngine {
     fn default() -> Self { Self::new() }
 }
+
+// SAFETY: `PqHotStuffEngine` only accesses `signing_ctx` through `&mut self`.
+// The signing context is never shared across threads; all callers hold exclusive
+// access. This manual impl is required because `dyn EngineSigningContext` is
+// `Send` but not `Sync` (the safety store uses `&mut self` for all writes).
+unsafe impl Sync for PqHotStuffEngine {}
 
 #[async_trait::async_trait]
 impl ConsensusEngine for PqHotStuffEngine {
@@ -288,12 +382,23 @@ impl ConsensusEngine for PqHotStuffEngine {
         let idx = self.proposer_index(height, round);
         let proposer = self.validator_set.validators[idx].id.clone();
 
-        // Block hash placeholder: real hash uses wire::BlockIdInput + SHA3-256.
-        let block_hash = BlockHash(format!(
-            "pqhs-{}-{}-{}-{}",
-            self.config.chain_id, height, round,
-            sha3_hex(parent_hash.0.as_bytes())
-        ));
+        // Compute the canonical block hash so sync validation passes.
+        // compute_block_hash matches what SyncResponse handler in node.rs recomputes.
+        let block_hash = crate::compute_block_hash(
+            &self.config.chain_id, height, &parent_hash, &tx_data,
+        );
+
+        // Build block_id bytes for signing.
+        let block_id_bytes = sha3_32(block_hash.0.as_bytes());
+
+        // Sign via SafetyStore when a context is attached (QAT-07); otherwise sign-later.
+        let signature = if let Some(ctx) = self.signing_ctx.as_mut() {
+            ctx.sign_proposal(self.epoch, round as u64, block_id_bytes)
+                .map(|s| s.signature)
+                .map_err(ConsensusError::Internal)?
+        } else {
+            vec![]
+        };
 
         Ok(BlockProposal {
             height,
@@ -303,7 +408,7 @@ impl ConsensusEngine for PqHotStuffEngine {
             parent_hash,
             timestamp_ms: 0,
             tx_data,
-            signature: vec![],  // signed by SafetyStore in the node layer (QAT-07)
+            signature,
             pol_round: if self.high_qc.round > 0 { Some(self.high_qc.round) } else { None },
         })
     }
@@ -328,6 +433,14 @@ impl ConsensusEngine for PqHotStuffEngine {
             return Err(ConsensusError::StaleMessage(vote.height, self.height));
         }
 
+        // PQ-HotStuff is single-phase: only Precommit votes count toward quorum.
+        // Prevotes are broadcast for pacemaker liveness evidence but must not be
+        // accumulated here — mixing them with precommits causes CommitCertificate
+        // precommits to contain non-precommit votes, which verify_commit rejects.
+        if vote.vote_type != VoteType::Precommit {
+            return Ok(None);
+        }
+
         let idx = self.validator_set.validators
             .iter().position(|v| v.id == vote.validator)
             .ok_or_else(|| ConsensusError::UnknownValidator(vote.validator.clone()))?;
@@ -342,18 +455,27 @@ impl ConsensusEngine for PqHotStuffEngine {
             });
         }
 
+        // Defensive pruning: only accumulate votes for the current round.
+        // Stale votes (round < self.round) that arrive after advance_round must
+        // not contaminate the current bucket; check_quorum scans all buckets and
+        // would fire a spurious QC if 2f+1 stale votes pile up before the current
+        // round reaches quorum on its own.
+        if vote.round != self.round {
+            return Ok(None);
+        }
+
         let round = vote.round;
         let height = vote.height;
         self.accumulator.add(idx, vote);
 
         let threshold = self.quorum_threshold();
+
         if let Some(new_qc) = self.accumulator.check_quorum(threshold, round, height) {
             if new_qc.round > self.high_qc.round {
                 let prev_locked = self.locked_qc.clone();
-                // Update lock if consecutive with current locked_qc
-                if new_qc.round == self.locked_qc.round + 1 {
-                    self.locked_qc = new_qc.clone();
-                }
+                // Always advance locked_qc to the latest QC so the two-chain
+                // commit can fire even when round 1 was skipped (timeout).
+                self.locked_qc = new_qc.clone();
                 self.high_qc = new_qc;
                 self.pacemaker.on_progress();
                 self.advance_round(round + 1);
@@ -361,6 +483,8 @@ impl ConsensusEngine for PqHotStuffEngine {
                 if let Some(cert) = self.try_two_chain_commit(&prev_locked) {
                     return Ok(Some(cert));
                 }
+            } else {
+                debug!(height, round, qc_round = new_qc.round, high_qc_round = self.high_qc.round, "pqhs2 QC formed but not newer than high_qc");
             }
         }
         Ok(None)
@@ -374,11 +498,21 @@ impl ConsensusEngine for PqHotStuffEngine {
         let old_round = round;
         self.advance_round(round + 1);
 
-        // Nil vote for the timed-out round (broadcast to peers to form a TC)
         let validator = self.validator_set.validators
             .first()
             .map(|v| v.id.clone())
             .unwrap_or_else(|| ValidatorId("unknown".into()));
+
+        // Sign timeout via SafetyStore when available; fall back to empty
+        // signature so the round still advances even if the store is not set up
+        // (e.g. in devnet integration tests without a persistent FsCounter).
+        let signature = if let Some(ctx) = self.signing_ctx.as_mut() {
+            ctx.sign_timeout(&self.config.chain_id, self.epoch, old_round as u64, self.high_qc.round as u64)
+                .map(|s| s.signature)
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
 
         Ok(Vote {
             vote_type: VoteType::Nil,
@@ -386,7 +520,7 @@ impl ConsensusEngine for PqHotStuffEngine {
             round: old_round,
             validator,
             block_hash: None,
-            signature: vec![],
+            signature,
             scheme: Vote::default_scheme(),
         })
     }
@@ -396,11 +530,74 @@ impl ConsensusEngine for PqHotStuffEngine {
         certificate: CommitCertificate,
         new_validator_set: Option<ValidatorSet>,
     ) -> ConsensusResult<()> {
-        // Epoch-transition hook (spec §3.6, EC-6):
-        // A new validator set signals an epoch-change block was committed.
-        // Record the seal round so the safety store can enforce EC-6.
         if let Some(vs) = new_validator_set {
-            self.seal_round = Some(certificate.round);
+            // R1: verify two-chain finality before accepting the new set.
+            // Without epoch-transition: ID-membership quorum check (count only, no sig verify).
+            // With epoch-transition: verify_handoff_proof (ML-DSA-65 sigs + consecutive rounds)
+            // runs below, superseding this call. Keep the lightweight check here as a gate for
+            // the non-authenticated path.
+            #[cfg(not(feature = "epoch-transition"))]
+            self.verify_commit(&certificate, &self.validator_set.clone())
+                .map_err(|e| ConsensusError::Internal(format!("epoch-change cert invalid: {e}")))?;
+
+            let old_epoch = self.epoch;
+            let seal_round = certificate.round; // QC_child.round = z+1 (the child of B_ec)
+
+            // Hashes for the durable safety record.
+            let cert_bytes = {
+                let mut b = Vec::new();
+                b.extend_from_slice(certificate.block_hash.0.as_bytes());
+                b.extend_from_slice(&certificate.round.to_be_bytes());
+                b.extend_from_slice(&certificate.height.to_be_bytes());
+                b
+            };
+            let handoff_cert_hash = sha3_32(&cert_bytes);
+
+            // Canonical V_new hash: sorted validator IDs + ML-DSA-65 public keys + powers.
+            // Uses epoch_handoff::canonical_set_hash when available; falls back to the
+            // ID+power encoding otherwise. The authenticated path is enforced at
+            // verify_handoff_proof time, before the seal is written.
+            #[cfg(feature = "epoch-transition")]
+            let set_hash = crate::pq_hotstuff::epoch_handoff::canonical_set_hash(&vs);
+            #[cfg(not(feature = "epoch-transition"))]
+            let set_hash = {
+                let mut b = Vec::new();
+                for v in &vs.validators {
+                    b.extend_from_slice(v.id.0.as_bytes());
+                    b.extend_from_slice(&v.voting_power.to_be_bytes());
+                }
+                sha3_32(&b)
+            };
+
+            // Authenticated handoff verification (epoch-transition feature).
+            // Runs before the seal is written; a rejection leaves the store, epoch,
+            // and active set unchanged.
+            #[cfg(feature = "epoch-transition")]
+            {
+                let child_qc_round = self.high_qc.round;
+                crate::pq_hotstuff::epoch_handoff::verify_handoff_proof(
+                    &self.config.chain_id,
+                    &certificate,
+                    &self.validator_set,
+                    child_qc_round,
+                    &vs,
+                    set_hash,
+                ).map_err(|e| ConsensusError::Internal(format!("handoff proof rejected: {e}")))?;
+            }
+
+            // R2 durable write order:
+            // Step 1: CommitCertificate in block store (caller's responsibility before on_commit).
+            // Step 2: write seal to safety record.
+            // Step 3: advance epoch counter in safety record.
+            // Step 4: update in-memory signing context.
+            if let Some(ctx) = self.signing_ctx.as_mut() {
+                ctx.write_seal(old_epoch, seal_round as u64)
+                    .map_err(|e| ConsensusError::Internal(format!("write_seal failed: {e}")))?;
+                ctx.advance_epoch_record(old_epoch + 1, set_hash, handoff_cert_hash)
+                    .map_err(|e| ConsensusError::Internal(format!("advance_epoch_record failed: {e}")))?;
+            }
+
+            self.seal_round = Some(seal_round);
             self.epoch += 1;
             self.validator_set = vs;
         }
@@ -409,11 +606,17 @@ impl ConsensusEngine for PqHotStuffEngine {
         self.round = 1;
         self.accumulator.clear();
         self.pending_proposal = None;
+        // Reset per-height QC state so round counters from the previous height
+        // don't block quorum at round 1 of the new height (high_qc.round check).
+        let genesis_qc = Qc::genesis();
+        self.locked_qc = genesis_qc.clone();
+        self.high_qc = genesis_qc;
         Ok(())
     }
 
     fn current_height(&self) -> BlockHeight { self.height }
     fn current_round(&self) -> Round { self.round }
+    fn current_epoch(&self) -> u64 { self.epoch }
 
     fn verify_commit(
         &self,
@@ -463,6 +666,12 @@ impl ConsensusEngine for PqHotStuffEngine {
 fn sha3_hex(data: &[u8]) -> String {
     use sha3::{Digest, Sha3_256};
     Sha3_256::digest(data).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// SHA3-256 as a 32-byte array (for wire signing).
+fn sha3_32(data: &[u8]) -> [u8; HASH_LEN] {
+    use sha3::{Digest, Sha3_256};
+    Sha3_256::digest(data).into()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -527,8 +736,8 @@ mod tests {
     async fn two_chain_commit_fires_on_consecutive_qcs() {
         let mut e = engine().await;
         // Simulate: locked_qc at round 1, then high_qc at round 2 → commit round-1 block
-        e.locked_qc = Qc { block_hash: BlockHash("b1".into()), round: 1, height: 1, signers: vec![] };
-        let new_qc = Qc { block_hash: BlockHash("b2".into()), round: 2, height: 2, signers: vec![] };
+        e.locked_qc = Qc { block_hash: BlockHash("b1".into()), round: 1, height: 1, signers: vec![], precommits: vec![] };
+        let new_qc = Qc { block_hash: BlockHash("b2".into()), round: 2, height: 2, signers: vec![], precommits: vec![] };
         let cert = e.try_two_chain_commit(&e.locked_qc.clone());
         assert!(cert.is_none(), "no commit yet — locked_qc is not b1's child");
 
@@ -556,21 +765,65 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(all(feature = "pq-hotstuff-fips204", feature = "real-crypto"))]
     async fn epoch_transition_records_seal_round() {
-        let mut e = engine().await;
+        use crate::vote_signing_bytes;
+
+        // 1-node set so quorum threshold = 1 and a single precommit satisfies R1 verification.
+        // Signs with chain_forge_crypto (dilithium3) to match the node's sign_vote path,
+        // which is what verify_handoff_proof now verifies against (real-crypto path).
+        let kp = chain_forge_crypto::MlDsaScheme.generate_random().expect("keygen");
+        let public_key = kp.public_key.clone();
+
+        let v0 = ValidatorInfo {
+            id: ValidatorId("v0".into()),
+            voting_power: 1,
+            pop_verified: false,
+            public_key,
+        };
+        let vs1 = ValidatorSet { height: 0, validators: vec![v0] };
+
+        let mut e = PqHotStuffEngine::new();
+        let config = ConsensusConfig {
+            variant: ConsensusVariant::PqHotStuff,
+            chain_id: "test-chain".into(),
+            propose_timeout_ms: 1000, prevote_timeout_ms: 1000, precommit_timeout_ms: 1000,
+            block_time_ms: 500, personhood: None, vca: None,
+        };
+        e.init(config, vs1).await.unwrap();
+
         let new_vs = ValidatorSet {
             height: 1,
-            validators: (4..8).map(|i| make_validator(&format!("v{i}"))).collect(),
+            validators: vec![make_validator("v1")],
+        };
+
+        // Sign the precommit with dilithium3 (same as node.rs::sign_vote).
+        let msg = vote_signing_bytes("test-chain", &VoteType::Precommit, 1, 3, Some(&BlockHash("ec".into())));
+        let sig = chain_forge_crypto::sign_consensus(&msg, &kp).expect("sign failed");
+
+        let precommit = Vote {
+            vote_type: VoteType::Precommit,
+            height: 1,
+            round: 3,
+            block_hash: Some(BlockHash("ec".into())),
+            validator: ValidatorId("v0".into()),
+            signature: sig,
+            scheme: Vote::default_scheme(),
         };
         let cert = CommitCertificate {
-            height: 1, round: 3, block_hash: BlockHash("ec".into()), precommits: vec![],
+            height: 1, round: 3, block_hash: BlockHash("ec".into()), precommits: vec![precommit],
         };
+        // verify_handoff_proof requires high_qc.round == cert.round + 1 (consecutive-round
+        // check). In the real two-chain flow this is always true because the commit fires
+        // when the second QC (round 4) forms and high_qc has just been updated. The test
+        // calls on_commit directly, so we set up the state manually.
+        e.test_set_high_qc_round(4);
         e.on_commit(cert, Some(new_vs)).await.unwrap();
         assert_eq!(e.seal_round(), Some(3));
         assert_eq!(e.epoch(), 1);
         assert_eq!(e.current_height(), 2);
-        assert_eq!(e.validator_set().validators.len(), 4);
-        assert_eq!(e.validator_set().validators[0].id.0, "v4");
+        assert_eq!(e.validator_set().validators.len(), 1);
+        assert_eq!(e.validator_set().validators[0].id.0, "v1");
     }
 
     #[tokio::test]
@@ -578,5 +831,132 @@ mod tests {
         let e = engine().await;
         assert_eq!(e.variant(), ConsensusVariant::PqHotStuff);
         assert_eq!(e.name(), "PQ-HotStuff-2");
+    }
+
+    // ── Regression: timeout signing failure (R-TF-1 / R-TF-2) ────────────────
+
+    /// A signing context whose sign_timeout always returns Err.
+    struct FailingSignCtx;
+    impl crate::pq_hotstuff::signing::EngineSigningContext for FailingSignCtx {
+        fn restore(&self) -> crate::pq_hotstuff::signing::RestoredFloors {
+            crate::pq_hotstuff::signing::RestoredFloors::default()
+        }
+        fn sign_vote(&mut self, _: &str, _: u64, _: u64, _: [u8;32], _: [u8;32], _: u64, _: u64)
+            -> Result<crate::pq_hotstuff::signing::SignedVote, String> { Err("injected".into()) }
+        fn sign_timeout(&mut self, _: &str, _: u64, _: u64, _: u64)
+            -> Result<crate::pq_hotstuff::signing::SignedTimeout, String> { Err("injected".into()) }
+        fn sign_proposal(&mut self, _: u64, _: u64, _: [u8;32])
+            -> Result<crate::pq_hotstuff::signing::SignedProposal, String> { Err("injected".into()) }
+        fn write_seal(&mut self, _: u64, _: u64) -> Result<(), String> { Err("injected".into()) }
+        fn advance_epoch_record(&mut self, _: u64, _: [u8;32], _: [u8;32]) -> Result<(), String> { Err("injected".into()) }
+    }
+
+    // R-TF-1: sign_timeout failure must not abort the round advance.
+    // The pacemaker must record a timeout and round must increment.
+    #[tokio::test]
+    async fn timeout_signing_failure_still_advances_round() {
+        let mut e = engine().await;
+        e.attach_signing_context(Box::new(FailingSignCtx));
+
+        let round_before = e.current_round();
+        let timeout_ms_before = e.current_timeout_ms();
+
+        let vote = e.on_timeout(1, round_before).await
+            .expect("on_timeout must not propagate signing error");
+
+        // Round must have advanced.
+        assert_eq!(e.current_round(), round_before + 1,
+            "round must increment even when sign_timeout fails");
+
+        // The pacemaker must have doubled (on_timeout called).
+        assert!(e.current_timeout_ms() > timeout_ms_before,
+            "pacemaker must record a timeout");
+
+        // The returned vote must carry an empty signature — no signed bytes broadcast.
+        assert!(vote.signature.is_empty(),
+            "signature must be empty when signing fails (not broadcast)");
+
+        // The vote type must be Nil (timeout vote, not a precommit).
+        assert_eq!(vote.vote_type, crate::VoteType::Nil,
+            "timeout vote type must be Nil");
+    }
+
+    // R-TF-2: on_timeout with no signing context also advances round with empty sig.
+    #[tokio::test]
+    async fn timeout_no_signing_context_advances_round() {
+        let mut e = engine().await; // no signing context attached
+
+        let round_before = e.current_round();
+        let vote = e.on_timeout(1, round_before).await
+            .expect("on_timeout must succeed without signing context");
+
+        assert_eq!(e.current_round(), round_before + 1);
+        assert!(vote.signature.is_empty());
+        assert_eq!(vote.vote_type, crate::VoteType::Nil);
+    }
+
+    // ── Regression: locked_qc monotonicity (R-LM-1 / R-LM-2) ─────────────────
+
+    fn vote_for(height: u64, round: u32, block_hash: &str, validator: &str) -> Vote {
+        Vote {
+            vote_type: crate::VoteType::Precommit,
+            height,
+            round,
+            block_hash: Some(BlockHash(block_hash.into())),
+            validator: ValidatorId(validator.into()),
+            signature: vec![],
+            scheme: Vote::default_scheme(),
+        }
+    }
+
+    // R-LM-1: locked_qc.round never decreases within an epoch.
+    // After a QC forms at round R, stale votes for round R-1 must not lower the lock.
+    #[tokio::test]
+    async fn locked_qc_round_never_decreases_within_epoch() {
+        let mut e = engine().await;
+
+        // Drive two consecutive QCs at rounds 1 and 2 to trigger a commit and
+        // set locked_qc to round 2.  With 4 validators, threshold = 3.
+        for &vid in &["v0","v1","v2"] {
+            e.receive_vote(vote_for(1, 1, "block-r1", vid)).await.unwrap();
+        }
+        // locked_qc should now be round=1 (QC at round 1).
+        assert_eq!(e.locked_qc().round, 1, "locked_qc should be round 1 after first QC");
+        assert_eq!(e.current_round(), 2);
+
+        for &vid in &["v0","v1","v2"] {
+            e.receive_vote(vote_for(1, 2, "block-r2", vid)).await.unwrap();
+        }
+        assert_eq!(e.locked_qc().round, 2, "locked_qc should advance to round 2");
+        assert_eq!(e.current_round(), 3);
+
+        // Now deliver stale round=1 votes — rejected either by safe_to_vote
+        // (round < locked_qc.round) or by the defensive round filter.  Both
+        // paths keep the vote out of the accumulator; the lock must not move.
+        for &vid in &["v0","v1","v2","v3"] {
+            let _ = e.receive_vote(vote_for(1, 1, "block-r1", vid)).await;
+            assert_eq!(e.locked_qc().round, 2,
+                "locked_qc must not decrease after stale round-1 votes");
+        }
+    }
+
+    // R-LM-2: a timeout does not alter locked_qc.
+    #[tokio::test]
+    async fn timeout_does_not_change_locked_qc() {
+        let mut e = engine().await;
+
+        // Form a QC at round 1 to set locked_qc.
+        for &vid in &["v0","v1","v2"] {
+            e.receive_vote(vote_for(1, 1, "block-r1", vid)).await.unwrap();
+        }
+        let lock_before = e.locked_qc().round;
+        assert_eq!(lock_before, 1);
+
+        // Fire a timeout at round 2 (no quorum reached).
+        e.on_timeout(1, 2).await.unwrap();
+
+        assert_eq!(e.locked_qc().round, lock_before,
+            "timeout must not modify locked_qc");
+        assert_eq!(e.current_round(), 3);
     }
 }

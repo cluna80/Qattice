@@ -353,6 +353,16 @@ pub struct VcaValidatorRecord {
     /// Post-quantum signature public key (ML-DSA-87).
     /// Empty until the validator opts in / migration trigger fires.
     pub pq_pubkey:     Vec<u8>,
+
+    /// ML-DSA-65 consensus key (FIPS 204, 1952 bytes).
+    /// Distinct from `pq_pubkey` (ML-DSA-87, account/transaction slot).
+    /// Empty until the validator registers a consensus key for a `pqc-native` chain.
+    pub consensus_ml_dsa_65_pubkey: Vec<u8>,
+
+    /// True when a revocation transaction finalized at height H marks this validator
+    /// ineligible at H+1. Revoked records are excluded by `admit_pq_native` without
+    /// error; they remain in the registry for auditability.
+    pub revoked: bool,
 }
 
 impl VcaValidatorRecord {
@@ -380,7 +390,15 @@ impl VcaValidatorRecord {
             weight,
             classical_pubkey,
             pq_pubkey,
+            consensus_ml_dsa_65_pubkey: vec![],
+            revoked: false,
         }
+    }
+
+    /// Set the ML-DSA-65 consensus key after construction (key registration path).
+    pub fn with_consensus_key(mut self, key: Vec<u8>) -> Self {
+        self.consensus_ml_dsa_65_pubkey = key;
+        self
     }
 
     /// Convert this VCA record to a `ValidatorInfo` for the consensus layer.
@@ -393,6 +411,61 @@ impl VcaValidatorRecord {
             public_key:   self.classical_pubkey.clone(),
         }
     }
+
+    /// Convert this record to a `ValidatorInfo` for a `pqc-native` chain.
+    /// Uses `consensus_ml_dsa_65_pubkey` as `public_key`.
+    ///
+    /// Returns `Err` if the consensus key is absent, the wrong length, or
+    /// happens to be an ML-DSA-87 key (4627 bytes) supplied in the wrong slot.
+    pub fn to_validator_info_pq(&self) -> Result<ValidatorInfo, AdmissionError> {
+        let key = &self.consensus_ml_dsa_65_pubkey;
+        if key.is_empty() {
+            return Err(AdmissionError::NoPqConsensusKey { id: self.validator_id.0.clone() });
+        }
+        if key.len() == MLDSA87_PUBKEY_LEN {
+            return Err(AdmissionError::WrongKeySlot {
+                id: self.validator_id.0.clone(),
+                supplied_len: key.len(),
+            });
+        }
+        if key.len() != MLDSA65_PUBKEY_LEN {
+            return Err(AdmissionError::WrongKeyLength {
+                id: self.validator_id.0.clone(),
+                expected: MLDSA65_PUBKEY_LEN,
+                got: key.len(),
+            });
+        }
+        Ok(ValidatorInfo {
+            id:           self.validator_id.clone(),
+            voting_power: self.weight.0,
+            pop_verified: self.personhood.0 > 0.0,
+            public_key:   key.clone(),
+        })
+    }
+}
+
+/// ML-DSA-65 public key length (FIPS 204, consensus key slot).
+pub const MLDSA65_PUBKEY_LEN: usize = 1952;
+/// ML-DSA-87 public key length (transaction/account PQ slot — wrong slot for consensus).
+pub const MLDSA87_PUBKEY_LEN: usize = 2592;
+
+/// Errors from the `pqc-native` admission and key-rotation paths.
+#[derive(Debug, thiserror::Error)]
+pub enum AdmissionError {
+    #[error("validator {id} has no ML-DSA-65 consensus key (consensus_ml_dsa_65_pubkey is empty)")]
+    NoPqConsensusKey { id: String },
+
+    #[error("validator {id} supplied an ML-DSA-87 key ({supplied_len} bytes) in the ML-DSA-65 consensus slot")]
+    WrongKeySlot { id: String, supplied_len: usize },
+
+    #[error("validator {id} consensus key is {got} bytes, expected {expected}")]
+    WrongKeyLength { id: String, expected: usize, got: usize },
+
+    #[error("validator {id} has zero voting power and cannot be admitted")]
+    ZeroWeight { id: String },
+
+    #[error("validator {id} not found in registry")]
+    UnknownValidator { id: String },
 }
 
 // ── VCA registry ─────────────────────────────────────────────────────────────
@@ -584,6 +657,53 @@ impl VcaRegistry {
 
     /// Whether this registry has been closed for the epoch.
     pub fn is_closed(&self) -> bool { self.epoch_closed }
+
+    /// Register or rotate the ML-DSA-65 consensus key for an existing validator.
+    ///
+    /// May be called before or after `close_epoch()` — key rotation is distinct
+    /// from the contribution/personhood upsert lifecycle and may be applied up to
+    /// the point where `admit_pq_native` reads the registry.
+    ///
+    /// Rejects the new key with `AdmissionError` if it is empty, the wrong length,
+    /// or happens to be an ML-DSA-87 key (2592-byte public key) supplied in the
+    /// ML-DSA-65 slot.
+    pub fn rotate_consensus_key(
+        &mut self,
+        id: &ValidatorId,
+        new_key: Vec<u8>,
+    ) -> Result<(), AdmissionError> {
+        let record = self.records.get_mut(id)
+            .ok_or_else(|| AdmissionError::UnknownValidator { id: id.0.clone() })?;
+        // Validate the new key using the same rules as to_validator_info_pq.
+        if new_key.is_empty() {
+            return Err(AdmissionError::NoPqConsensusKey { id: id.0.clone() });
+        }
+        if new_key.len() == MLDSA87_PUBKEY_LEN {
+            return Err(AdmissionError::WrongKeySlot { id: id.0.clone(), supplied_len: new_key.len() });
+        }
+        if new_key.len() != MLDSA65_PUBKEY_LEN {
+            return Err(AdmissionError::WrongKeyLength {
+                id: id.0.clone(),
+                expected: MLDSA65_PUBKEY_LEN,
+                got: new_key.len(),
+            });
+        }
+        record.consensus_ml_dsa_65_pubkey = new_key;
+        Ok(())
+    }
+
+    /// Mark a validator as revoked effective from the next block.
+    ///
+    /// A revoked validator is excluded from the candidate set produced by
+    /// `admit_pq_native` without error; the record stays in the registry for
+    /// auditability. Revocation is irreversible within an epoch; a new epoch
+    /// registry does not inherit revocation state.
+    pub fn revoke_validator(&mut self, id: &ValidatorId) -> VcaResult<()> {
+        let record = self.records.get_mut(id)
+            .ok_or_else(|| VcaError::UnknownValidator(id.clone()))?;
+        record.revoked = true;
+        Ok(())
+    }
 
     /// Convert the registry to a `ValidatorSet` for the consensus layer.
     /// Weight becomes voting_power. Validators with weight=0 are excluded.

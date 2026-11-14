@@ -2,6 +2,319 @@
 
 > **Start here:** [PQ-PoP-HotStuff-2 prerequisite](docs/PQ-POP-PREREQUISITE.md) defines the current protocol direction and the native Phase 0 and Phase 0.5 gates. Once those gates pass, continue the applicable milestones below with PQ-HotStuff-2 and defensive pruning. Earlier Tendermint, Ed25519, and QRC entries document historical plans and evidence.
 
+## Next: QC epoch assertion test — open
+
+**Next boundary test: assert the epoch carried by each quorum certificate (QC epoch field)**
+
+**Goal:** Identify the last block certified by the outgoing validator set and the first certified by the incoming set, via the epoch encoded in the QC itself — not the block record's `epoch` field (which is the engine epoch active at `commit_block` time, not which set signed the QC).
+
+**Agreed boundary trace (epoch-change at height 2):**
+
+| Block record | `last_commit` certifies | Expected certificate epoch |
+|---|---|---|
+| h3 | h2 (epoch-change block) | 0 |
+| h4 | h3 (boundary child) | **0** |
+| h5 | h4 (first incoming-set block) | 1 |
+
+The outgoing validator set certifies **both** the epoch-change block (h2) and its boundary child (h3). The incoming set first certifies h4. The boundary certificate epoch flips from 0 to 1 between h4's `last_commit` (h3's cert, epoch=0) and h5's `last_commit` (h4's cert, epoch=1).
+
+**Why h3's certificate carries epoch=0 (protocol design):** The certificate epoch of a block is set to the engine epoch at QC formation time, **before** `on_commit` fires for the block that triggers the transition. In the two-chain commit trace, h3's QC is what delivers the commit signal for h2 (the epoch-change block). Validators cast their h3 precommits while the engine is still at epoch=0 — h2 has not yet been delivered to `on_commit`. The QC forms, `on_commit(h2)` fires and advances the epoch to 1, then h4 is proposed and voted under epoch=1. h4's QC therefore carries epoch=1.
+
+**What the test will assert:**
+
+```rust
+// h3's last_commit certifies h2 — outgoing set, epoch 0
+assert_eq!(api.block(3).last_commit.epoch, 0);
+assert_eq!(api.block(3).last_commit.height, 2);
+// h4's last_commit certifies h3 — still outgoing set, epoch 0
+assert_eq!(api.block(4).last_commit.epoch, 0);
+assert_eq!(api.block(4).last_commit.height, 3);
+// h5's last_commit certifies h4 — incoming set, epoch 1
+assert_eq!(api.block(5).last_commit.epoch, 1);
+assert_eq!(api.block(5).last_commit.height, 4);
+// Verify both handoff QCs against the authenticated outgoing set
+verify_handoff_proof(chain, &api.block(3).last_commit, &outgoing_set, ...); // h2 cert
+verify_handoff_proof(chain, &api.block(4).last_commit, &outgoing_set, ...); // h3 cert
+```
+
+**Current state (gap):** `Vote` has no `epoch` field; `vote_signing_bytes` does not include epoch; `CommitCertificate` does not carry an epoch. The API `BlockSummary` exposes `last_commit_signers` (validator IDs only) but not the full `CommitCertificate`. There is no way for a test to assert "this QC was signed under epoch N" without reading internal engine state.
+
+**Required changes (separate branch — protocol break):**
+1. Add `epoch: u64` to `Vote`. Every vote in a certificate must carry the same epoch and must sign the same epoch value. Add a version prefix to `vote_signing_bytes` so legacy-format bytes cannot be accepted under the new format: `CFV2| chain_id | type | height | round | epoch | block_hash` (increment prefix from `CFV|` to `CFV2|`).
+2. Add `epoch: u64` to `CommitCertificate`. Must match the signed epoch of all constituent votes. Set at QC formation time (before `on_commit` fires).
+3. Expose the full `last_commit: Option<CommitCertificate>` in `BlockSummary` (or a separate `/api/blocks/{height}/qc` endpoint) so the devnet test can read it without internal access.
+4. Update `verify_handoff_proof` to: (a) require `certificate.epoch == expected_outgoing_epoch`, (b) verify both handoff QCs (h2's cert and h3's cert) against the outgoing set before accepting the transition.
+5. Update `sign_vote` and all vote construction sites to set `Vote.epoch`.
+6. Update `gate_b_admission`, `gate_b_epoch_handoff`, and all unit tests that call `vote_signing_bytes` directly.
+
+**Note on same-validator-set transition:** In this test the outgoing and incoming validator membership is identical (same 4 nodes). The certificate epoch distinguishes which epoch's bookkeeping the signers operated under. For a future membership-change test, the certificate epoch also distinguishes which key material was active.
+
+**Blocking dependency:** `vote_signing_bytes` prefix change is a protocol break. All existing live and unit tests that construct `Vote` structs or call `vote_signing_bytes` must be updated atomically. Do not mix with the current epoch-change milestone.
+
+---
+
+## QAT-07 authenticated epoch-change devnet complete — 2026-11-12
+
+**QAT-07 Phase 3: authenticated epoch-change end-to-end — `pqhs2_4node_epoch_change_reaches_new_epoch` passes on Windows with real ML-DSA-65 signatures**
+
+| Deliverable | Status |
+|---|---|
+| `PQHS-EC1:` epoch-change payload injected in `propose_and_broadcast_multinode` at configured `at_height` | ✅ |
+| `validate_block_payload` bypasses `BlockPayload` version check for `PQHS-EC1:` proposals | ✅ |
+| `verify_handoff_proof` uses `chain_forge_crypto::verify_consensus` (dilithium3) under `real-crypto`, symmetric with `sign_vote` | ✅ |
+| `epoch_transition_records_seal_round` unit test updated to sign with dilithium3 (consistent with devnet key format) | ✅ |
+| `gate_b_admission` 7/7 tests continue to pass with `epoch-transition` only (Fips204Verifier path retained under `not(real-crypto)`) | ✅ |
+| All 4 nodes commit h2 (epoch-change block, epoch=0), then h3–h5 in epoch=1; no fork across any height | ✅ |
+| **`pqhs2_4node_epoch_change_reaches_new_epoch`** (BossKing MINGW64, `bab3f7d`) | ✅ **Windows-confirmed** |
+
+**Windows confirmation (owner-run, 2026-11-12):** `cargo test -p chain-forge-node --features pq-hotstuff --test pqhs2_4node_epoch_live -- --nocapture` on branch `feat/qat-07-safety-store-integration` at `bab3f7d` — 1/1 passed in 62.94s. All 4 ML-DSA-65 devnet nodes reached height 5 and agreed at every height:
+
+```
+height 2  epoch=0  block_hash=a1fa3b76c60daf51e882a083298d4b24434007941e114523b9e6406e08d1fffe
+height 3  epoch=1  block_hash=df06d4aca5b44021081a4dd7c47e8735ebb37a8d8921bcd644c2875ee63f151f
+height 4  epoch=1  block_hash=a2dfbe20a86dc54ac288da067cc274fc6cebd51646ddfbddcd3e2d75d1ceaa51
+height 5  epoch=1  block_hash=2e549efacc215f1f731b66159c481ec3c6c1264d3f4ab001ddf2bcf5551ee936
+```
+
+No fork at any height. The two-chain commit rule (consecutive QCs at the same engine height) confirmed.
+
+**What `epoch=1` at height 3 means (implementation note):** The `epoch` field in a block record is captured from `self.consensus.current_epoch()` **before** `on_commit` is called for that block (see `node.rs` line 5449: "Capture the epoch of the block being committed (before on_commit advances it)"). For h2 (the epoch-change block): `current_epoch()=0` is captured, then `on_commit` fires and advances the engine to epoch 1. For h3: `current_epoch()=1` is captured (the engine is already in epoch 1 when h3 commits). The `epoch=1` stored in h3's record is therefore the engine epoch **already active** when h3 commits — not the epoch *under* which h3 was proposed or voted on. h3 is signed by the same 4 validators in both cases (this is a same-validator-set transition; the validator membership is unchanged). The first block authored exclusively under the new epoch bookkeeping is h3; the first block that required the new epoch's membership for liveness would only matter if validators were added or removed, which is out of scope for this milestone.
+
+**Scope boundary (same-validator-set only):** This test closes the **same-validator-set epoch-transition test**. The genesis configures `at_height=2, new_epoch=2` with the identical 4 validators for both outgoing and incoming sets. Validator additions, removals, and dynamic membership activation are separate milestones not tested here.
+
+**Key bugs fixed (this milestone):**
+- `propose_and_broadcast_multinode` did not inject the PQHS-EC1 epoch-change payload; only the `propose_fresh` path (not taken by PQ-HotStuff) did. Fixed to mirror the same genesis-config lookup.
+- `validate_block_payload` decoded PQHS-EC1 bytes as `BlockPayload`, got version=0 (default), and rejected them with "payload version 0 is not the required 1". Fixed with an early-return bypass for proposals starting with `EPOCH_CHANGE_MAGIC`.
+- `verify_handoff_proof` used `Fips204Verifier` (FIPS 204 ML-DSA-65, ~3309-byte signatures, context parameter) but devnet votes are signed with `pqcrypto_dilithium::dilithium3` (~2420 bytes, no context) via `sign_vote` → `chain_forge_crypto::sign_consensus`. Completely incompatible. Fixed to use `chain_forge_crypto::verify_consensus` under `#[cfg(feature = "real-crypto")]`, symmetric with `sign_vote`.
+
+---
+
+## QAT-07 PQ-HotStuff-2 four-node devnet integration complete — 2026-11-12
+
+**QAT-07 Phase 2: `PqHotStuffEngine` wired into `chain-forge-node`; four-node ML-DSA-65 devnet commits blocks end-to-end**
+
+| Deliverable | Status |
+|---|---|
+| `ConsensusVariant::PqHotStuff` dispatch in `validate_block_payload` (feature-gated) | ✅ |
+| Gossip vote handler uses `cert.round` (not vote round) for proposal lookup | ✅ |
+| Own-vote handler uses `cert.round` for two-chain commit proposal lookup | ✅ |
+| `on_timeout` tolerates missing SafetyStore (empty sig, round still advances) | ✅ |
+| `locked_qc` updated unconditionally on each new QC (liveness over skipped rounds) | ✅ |
+| Defensive pruning: stale-round votes rejected before accumulator add | ✅ |
+| `on_commit` resets `high_qc` and `locked_qc` to genesis on height advance | ✅ |
+| `pqhs2_4node_reaches_target_height`: all 4 nodes reach height ≥ 3 within 60s | ✅ |
+| `propose()` uses `compute_block_hash` (sync validation fix — lagging node Dave) | ✅ |
+| Regression checks: `timeout_signing_failure_still_advances_round` (R-TF-1/R-TF-2), `locked_qc_round_never_decreases_within_epoch` (R-LM-1/R-LM-2) — 10/10 engine unit tests | ✅ |
+| Cross-node agreement check: all 4 nodes assert identical `block_hash` + `state_root` at height 3 | ✅ |
+| **`pqhs2_4node_live` integration test** (BossKing MINGW64, `d9c770d`) | ✅ **Windows-confirmed** |
+
+**Windows confirmation (owner-run, 2026-11-12):** `cargo test -p chain-forge-node --features pq-hotstuff --test pqhs2_4node_live -- --nocapture` on branch `feat/qat-07-safety-store-integration` at `d9c770d` — 1/1 passed in 23.7s. All 4 ML-DSA-65 devnet nodes reached height 3 and agreed on the committed block:
+
+```
+block_hash  = 217e30ed9f7cd845375c2d67e522204db03aed3c6b5b4b66ec6dcb07137ec488
+state_root  = a92a28fed791f2c03bb88f7899807e131fc9e38729164c2abd86d4c11013e08e
+```
+
+All four nodes — `qcb1alice`, `qcb1bob`, `qcb1carol`, `qcb1dave` — produced identical values. No fork. Dave synced successfully and committed the same block as the quorum.
+
+**Bugs fixed (this milestone):**
+- `on_timeout` sign failure (`map_err(Internal)?` → `unwrap_or_default()`) blocked round advance.
+- `locked_qc` conditional update (`new_qc.round == locked_qc.round + 1`) prevented two-chain commit after any timeout round.
+- Both commit paths in `node.rs` used `vote.round` for proposal lookup; two-chain cert has `round = R-1`, not `R`.
+- Stale round-(R-1) votes re-entering the accumulator after `advance_round` caused `check_quorum` to fire a spurious QC from the wrong bucket (8 stale votes ≥ threshold=3).
+- `on_commit` did not reset `high_qc`/`locked_qc`; at height H+1 round=1 the guard `new_qc.round > high_qc.round` always failed, stalling the chain after the first committed block.
+- `propose()` stored a placeholder block hash; `SyncResponse` handler in `node.rs` recomputes via `compute_block_hash` and rejected every sync response from a lagging node.
+
+---
+
+## QAT-07 key rotation and next-block revocation complete — 2026-11-12
+
+**QAT-07 key rotation and next-block revocation for pqc-native admission (`epoch-transition` feature flag)**
+
+| Deliverable | Status |
+|---|---|
+| `revoked: bool` field on `VcaValidatorRecord` (default false; persists for auditability) | Done |
+| `AdmissionError::UnknownValidator` variant (shared by rotation path) | Done |
+| `rotate_consensus_key(id, new_key)`: validates via same rules as `to_validator_info_pq`; may be called before or after `close_epoch()` | Done |
+| `revoke_validator(id)`: marks `record.revoked = true`; irreversible within an epoch | Done |
+| `admit_pq_native`: skips revoked entries after zero-weight check; revoked wins over rotated | Done |
+| KR-1  rotate valid key → admitted set has new key | ✅ |
+| KR-2  rotate ML-DSA-87 key → `WrongKeySlot` | ✅ |
+| KR-3  rotate unknown validator → `UnknownValidator` | ✅ |
+| KR-4  revocation at H → absent from admitted set at H+1 | ✅ |
+| KR-5  revoked + rotated → revoked wins | ✅ |
+| KR-6  end-to-end: rotate → admit → `canonical_set_hash` → `verify_handoff_proof` → Ok | ✅ |
+| **6/6 rotation/revocation tests** (BossKing MINGW64, `021b9c7`) | ✅ **Windows-confirmed** |
+
+**Windows confirmation (owner-run, 2026-11-12):** `cargo test -p chain-forge-consensus --features epoch-transition --test gate_b_rotation -- --nocapture` at `021b9c7` — 6/6 passed in 0.05s.
+
+**Locked invariants:** Revocation finalized at H excludes the validator from the admitted set at H+1. `on_commit` verifies the exact admitted set without filtering it again. Revoked wins over rotated within the same epoch. Dynamic membership remains disabled.
+
+---
+
+## QAT-07 pqc-native admission gate complete — 2026-11-12
+
+**QAT-07 ML-DSA-65 consensus key binding and pqc-native validator admission (`epoch-transition` feature flag)**
+
+| Deliverable | Status |
+|---|---|
+| `consensus_ml_dsa_65_pubkey` field on `VcaValidatorRecord` (distinct from `pq_pubkey` ML-DSA-87 account slot) | Done |
+| `with_consensus_key(key)` builder for key registration path | Done |
+| `to_validator_info_pq()`: rejects empty key, ML-DSA-87 in ML-DSA-65 slot, wrong length | Done |
+| `AdmissionError` enum: `NoPqConsensusKey`, `WrongKeySlot`, `WrongKeyLength`, `ZeroWeight` | Done |
+| `MLDSA65_PUBKEY_LEN` (1952) and `MLDSA87_PUBKEY_LEN` (2592) constants exported | Done |
+| `admit_pq_native(registry, height)`: excludes zero-weight silently; rejects set on any malformed key | Done |
+| AD-1  valid credential binding → admitted | ✅ |
+| AD-2  substituted key → `SetHashMismatch` via `verify_handoff_proof` | ✅ |
+| AD-3  missing key → `NoPqConsensusKey` | ✅ |
+| AD-4  ML-DSA-87 key in ML-DSA-65 slot → `WrongKeySlot` | ✅ |
+| AD-5  malformed length → `WrongKeyLength` | ✅ |
+| AD-6  zero-weight excluded silently | ✅ |
+| AD-7  end-to-end: `admit_pq_native` → `canonical_set_hash` → `verify_handoff_proof` → Ok | ✅ |
+| **7/7 admission tests** (BossKing MINGW64, `421bc33`) | ✅ **Windows-confirmed** |
+
+**Finding (locked):** `pq_pubkey` on `VcaValidatorRecord` is ML-DSA-87 (4627-byte signature, account/transaction dual-sig slot) as documented. Every production caller passes `vec![]`. The ML-DSA-65 consensus key (1952-byte public key) has no existing field — `consensus_ml_dsa_65_pubkey` is new and distinct.
+
+**Windows confirmation (owner-run, 2026-11-12):** `cargo test -p chain-forge-consensus --features epoch-transition --test gate_b_admission -- --nocapture` at `421bc33` — 7/7 passed in 0.13s. All rejection paths confirmed: missing key, ML-DSA-87 in ML-DSA-65 slot, malformed length, zero-weight excluded, substituted-key detected via set_hash. End-to-end path with real ML-DSA-65 signatures passes.
+
+**Remaining scope (not included here):** Key rotation, next-block revocation (revocation finalized at H affects eligibility at H+1 via authenticated path), dynamic membership activation.
+
+---
+
+## QAT-07 epoch-handoff verification complete — 2026-11-12
+
+**QAT-07 authenticated epoch-handoff: ML-DSA-65 signature verification on `CommitCertificate`, canonical `set_hash` with public keys, consecutive-round parent link (`epoch-transition` feature flag)**
+
+| Deliverable | Status |
+|---|---|
+| `epoch-transition` feature flag (implies `pq-hotstuff-fips204`, disabled by default) | Done |
+| `canonical_set_hash`: ID-lex order, 2-byte-prefixed id + key + 8-byte power, SHA3-256 | Done |
+| `verify_handoff_proof`: consecutive-round check, ML-DSA-65 sig per precommit, no dupe signers, quorum, set-hash binding | Done |
+| `HandoffError` enum: 9 variants covering all rejection paths | Done |
+| `engine.rs` `on_commit`: `verify_handoff_proof` called before R2 write sequence under `epoch-transition` | Done |
+| EH-1 wrong key → `SignatureInvalid` | ✅ |
+| EH-2 corrupt signature → `SignatureInvalid` | ✅ |
+| EH-3 duplicate signer → `DuplicateSigner` | ✅ |
+| EH-4 insufficient quorum → `InsufficientPower` | ✅ |
+| EH-5 substituted incoming key → `SetHashMismatch` | ✅ |
+| EH-6 invalid child link → `ConsecutiveRoundsViolation` | ✅ |
+| EH-7 happy path → `Ok` | ✅ |
+| canonical_set_hash order-independence and key-binding | ✅ |
+| **8/8 epoch-handoff tests** (BossKing MINGW64, `fda5abf`) | ✅ **Windows-confirmed** |
+
+**Windows confirmation (owner-run, 2026-11-12):** `cargo test -p chain-forge-consensus --features epoch-transition --test gate_b_epoch_handoff -- --nocapture` at `fda5abf` — 8/8 passed in 0.20s. All rejection paths confirmed: wrong key, corrupt sig, duplicate signer, insufficient quorum, substituted incoming key, invalid child link. Happy path with 3-of-3 real ML-DSA-65 signatures passes. Baseline build (no features) unchanged.
+
+**What is NOT included here (separate milestones):** SSI registry resolution, key rotation, next-block revocation, ML-DSA-only validator admission gate, P2P wiring.
+
+---
+
+## QAT-07 Gate B complete — 2026-11-12
+
+**QAT-07 Gate B: OS-process TCP epoch-boundary + crash injection + file-based monotonic counter (Windows)**
+
+| Deliverable | Status |
+|---|---|
+| `FsCounter` — 44-byte file record: `value:u64 \|\| digest:[u8;32] \|\| crc32:u32` | Done |
+| CRC32 partial-write integrity guard (fail-closed on truncated/torn record) | Done |
+| Windows writer fencing: `GENERIC_WRITE \| FILE_SHARE_READ` → `ERROR_SHARING_VIOLATION` | Done |
+| B1: 7-step TCP epoch-boundary — SealViolation, RoundBelowEpochMinimum, EpochRegression, epoch-1 ML-DSA-65 frame | Done |
+| B2: 5 kill points (K0–K3 forced + K4 clean control) — crash-window recovery via `open()` | Done |
+| B3: 8 counter tests — truncated, CRC mismatch, stale session, CAS failure, F1/F2 two-process fencing | Done |
+| `gate-b-harness` feature flag — devnet harness disabled in production build | Done |
+| B1 TCP epoch boundary: 1/1 Windows-confirmed at `b61257c` | ✅ |
+| B3 counter fencing: 8/8 Windows-confirmed at `72b5a88` | ✅ |
+| B2 crash injection: 6/6 Windows-confirmed at `72b5a88` | ✅ |
+| **All 15 Gate B tests on one revision** (BossKing MINGW64, `72b5a88`) | ✅ **Windows-confirmed** |
+
+**Windows confirmation — TCP epoch boundary (owner-run, 2026-11-12):** `cargo test -p chain-forge-consensus --features gate-b-harness --test gate_b_tcp_epoch_boundary` at `b61257c` — 1/1 passed. All 7 steps confirmed:
+- Step 3: `SealViolation` — epoch 0 sealed at round 5; round 6 above cutoff
+- Step 4: `ProofNotDurable` — epoch 1 proof not durable; `advance_epoch_record` not yet called (sealed at epoch 0 round 5)
+- Step 6: `EpochRegression` — epoch 0 below recorded epoch 1
+- Step 7: epoch-1 ML-DSA-65 frame, 3309-byte signature, verifies
+- Receiver saw exactly 2 frames (epoch-0 round-5, epoch-1 round-1), both valid
+
+**Windows confirmation — counter fencing + crash injection (owner-run, 2026-11-12):** `cargo test -p chain-forge-consensus --features gate-b-harness --test gate_b_counter_fencing --test gate_b_crash_injection` at `72b5a88` — 8/8 + 6/6 passed. F1 fencing: child blocked with `open_exclusive: The process cannot access the file because it is being used by another process. (os error 32)`; succeeded after `release_handle()`. F2: file state value=1 after simulated kill, advanced to value=2. K0–K4 all recover correctly; K4 clean shutdown control passes.
+
+**Gate B scope document:** `docs/pq-hotstuff-2/gate-b-scope.md` at `d8bfdf9` — approved by owner 2026-11-12.
+
+---
+
+## QAT-07 Gate A complete — 2026-11-12
+
+**QAT-07 Gate A: epoch-boundary signing rules — R2 transition table, durable write order, R3-a/R3-b recovery**
+
+| Deliverable | Status |
+|---|---|
+| `SafetyRecord` v3: `seal`, `set_hash`, `handoff_cert_hash` fields | Done |
+| `SignError::SealViolation` — new epoch-0 sig above seal round denied | Done |
+| `SignError::RoundBelowEpochMinimum` — epoch > 0 must start at round ≥ 1 | Done |
+| `store::write_seal` — R2 step 2: durably writes `seal=(epoch, round)` | Done |
+| `store::advance_epoch_record` — R2 steps 3–4: clears floors/seal, writes epoch + hashes | Done |
+| `on_commit` R1 cert verification — fails closed before accepting V_new | Done |
+| `on_commit` durable write order — write_seal then advance_epoch_record | Done |
+| 13 Gate A acceptance tests (`pq_hotstuff_epoch_boundary.rs`) | Done |
+| **217 crate tests pass sandbox + Windows-confirmed** (BossKing MINGW64, `7ca0aa7`) | ✅ **Windows-confirmed** |
+
+**Windows confirmation (owner-run, 2026-11-12):** `cargo test -p chain-forge-consensus --features pq-hotstuff --test pq_hotstuff_epoch_boundary` on branch `feat/qat-07-safety-store-integration` at `7ca0aa7` — 13/13 passed.
+
+**Gate A scope document:** `docs/pq-hotstuff-2/epoch-switchover-scope.md` at `c459f2f` — approved by owner 2026-11-12.
+
+---
+
+## QAT-07 phase 1 complete — 2026-11-12
+
+**QAT-07 phase 1: `EngineSigningContext` — SafetyStore wired into `PqHotStuffEngine`**
+
+| Deliverable | Status |
+|---|---|
+| `EngineSigningContext` trait (write-before-broadcast interface, EC-3) | Done |
+| `SafetyStoreSigningContext` production impl (`SafetyStore` + `ConsensusSigner`) | Done |
+| `attach_signing_context` / `restore_floors` — restart anti-equivocation (EC-4) | Done |
+| `advance_epoch` on epoch-change commits (EC-6 wiring) | Done |
+| `sign_local_precommit` convenience method | Done |
+| Sign-later fallback unchanged — existing tests unaffected | Done |
+| All 204 crate tests pass sandbox + **Windows-confirmed** (BossKing MINGW64, `c77c567`) | ✅ **Windows-confirmed** |
+
+**Windows confirmation (owner-run, 2026-11-12):** `cargo test -p chain-forge-consensus --features pq-hotstuff` on branch `feat/qat-07-safety-store-integration` at `c77c567` — 204/204 passed.
+
+**Remaining QAT-07 scope:**
+- Epoch validator-set SSI switch-over in `on_commit`
+- Key rotation + next-block revocation
+- ML-DSA-only validator admission gate
+
+---
+
+## CF-C1 complete — 2026-11-12
+
+**CF-C1: `PqHotStuffEngine` — native PQ-HotStuff-2 `ConsensusEngine` implementation**
+
+| Deliverable | Status |
+|---|---|
+| `PqHotStuffEngine` struct + full `ConsensusEngine` trait impl | Done |
+| `ConsensusVariant::PqHotStuff` (feature-gated `pq-hotstuff`) | Done |
+| Two-chain commit rule (spec §3.3–3.5): `locked_qc.round + 1 == high_qc.round` | Done |
+| Exponential-backoff pacemaker (spec §5.1) | Done |
+| Vote accumulator: 2f+1 threshold quorum | Done |
+| Epoch-transition seal hook (spec §3.6, EC-6): `seal_round` on `on_commit` | Done |
+| 6 unit tests (init, proposer rotation, two-chain commit, pacemaker, epoch seal, variant) | Done |
+| All 204 crate tests pass sandbox + **Windows-confirmed** (BossKing MINGW64, `a37ef87`) | ✅ **Windows-confirmed** |
+
+**Windows confirmation (owner-run, 2026-11-12):** `cargo test -p chain-forge-consensus --features pq-hotstuff` on branch `feat/pq-hotstuff-2-engine-cf-c1` at `a37ef87` — 204/204 passed.
+
+PR [#160](https://github.com/cluna80/Qattice/pull/160) — merged to main pending owner review.
+
+**Formal model basis:** PO-4 (epoch-transition TLC check, 2026-11-11) exhaustively confirmed two-chain commit and EC-6 seal rule in overlap (15,165 states) and disjoint (65 states, SnapSync). Dynamic-membership blocker lifted.
+
+**What is NOT yet included (QAT-07 scope):**
+- Real ML-DSA-65 signing (requires `ConsensusSigner` + `MonotonicCounter` from the node layer)
+- Epoch validator-set SSI switch-over
+- Restart anti-equivocation over TCP (Windows)
+- Key rotation, revocation
+
+**Next milestone: QAT-07** — durable write-before-broadcast safety state, restart anti-equivocation, epoch validator sets, key rotation, ML-DSA-only validator admission.
+
+---
+
 ## PQ-HotStuff-2 implementation status — 2026-11-09 (newest status; documentation-only; append-only)
 
 > **Status supersession, not gate completion.** This section records what the draft PR stack #133–#144 (plus one PR still to be opened) implements and which of it the owner has Windows-confirmed. It removes nothing: earlier sections, including the locked 2026-11-08 pruning requirements and the 2026-11-06 status below, stay as written. It changes no code, authorizes no merge, activation or deployment, and **marks no QAT gate complete**. Per `CLAUDE.md`, a sandbox/CI run never counts as confirmation, so **no ✅ is used here**: nothing below is merged, and the legend's ✅ means shipped.

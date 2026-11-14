@@ -78,6 +78,21 @@ cargo test -p chain-forge-node --test timestamp_monotonic_live -- --nocapture
 cargo test -p chain-forge-node --test fee_settle_live -- --nocapture
 ```
 
+**PQ-HotStuff-2 devnet tests** (requires the `pq-hotstuff` feature):
+
+```sh
+cargo build -p chain-forge-node --features pq-hotstuff
+
+# Four-node PQ-HotStuff-2 block production (heights 1–3, ML-DSA-65)
+cargo test -p chain-forge-node --features pq-hotstuff \
+  --test pqhs2_4node_live -- --nocapture
+
+# Authenticated epoch-change: epoch 0→1 at height 2, verify_handoff_proof
+# with real ML-DSA-65 signatures, finalization through height 5
+cargo test -p chain-forge-node --features pq-hotstuff \
+  --test pqhs2_4node_epoch_live -- --nocapture
+```
+
 Tests spawn real node processes, use dynamic ports, and clean up after themselves.
 Expected runtime: 60–120 s per test.
 
