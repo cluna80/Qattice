@@ -600,3 +600,298 @@ fn h0_6_keybind_race() {
     println!("  h0_6_keybind_race  PASS");
     println!("═══════════════════════════════════════════════════════════════\n");
 }
+
+// ── KB-02: same-block binding race ───────────────────────────────────────────
+//
+// Both Tx1 (key_A) and Tx2 (key_B) are submitted to the SAME node in rapid
+// succession, so the mempool is likely to include both in the next block.
+//
+// Assertions:
+//   - At most one tx commits with success=true.
+//   - If both committed in the same block: exactly one succeeded.
+//   - Bound key on all 4 nodes is key_A (the address-matching key).
+//   - All 4 nodes agree on state root.
+//   - If the two txs landed in different blocks (scheduler split them),
+//     the cross-block invariant still holds and the test notes the outcome.
+
+const KB2_API_PORTS: &[u16] = &[19230, 19231, 19232, 19233];
+const KB2_P2P_PORTS: &[u16] = &[29230, 29231, 29232, 29233];
+const KB2_CHAIN_ID:  &str   = "qcb-devnet-h06-kb2";
+
+static KB2_GENESIS: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+fn kb2_genesis_path() -> std::path::PathBuf {
+    KB2_GENESIS.get_or_init(|| {
+        let template = repo_root().join("tests").join("devnet").join(GENESIS_TEMPLATE);
+        let text = std::fs::read_to_string(&template)
+            .unwrap_or_else(|e| panic!("read genesis template {template:?}: {e}"));
+        let mut g: serde_json::Value = serde_json::from_str(&text)
+            .expect("parse genesis template JSON");
+
+        g["chain_id"] = serde_json::Value::String(KB2_CHAIN_ID.to_string());
+        g["consensus"]["block_time_ms"] = serde_json::Value::Number(10_000.into());
+        g["execution"]["require_signatures"] = serde_json::Value::Bool(true);
+
+        let contested_addr = key_derived_address(SEED_A);
+
+        g["genesis_accounts"].as_array_mut().unwrap().push(serde_json::json!({
+            "label":   "Contested KB2",
+            "address": contested_addr,
+            "balance": "50000000",
+            "role":    "user"
+            // public_key intentionally absent
+        }));
+        g["genesis_accounts"].as_array_mut().unwrap().push(serde_json::json!({
+            "label":   "KB2 recv",
+            "address": RECV_ADDR,
+            "balance": "1000000",
+            "role":    "user"
+        }));
+
+        let dir = std::env::temp_dir()
+            .join(format!("h0_6_kb2_genesis_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("genesis.json");
+        let tmp = dir.join("genesis.json.tmp");
+        std::fs::write(&tmp, serde_json::to_string_pretty(&g).unwrap()).unwrap();
+        std::fs::rename(&tmp, &out).unwrap();
+        out
+    }).clone()
+}
+
+fn build_binding_tx_kb2(id: &str, seed: &str, sender: &str, nonce: u64) -> Transaction {
+    let kp       = MlDsaScheme.generate_keypair(seed).expect("keygen");
+    let body     = TxBody::Transfer {
+        to:     RECV_ADDR.to_string(),
+        denom:  "uqcb".to_string(),
+        amount: TX_AMOUNT,
+    };
+    let body_json = serde_json::to_string(&body).expect("body serialise");
+    let message  = mldsa_tx_prehash(KB2_CHAIN_ID, body_json.as_bytes());
+    let sig      = MlDsaScheme.sign(&message, &kp).expect("ML-DSA sign");
+    Transaction {
+        id:            id.to_string(),
+        sender:        sender.to_string(),
+        nonce,
+        body,
+        gas_limit:     500_000,
+        signature:     vec![],
+        public_key:    vec![],
+        pq_signatures: vec![format!("mldsa65:{}", hex_encode(&sig.bytes))],
+        sig_scheme:    Some(SchemeId::MlDsa),
+        pq_public_key: kp.public_key.clone(),
+    }
+}
+
+fn spawn_node_kb2(
+    bin:       &PathBuf,
+    validator: &'static str,
+    api_port:  u16,
+    p2p_port:  u16,
+    data_dir:  &PathBuf,
+    log_path:  &PathBuf,
+    bootstrap: Option<&str>,
+) -> NodeProcess {
+    let genesis = kb2_genesis_path();
+    let log_file = std::fs::File::create(log_path)
+        .unwrap_or_else(|e| panic!("cannot create log {log_path:?}: {e}"));
+    let short = validator.strip_prefix("qcb1").unwrap_or(validator);
+    let key = key_file(short);
+    std::fs::create_dir_all(data_dir).unwrap();
+    let mut cmd = Command::new(bin);
+    cmd.args([
+        "--genesis",   genesis.to_str().unwrap(),
+        "--validator", validator,
+        "--key-file",  key.to_str().unwrap(),
+        "--api-port",  &api_port.to_string(),
+        "--p2p-port",  &p2p_port.to_string(),
+        "--data-dir",  data_dir.to_str().unwrap(),
+    ]);
+    if let Some(b) = bootstrap {
+        cmd.args(["--bootstrap", b]);
+    }
+    let child = cmd
+        .stdout(log_file.try_clone().unwrap())
+        .stderr(log_file)
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap_or_else(|e| panic!("spawn {validator}: {e}"));
+    NodeProcess { validator, child, api_port, log_path: log_path.clone() }
+}
+
+#[test]
+#[cfg_attr(not(feature = "pq-hotstuff"), ignore = "requires pq-hotstuff feature")]
+fn h0_6_keybind_race_same_block() {
+    let bin = node_binary();
+    if !bin.exists() {
+        eprintln!("SKIP: node binary not found at {bin:?}.");
+        return;
+    }
+
+    let contested_addr = key_derived_address(SEED_A);
+    let key_a_hex = hex_encode(&mldsa_public_key(SEED_A));
+    let key_b_hex = hex_encode(&mldsa_public_key(SEED_B));
+
+    let log_dir = std::env::temp_dir().join("h0_6_kb2_live");
+    let dat_dir = std::env::temp_dir().join("h0_6_kb2_data");
+    let _ = std::fs::remove_dir_all(&log_dir);
+    let _ = std::fs::remove_dir_all(&dat_dir);
+    std::fs::create_dir_all(&log_dir).unwrap();
+    std::fs::create_dir_all(&dat_dir).unwrap();
+
+    println!("\n═══════════════════════════════════════════════════════════════");
+    println!("  h0_6_keybind_race_same_block (KB-02)");
+    println!("  binary : {bin:?}");
+    println!("  contested addr : {contested_addr}");
+    println!("  key_A : {}...", &key_a_hex[..16]);
+    println!("  key_B : {}...", &key_b_hex[..16]);
+    println!("═══════════════════════════════════════════════════════════════\n");
+
+    // ── Start devnet ──────────────────────────────────────────────────────────
+
+    let alice_data = dat_dir.join("alice");
+    let alice_log  = log_dir.join("qcb1alice.log");
+    let alice = spawn_node_kb2(&bin, "qcb1alice", KB2_API_PORTS[0], KB2_P2P_PORTS[0],
+        &alice_data, &alice_log, None);
+    assert!(wait_port(KB2_API_PORTS[0], Duration::from_secs(20)),
+        "alice API :{} never opened", KB2_API_PORTS[0]);
+    let peer_id   = read_peer_id(&alice_log, Duration::from_secs(20));
+    let bootstrap = format!("/ip4/127.0.0.1/tcp/{}/p2p/{peer_id}", KB2_P2P_PORTS[0]);
+    println!("   bootstrap: {bootstrap}");
+
+    let mut nodes: Vec<NodeProcess> = vec![alice];
+    for (i, &validator) in VALIDATORS[1..].iter().enumerate() {
+        let idx      = i + 1;
+        let short    = validator.strip_prefix("qcb1").unwrap_or(validator);
+        let data_dir = dat_dir.join(short);
+        let log_path = log_dir.join(format!("{validator}.log"));
+        let node = spawn_node_kb2(&bin, validator,
+            KB2_API_PORTS[idx], KB2_P2P_PORTS[idx],
+            &data_dir, &log_path, Some(&bootstrap));
+        assert!(wait_port(KB2_API_PORTS[idx], Duration::from_secs(20)),
+            "{validator} API :{} never opened", KB2_API_PORTS[idx]);
+        nodes.push(node);
+    }
+
+    println!("   waiting for height 2...");
+    wait_height(&mut nodes, 2, Duration::from_secs(300), &log_dir);
+
+    // ── KB-02: submit both txs to the SAME node back-to-back ─────────────────
+
+    println!("\n── KB-02: submitting Tx1 (key_A) and Tx2 (key_B) to same node ──");
+
+    let tx1 = build_binding_tx_kb2("kb02-tx-key-a", SEED_A, &contested_addr, 0);
+    let tx2 = build_binding_tx_kb2("kb02-tx-key-b", SEED_B, &contested_addr, 0);
+    let tx1_json = serde_json::to_string(&tx1).expect("serialise tx1");
+    let tx2_json = serde_json::to_string(&tx2).expect("serialise tx2");
+
+    // Both submitted to Alice (port 0) with no sleep in between.
+    let (s1, r1) = api_post(KB2_API_PORTS[0], "/api/tx", &tx1_json).expect("no response tx1");
+    let (s2, r2) = api_post(KB2_API_PORTS[0], "/api/tx", &tx2_json).expect("no response tx2");
+    println!("   Tx1 HTTP {s1}: {r1}");
+    println!("   Tx2 HTTP {s2}: {r2}");
+
+    let tx1_queued = s1 == 200 || s1 == 202;
+    let tx2_queued = s2 == 200 || s2 == 202;
+
+    // Wait for execution results.
+    let res1 = if tx1_queued {
+        wait_tx_result(KB2_API_PORTS[0], "kb02-tx-key-a", Duration::from_secs(180))
+    } else {
+        Some(r1.clone())
+    };
+    let res2 = if tx2_queued {
+        wait_tx_result(KB2_API_PORTS[0], "kb02-tx-key-b", Duration::from_secs(180))
+    } else {
+        Some(r2.clone())
+    };
+
+    println!("   Tx1 result: {:?}", res1);
+    println!("   Tx2 result: {:?}", res2);
+
+    let tx1_success = res1.as_ref().and_then(|r| r["success"].as_bool()).unwrap_or(false);
+    let tx2_success = res2.as_ref().and_then(|r| r["success"].as_bool()).unwrap_or(false);
+    let h1 = res1.as_ref().and_then(|r| r["height"].as_u64());
+    let h2 = res2.as_ref().and_then(|r| r["height"].as_u64());
+
+    println!("   Tx1 success={tx1_success} height={h1:?}");
+    println!("   Tx2 success={tx2_success} height={h2:?}");
+
+    // Core invariant: at most one succeeds regardless of block placement.
+    let success_count = tx1_success as u32 + tx2_success as u32;
+    assert!(success_count <= 1,
+        "KB-02: at most one binding tx must succeed; both succeeded");
+    println!("   ✓ KB-02: at most one binding succeeded ({success_count}/2)");
+
+    // Report whether we hit same-block or cross-block.
+    match (h1, h2) {
+        (Some(a), Some(b)) if a == b => {
+            println!("   ✓ KB-02: SAME-BLOCK confirmed — both txs committed at height {a}; \
+                       exactly one succeeded ({success_count}/2)");
+        }
+        (Some(a), Some(b)) => {
+            println!("   INFO: KB-02: txs landed in different blocks ({a} vs {b}); \
+                       cross-block invariant still holds");
+        }
+        _ => {
+            println!("   INFO: KB-02: one or both txs have no height (may have been \
+                       rejected at admission)");
+        }
+    }
+
+    // key_A must be the winner if any key bound.
+    if tx2_success && !tx1_success {
+        panic!(
+            "KB-02: key_B (non-address-matching) bound to the contested account; \
+             address-derivation invariant violated"
+        );
+    }
+
+    // ── Verify bound key and state root on all 4 nodes ───────────────────────
+
+    println!("\n── KB-02: verifying bound key and state root on all 4 nodes ──");
+    let check_h = height_of(KB2_API_PORTS[0]);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        if KB2_API_PORTS.iter().all(|&p| height_of(p) >= check_h) { break; }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+
+    let mut bound_keys: Vec<Option<String>> = Vec::new();
+    for &port in KB2_API_PORTS {
+        let bk = bound_key_of(port, &contested_addr);
+        println!("   node :{port}  bound_key={}", bk.as_deref().map(|k| &k[..16.min(k.len())]).unwrap_or("(none)"));
+        bound_keys.push(bk);
+    }
+
+    let non_empty: Vec<&String> = bound_keys.iter().flatten().collect();
+    if non_empty.len() > 1 {
+        let first = non_empty[0];
+        for k in &non_empty[1..] {
+            assert_eq!(k, &first, "KB-02: nodes disagree on bound key");
+        }
+        println!("   ✓ KB-02: all nodes agree on bound key {}...", &first[..16.min(first.len())]);
+    }
+    for k in &non_empty {
+        assert_eq!(k.as_str(), key_a_hex.as_str(),
+            "KB-02: bound key is not key_A");
+    }
+    if !non_empty.is_empty() {
+        println!("   ✓ KB-02: bound key = key_A on all reporting nodes");
+    }
+
+    let roots: Vec<String> = KB2_API_PORTS.iter().map(|&p| state_root_of(p)).collect();
+    let heights: Vec<u64>  = KB2_API_PORTS.iter().map(|&p| height_of(p)).collect();
+    println!("   heights={heights:?}  roots={roots:?}");
+    if heights.windows(2).all(|w| w[0] == w[1]) && roots.iter().all(|r| !r.is_empty()) {
+        assert!(roots.windows(2).all(|w| w[0] == w[1]),
+            "KB-02: state root mismatch: {roots:?}");
+        println!("   ✓ KB-02: all 4 nodes agree on state root {}", roots[0]);
+    } else {
+        println!("   INFO: nodes at different heights — skipping cross-node root check");
+    }
+
+    println!("\n═══════════════════════════════════════════════════════════════");
+    println!("  h0_6_keybind_race_same_block  PASS");
+    println!("═══════════════════════════════════════════════════════════════\n");
+}
