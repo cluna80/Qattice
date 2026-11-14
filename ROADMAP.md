@@ -41,31 +41,37 @@ cargo test -p chain-forge-crypto --features real-pqc --test prop_sign_verify -- 
 
 ## PQ-HotStuff v2 signing wiring + QC cert-epoch boundary — 2026-11-14
 
-✅ **Windows-confirmed**
+✅ **Windows-confirmed** (re-confirmed 2026-11-14 at `e80214e` with structured JSON verification)
 
-**Branch:** `feat/vote-format-v2` — commits `cfaeea2` (cfg guard fix) + `a0e231f` (CommitCertificate field reorder + assertion correction) + `c683909` (port separation) + `576c6f1` (last_commit from engine cert)
+**Branch:** `feat/vote-format-v2` — commits `cfaeea2` → `576c6f1` → `01b268f` → `e80214e`
 
 **What landed:**
 
-Four bugs fixed to get real ML-DSA-65 signatures end-to-end through epoch change and QC cert-epoch assertion:
+Five fixes across this milestone:
 
-1. **cfg guard bug** (`cfaeea2`): `#[cfg(not(feature = "epoch-transition"))]` in `node.rs` always evaluated true (epoch-transition is a `chain-forge-consensus` feature, not a `chain-forge-node` feature). Fixed to `#[cfg(not(feature = "pq-hotstuff"))]` at all 3 sign/verify sites — sign_vote, verify_vote, verify_handoff_proof calls.
+1. **cfg guard bug** (`cfaeea2`): `#[cfg(not(feature = "epoch-transition"))]` in `node.rs` always evaluated true (epoch-transition is a `chain-forge-consensus` feature, not a `chain-forge-node` feature). Fixed to `#[cfg(not(feature = "pq-hotstuff"))]` at all 3 sign/verify sites.
 
-2. **CommitCertificate field reorder** (`a0e231f`): Moved `epoch` field before `precommits` in `CommitCertificate` so JSON field order is deterministic. The test parser splits on `"epoch":` and uses `.nth(2)` to reach `last_commit.epoch`; with `precommits` first, the first votes' epoch fields were encountered before the cert's.
+2. **CommitCertificate field reorder** (`a0e231f`): Moved `epoch` before `precommits` in the struct for deterministic JSON order.
 
-3. **Port separation for parallel tests** (`c683909`): Both tests used the same port constants (19090-93/28010-13). Separated to `API_PORTS_EPOCH/P2P_PORTS_EPOCH` (19090-93/28010-13) and `API_PORTS_BOUNDARY/P2P_PORTS_BOUNDARY` (19094-97/28014-17). `spawn_nodes` now takes port slices.
+3. **Port separation for parallel tests** (`c683909`): Separate port ranges so both tests can run in parallel without WSAEADDRINUSE.
 
-4. **last_commit from engine cert** (`576c6f1`): `participation = payload.last_commit.clone()` read from the block payload, which is always `None` for PQ-HotStuff (Tendermint embeds the cert in the payload; PQ-HotStuff does not). Added `#[cfg(feature = "pq-hotstuff")] let participation = Some(cert.clone())` so the CommitCertificate from the engine is stored in the block summary.
+4. **last_commit from engine cert** (`576c6f1`): `participation = payload.last_commit.clone()` was always `None` for PQ-HotStuff. Fixed with `#[cfg(feature = "pq-hotstuff")] let participation = Some(cert.clone())`.
 
-**Actual boundary trace (epoch-change at height 2):**
+5. **cert.epoch from vote epoch** (`01b268f`): `try_two_chain_commit` set `epoch: self.epoch` (current engine epoch at assembly time). For the two-chain same-height commit rule, `self.epoch` can be ahead of the votes' signing epoch (on_commit for a concurrent block at another round may have already fired). Fixed to `epoch: to_commit.precommits.first().map(|v| v.epoch).unwrap_or(0)`.
 
-Block H's `last_commit` is the CommitCertificate that certifies block H. Epoch in a cert is set at QC formation time (the engine epoch when validators signed the precommits).
+**Two-chain commit rule (same-height consecutive rounds):**
 
-| Block | `last_commit.height` | `last_commit.epoch` | Notes |
-|---|---|---|---|
-| h2 | 2 | 0 | epoch-change block; committed by epoch-0 set |
-| h3 | 3 | 1 | first post-transition block; certified by epoch-1 set |
-| h4 | 4 | 1 | continued epoch 1 |
+Block H is committed when two consecutive-round QCs form **at the same height H** (`locked_qc.round + 1 == new_qc.round`, both at height H). The cert epoch matches the epoch under which the precommit votes were signed, which equals the engine epoch when those votes were cast.
+
+**Confirmed boundary trace (epoch-change at height 2, 4-node ML-DSA-65 devnet):**
+
+| Block | cert.height | cert.epoch | vote_epochs | Notes |
+|---|---|---|---|---|
+| h2 | 2 | 0 | [0,0,0] | epoch-change block; QCs form at epoch 0 |
+| h3 | 3 | 1 | [1,1,1] | QCs form at epoch 1 (after on_commit(h2) transitions epoch) |
+| h4 | 4 | 1 | [1,1,1] | continued epoch 1 |
+
+The epoch flip in `cert.epoch` (and `vote_epochs`) is between h2 and h3.
 
 **Two tests in `chain-forge-node/tests/pqhs2_4node_epoch_live.rs`:**
 
@@ -74,18 +80,24 @@ Block H's `last_commit` is the CommitCertificate that certifies block H. Epoch i
 | `pqhs2_4node_epoch_change_reaches_new_epoch` | ✅ Windows-confirmed |
 | `pqhs2_4node_qc_cert_epoch_boundary` | ✅ Windows-confirmed |
 
-**Windows confirmation (owner-run, 2026-11-14):** `feat/vote-format-v2` at `576c6f1` — BossKing MINGW64. Both tests passed in 51.15s:
+**Windows confirmation (owner-run, 2026-11-14):** `feat/vote-format-v2` at `e80214e` — BossKing MINGW64. Both tests passed in 57.01s. Structured JSON parser verified `cert.epoch` and `vote_epochs` on all 4 nodes at h2, h3, h4:
 
 ```
-test pqhs2_4node_epoch_change_reaches_new_epoch ... ok
-test pqhs2_4node_qc_cert_epoch_boundary ... ok
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 51.15s
-```
+── Cert check: block 2 → last_commit for h2 (expected cert epoch 0) ──
+   qcb1alice  last_commit.height=2  cert.epoch=0  vote_epochs=[0, 0, 0]
+   ...
+   ✓ block 2: last_commit certifies h2 epoch=0
+── Cert check: block 3 → last_commit for h3 (expected cert epoch 1) ──
+   qcb1alice  last_commit.height=3  cert.epoch=1  vote_epochs=[1, 1, 1]
+   ...
+   ✓ block 3: last_commit certifies h3 epoch=1
+── Cert check: block 4 → last_commit for h4 (expected cert epoch 1) ──
+   qcb1alice  last_commit.height=4  cert.epoch=1  vote_epochs=[1, 1, 1]
+   ...
+   ✓ block 4: last_commit certifies h4 epoch=1
 
-Cert-epoch trace confirmed on all 4 nodes:
-- block 2: last_commit.height=2, last_commit.epoch=0 (all 4 nodes)
-- block 3: last_commit.height=3, last_commit.epoch=1 (all 4 nodes)
-- block 4: last_commit.height=4, last_commit.epoch=1 (all 4 nodes)
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 57.01s
+```
 
 **Run command:**
 ```
