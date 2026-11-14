@@ -776,6 +776,7 @@ pub trait ConsensusEngine: Send + Sync {
     /// Attach a durable FIPS 204 signing context (write-before-broadcast).
     /// Called once after `init`, before the first vote or proposal.
     /// No-op for engines that do not support it.
+    #[cfg(feature = "pq-hotstuff")]
     fn attach_pq_signing_ctx(&mut self, _ctx: Box<dyn crate::pq_hotstuff::signing::EngineSigningContext>) {}
 
     /// Sign a vote (prevote or precommit) through the durable signing context.
