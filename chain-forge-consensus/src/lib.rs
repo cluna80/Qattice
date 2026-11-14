@@ -512,6 +512,12 @@ pub enum ConsensusVariant {
     /// Federated Byzantine Agreement with threshold signatures.
     /// XRPL-inspired: no leader rotation, UNL-based safety.
     XrplInspired,
+
+    /// Native PQ-HotStuff-2 with ML-DSA-65 consensus keys (spec docs/pq-hotstuff-001-spec.md).
+    /// Two-chain commit, epoch-transition seal, formally verified handoff (PO-4).
+    /// Feature-gated: `pq-hotstuff`. Not network-active by default.
+    #[cfg(feature = "pq-hotstuff")]
+    PqHotStuff,
 }
 
 impl std::fmt::Display for ConsensusVariant {
@@ -520,6 +526,8 @@ impl std::fmt::Display for ConsensusVariant {
             Self::TendermintStyle => write!(f, "Tendermint-style BFT"),
             Self::HotStuffStyle   => write!(f, "HotStuff-style BFT"),
             Self::XrplInspired    => write!(f, "XRPL-inspired FBA"),
+            #[cfg(feature = "pq-hotstuff")]
+            Self::PqHotStuff      => write!(f, "PQ-HotStuff-2 (ML-DSA-65)"),
         }
     }
 }
@@ -1388,9 +1396,12 @@ mod tests {
 
 
 }
-/// PQ-HotStuff-2 (Phase 0, feature `pq-hotstuff`, not enabled by default). See docs/pq-hotstuff-001-spec.md.
+/// PQ-HotStuff-2 (Phase 0+CF-C1, feature `pq-hotstuff`, not enabled by default). See docs/pq-hotstuff-001-spec.md.
 #[cfg(feature = "pq-hotstuff")]
 pub mod pq_hotstuff;
+
+#[cfg(feature = "pq-hotstuff")]
+pub use pq_hotstuff::engine::PqHotStuffEngine;
 
 pub mod tendermint {
     use super::*;
