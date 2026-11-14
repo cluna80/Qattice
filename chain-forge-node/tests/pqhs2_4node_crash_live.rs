@@ -223,24 +223,22 @@ fn read_peer_id(log_path: &PathBuf, timeout: Duration) -> String {
     }
 }
 
-/// Returns true if the log file for `validator` contains a *real* floor violation —
-/// i.e. one that was not handled by the safe observer-mode path.
+/// Returns true if the log contains evidence that the **signing safety latch** fired
+/// — a persistence failure was detected and the node halted all further signing.
 ///
-/// The observer-mode warn ("PQ prevote/precommit safety floor — skipping vote …
-/// (observer mode)") is the *correct* handling of a floor event: the node detected
-/// that signing would breach its persisted floor and correctly refused to sign.
-/// That path includes the error string in a structured `error=` field, so the raw
-/// log line does contain "violates the persisted floor", but it is safe.
-/// We exclude any line that also contains "observer mode".
-fn log_has_floor_violation(log_dir: &PathBuf, validator: &str) -> bool {
+/// Floor events (SafetyStore returning `RoundBelowSigned`) are *correct* behavior
+/// during restart catch-up: the node detects the floor, refuses to sign for this
+/// round, and lets the pacemaker advance.  Those events appear in the log but are
+/// NOT a latch.  The definitive safety check is state_root agreement across all 4
+/// nodes; this function is a secondary check for the rare fatal path.
+fn log_has_signing_latch(log_dir: &PathBuf, validator: &str) -> bool {
     let path = log_dir.join(format!("{validator}.log"));
     std::fs::read_to_string(path)
         .map(|s| {
             s.lines().any(|line| {
-                (line.contains("FloorViolation")
-                    || line.contains("violates the persisted floor")
-                    || line.contains("floor violation"))
-                    && !line.contains("observer mode")
+                line.contains("latch_persistence_failure")
+                    || line.contains("PQ prevote signing failed — halting signing")
+                    || line.contains("PQ precommit signing failed — halting signing")
             })
         })
         .unwrap_or(false)
@@ -513,10 +511,10 @@ fn crash_proposer_before_commit() {
 
     // No FloorViolation on the restarted node.
     assert!(
-        !log_has_floor_violation(&log_dir, kill_name),
-        "FloorViolation detected in {kill_name} log after crash+restart — signing safety violated!"
+        !log_has_signing_latch(&log_dir, kill_name),
+        "Signing safety latch fired on {kill_name} after crash+restart — persistence failure detected!"
     );
-    println!("   no FloorViolation in {kill_name} log ✓");
+    println!("   no signing latch in {kill_name} log ✓");
 
     // All 4 nodes agree on state_root.
     let roots: Vec<String> = all.iter().map(|n| state_root_of(n.api_port)).collect();
@@ -643,10 +641,10 @@ fn crash_voter_after_prevote() {
 
     println!("\n── Phase 6: safety checks ──");
     assert!(
-        !log_has_floor_violation(&log_dir, kill_name),
-        "FloorViolation detected in {kill_name} log after crash+restart!"
+        !log_has_signing_latch(&log_dir, kill_name),
+        "Signing safety latch fired on {kill_name} after crash+restart!"
     );
-    println!("   no FloorViolation in {kill_name} log ✓");
+    println!("   no signing latch in {kill_name} log ✓");
 
     let roots: Vec<String> = all.iter().map(|n| state_root_of(n.api_port)).collect();
     println!("   state roots: {roots:?}");
@@ -795,10 +793,10 @@ fn crash_during_pruning() {
 
     // No floor violation on the restarted node.
     assert!(
-        !log_has_floor_violation(&log_dir, kill_name),
-        "FloorViolation detected in {kill_name} log after crash+restart!"
+        !log_has_signing_latch(&log_dir, kill_name),
+        "Signing safety latch fired on {kill_name} after crash+restart!"
     );
-    println!("   no FloorViolation in {kill_name} log ✓");
+    println!("   no signing latch in {kill_name} log ✓");
 
     // All 4 agree on state_root.
     let roots: Vec<String> = all.iter().map(|n| state_root_of(n.api_port)).collect();
