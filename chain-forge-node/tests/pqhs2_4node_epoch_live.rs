@@ -30,8 +30,12 @@ use std::{
 };
 
 const VALIDATORS: &[&str] = &["qcb1alice", "qcb1bob", "qcb1carol", "qcb1dave"];
-const API_PORTS: &[u16]   = &[19090, 19091, 19092, 19093];
-const P2P_PORTS: &[u16]   = &[28010, 28011, 28012, 28013];
+
+// Each test gets its own port range so they can run in parallel without conflicts.
+const API_PORTS_EPOCH:    &[u16] = &[19090, 19091, 19092, 19093];
+const P2P_PORTS_EPOCH:    &[u16] = &[28010, 28011, 28012, 28013];
+const API_PORTS_BOUNDARY: &[u16] = &[19094, 19095, 19096, 19097];
+const P2P_PORTS_BOUNDARY: &[u16] = &[28014, 28015, 28016, 28017];
 
 const GENESIS_FILE: &str = "genesis-4node-pqhs2-epoch.json";
 const KEY_DIR:      &str = "keys/mldsa";
@@ -188,14 +192,19 @@ fn read_peer_id(log_path: &PathBuf, timeout: Duration) -> String {
 
 // ── Spawn ─────────────────────────────────────────────────────────────────────
 
-fn spawn_nodes(bin: &PathBuf, log_dir: &PathBuf) -> Vec<NodeProcess> {
+fn spawn_nodes(
+    bin: &PathBuf,
+    log_dir: &PathBuf,
+    api_ports: &[u16],
+    p2p_ports: &[u16],
+) -> Vec<NodeProcess> {
     let genesis = genesis_path();
     let mut nodes: Vec<NodeProcess> = Vec::new();
     let mut bootstrap: Option<String> = None;
 
     for (i, &validator) in VALIDATORS.iter().enumerate() {
-        let api_port = API_PORTS[i];
-        let p2p_port = P2P_PORTS[i];
+        let api_port = api_ports[i];
+        let p2p_port = p2p_ports[i];
         let log_path = log_dir.join(format!("{validator}.log"));
         let log_file = std::fs::File::create(&log_path)
             .unwrap_or_else(|e| panic!("cannot create log {log_path:?}: {e}"));
@@ -371,7 +380,7 @@ fn pqhs2_4node_epoch_change_reaches_new_epoch() {
     println!("   epoch-change: height 2 (epoch 0 → 1)");
     println!("   target:  height >= 5  timeout: {timeout_secs}s\n");
 
-    let mut nodes = spawn_nodes(&bin, &log_dir);
+    let mut nodes = spawn_nodes(&bin, &log_dir, API_PORTS_EPOCH, P2P_PORTS_EPOCH);
     // Target height 5: heights 2–4 cover the boundary; 5 confirms epoch 2 is stable
     poll_until_height(&mut nodes, 5, timeout, &log_dir);
 
@@ -478,7 +487,7 @@ fn pqhs2_4node_qc_cert_epoch_boundary() {
     println!("   epoch-change: height 2 (epoch 0 → 1)");
     println!("   target:  height >= 5  timeout: {timeout_secs}s\n");
 
-    let mut nodes = spawn_nodes(&bin, &log_dir);
+    let mut nodes = spawn_nodes(&bin, &log_dir, API_PORTS_BOUNDARY, P2P_PORTS_BOUNDARY);
     poll_until_height(&mut nodes, 5, timeout, &log_dir);
 
     // Block-epoch assertions (same as the companion test)
