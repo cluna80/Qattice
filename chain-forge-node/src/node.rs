@@ -2244,9 +2244,16 @@ impl Node {
 
         // ── PQ-HotStuff path: FIPS 204 possession check and signing context ──
         #[cfg(feature = "pq-hotstuff")]
+        tracing::warn!(
+            consensus_variant = ?self.consensus.variant(),
+            key_scheme = ?kp.scheme,
+            "load_signing_key: checking PQ-HotStuff path"
+        );
+        #[cfg(feature = "pq-hotstuff")]
         if self.consensus.variant() == ConsensusVariant::PqHotStuff
             && kp.scheme == SchemeId::MlDsa
         {
+            tracing::warn!("load_signing_key: entered FIPS 204 PQ path");
             // FIPS 204 ML-DSA-65 keys: SK = 4032 B, PK = 1952 B.
             // The legacy dilithium3 path uses SK = 4000 B; reject it here so a
             // legacy key file never silently degrades to wrong-backend signing.
@@ -2344,14 +2351,20 @@ impl Node {
                 }
             });
 
+            tracing::warn!(
+                has_data_dir = self.data_dir.is_some(),
+                "load_signing_key: maybe_store resolved (Some=has_data_dir)"
+            );
             match maybe_store {
                 Some(Ok(store)) => {
+                    tracing::warn!(address = %address, "load_signing_key: SafetyStore::open succeeded, attaching signing context");
                     let ctx = SafetyStoreSigningContext::new(store, Box::new(signer), 0);
                     self.consensus.attach_pq_signing_ctx(Box::new(ctx));
                     self.consensus.restore_safety_floors();
                     tracing::info!(address = %address, "FIPS 204 ML-DSA-65 signing context attached (durable)");
                 }
-                Some(Err(e)) => {
+                Some(Err(ref e)) => {
+                    tracing::warn!(address = %address, error = %e, "load_signing_key: SafetyStore open/init FAILED");
                     return Err(format!("key file {:?}: cannot initialise PQ safety store: {e}", path));
                 }
                 None => {
