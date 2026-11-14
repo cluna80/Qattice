@@ -1,5 +1,7 @@
 # Qattice — Public Testnet Alpha: ML-DSA-65 + PQ-HotStuff Launch Plan
 
+> **Start here:** [PQ-PoP-HotStuff-2 prerequisite](docs/PQ-POP-PREREQUISITE.md) defines the current protocol direction and the native Phase 0 and Phase 0.5 gates. Once those gates pass, continue the applicable milestones below with PQ-HotStuff-2 and defensive pruning. Earlier Tendermint, Ed25519, and QRC entries document historical plans and evidence.
+
 ## Full stack re-confirmation — 2026-11-14
 
 ✅ **All five suites Windows-confirmed on integration candidate** (owner-run, BossKing MINGW64, `feat/vote-format-v2` at `a7c2f5a`)
