@@ -31,7 +31,7 @@ The stack is clean. #164 is ready to merge into #161 when #161 and #160 are appr
 
 ## PQ-HotStuff-2 DIS TX + pruned restart — `pqhs2_4node_dis_tx_and_pruned_restart` Windows-confirmed — 2026-11-14
 
-**Branch:** `feat/pqhs2-fips204-signing` — head `606ee48` (Windows acceptance) / `95b9e51` (Phase 0 candidate: release-mode view enforcement + full regression suite)
+**Branch:** `feat/pqhs2-fips204-signing` — **Phase 0 baseline: `95b9e51`** (tagged `phase0-baseline-2026-11-14`)
 
 **What landed:**
 
@@ -55,17 +55,22 @@ The stack is clean. #164 is ready to merge into #161 when #161 and #160 are appr
 | 9 | 4-node agreement at height 23 after restart | ✅ |
 | 9 | receiver balance = 100 000 uqcb (no double-execution) | ✅ |
 
-**Windows confirmation (owner-run, BossKing MINGW64, `606ee48`):**
+**Windows confirmation (owner-run, BossKing MINGW64):**
 
 ```
 cargo test -p chain-forge-node --test pqhs2_4node_dis_tx_live --features pq-hotstuff -- --nocapture
 ```
 
-| Run | Result | Time |
-|---|---|---|
-| 1 | ✅ PASS | 785.13s |
+| Run | Commit | Result | Time |
+|---|---|---|---|
+| 1 | `606ee48` | ✅ PASS | 785.13s |
+| 2 | `95b9e51` (**Phase 0 baseline**) | ✅ PASS | 775.47s |
 
-No FATAL, panic, equivocation, or double-execution. Dave's pruned restart synced cleanly in 21.2s. Final state root `d357d1a4…` agreed on all 4 nodes at height 23.
+Run 2 also includes the full regression suite confirmed on Windows at `95b9e51`:
+- `cargo test -p chain-forge-consensus --features pq-hotstuff -- pq_hotstuff::engine::tests` → **13/13**
+- `cargo test -p chain-forge-consensus --features pq-hotstuff-fips204 --test pq_hotstuff_safety_fips204` → **12/12**
+
+No FATAL, panic, equivocation, or double-execution on either run. Dave's pruned restart synced in 21.2s (run 1) / 22.2s (run 2). State root `0758a92c…` agreed on all 4 nodes at height 23. **`95b9e51` is the Phase 0 baseline.**
 
 ---
 
