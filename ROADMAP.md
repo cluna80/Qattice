@@ -29,6 +29,48 @@ The stack is clean. #164 is ready to merge into #161 when #161 and #160 are appr
 
 ---
 
+## FIPS 204 ML-DSA-65 durable signing — `pqhs2_4node_live` Windows-confirmed — 2026-11-14
+
+**Branch:** `feat/pqhs2-fips204-signing` — cleanup head `5234a5e` (binary tested at `62e6ef7`)
+
+**What landed:**
+
+- `EngineSigningContext` trait (`sign_vote`, `sign_timeout`, `sign_proposal`, `write_seal`, `advance_epoch_record`, `restore`) — write-before-broadcast guarantee (spec §7, EC-3).
+- `SafetyStoreSigningContext<S, C>` — production impl backed by `SafetyStore<FsStorage, FsCounter>` + ML-DSA-65 `ConsensusSigner`. Durable state file: `pq_hotstuff_safety.state`; init marker: `pq_hotstuff_safety.init`.
+- `restore_floors()` made a no-op: floors are enforced by the safety store on each `sign_vote`/`sign_timeout` call. (The earlier implementation wrote global view numbers (`height * 10_000 + round`) into `high_qc.round` / `locked_qc.round` which are plain per-height round fields; this corrupted the pacemaker and caused `FloorViolation` at height 2.)
+- `sign_local_precommit` handles `FloorViolation` gracefully (returns empty sig / observer mode) instead of propagating a fatal error. This is the safe path when the pacemaker round has not yet caught up to the safety floor after a restart without chain-state restoration.
+- Global view number formula: `height * 10_000 + round` — used by `sign_vote` and `sign_timeout` call sites in `node.rs` to maintain a globally monotonic safety-store round. Not the same as `self.round` (plain per-height round, resets to 1 on each `on_commit`).
+- Test (`chain-forge-node/tests/pqhs2_4node_live.rs`) always removes its temp dir at startup — stale safety-store floors from a previous run were causing `FloorViolation` on the second height.
+- `verify_fips204_last_vote` reads `pq_hotstuff_safety.state` (via `STATE_FILE` constant) — not the earlier incorrect name `safety_state.cbor`.
+
+**Acceptance gate:**
+
+| Criterion | Result |
+|---|---|
+| All 4 validators reach height ≥ 3 within 60s | ✅ |
+| All 4 safety stores contain a valid FIPS 204 ML-DSA-65 vote signature (`verify_fips204_last_vote`) | ✅ |
+
+**Windows confirmation (owner-run, 3 runs, BossKing MINGW64):**
+
+```
+cargo build -p chain-forge-node --features pq-hotstuff
+cargo test -p chain-forge-node --test pqhs2_4node_live --features pq-hotstuff -- --nocapture
+```
+
+Branch `feat/pqhs2-fips204-signing`; binary at `62e6ef7` (cleanup commit `5234a5e` pushed but not yet rebuilt at time of testing):
+
+| Run | Result | Time |
+|---|---|---|
+| 1 | ✅ 4/4 VALID | 58.78s |
+| 2 | ✅ 4/4 VALID | 50.85s |
+| 3 | ✅ 4/4 VALID | 56.92s |
+
+All three runs: 4 validators × FIPS 204 ML-DSA-65 signatures verified. No FATAL, panic or equivocation in any run.
+
+**Note on `[diag]` / `[diag-log]` lines:** These temporary diagnostic WARN blocks appeared in the tested output because cleanup commit `5234a5e` had been pushed but the binaries were not yet rebuilt at time of testing. The cleanup is correct at `5234a5e`. Rebuild at `5234a5e` and rerun to confirm clean output with no diagnostic lines.
+
+---
+
 ## vote-format v2 property tests — sandbox pass, Windows pending — 2026-11-12
 
 **Branch:** `feat/vote-format-v2` — commits `2037c7a` (format change) + `3813fe2` (property tests)
