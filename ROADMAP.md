@@ -73,6 +73,8 @@ Block H is committed when two consecutive-round QCs form **at the same height H*
 
 The epoch flip in `cert.epoch` (and `vote_epochs`) is between h2 and h3.
 
+**Milestone closed for the observed same-validator-set v2 certificate trace.** Both live tests passed on BossKing at `e80214e`. Structured decoding confirmed each certificate's height and epoch and agreement with its constituent vote epochs on all four nodes. This confirms the branch's same-height, consecutive-round QC behavior. The earlier parent–child handoff trace predicted a different boundary. Reconcile that specification and its PO-4 evidence with the implemented rule before using this result to approve dynamic membership.
+
 **Two tests in `chain-forge-node/tests/pqhs2_4node_epoch_live.rs`:**
 
 | Test | Windows result |
