@@ -3467,7 +3467,8 @@ impl Node {
                                         let epoch = nil_vote.epoch;
                                         // high_qc_round is not directly exposed; use 0 as the floor
                                         let high_qc_round = 0u64;
-                                        match self.consensus.sign_local_timeout(&chain_id, epoch, round as u64, high_qc_round) {
+                                        let view = chain_forge_consensus::QuorumCertificate::view(height, round);
+                                        match self.consensus.sign_local_timeout(&chain_id, epoch, view, high_qc_round) {
                                             Ok(sig) if !sig.is_empty() => {
                                                 nil_vote.signature = sig;
                                                 nil_vote.scheme = "ml-dsa-65-fips204".to_string();
@@ -4317,7 +4318,8 @@ impl Node {
                 let pq_signed = if self.consensus.variant() == ConsensusVariant::PqHotStuff {
                     let chain_id = self.genesis.chain_id.clone();
                     let epoch = nil_vote.epoch;
-                    match self.consensus.sign_local_timeout(&chain_id, epoch, (their_round - 1) as u64, 0) {
+                    let view = chain_forge_consensus::QuorumCertificate::view(height, their_round - 1);
+                    match self.consensus.sign_local_timeout(&chain_id, epoch, view, 0) {
                         Ok(sig) if !sig.is_empty() => {
                             nil_vote.signature = sig;
                             nil_vote.scheme = "ml-dsa-65-fips204".to_string();
@@ -4399,7 +4401,9 @@ impl Node {
             let pol_round = proposal.pol_round.unwrap_or(0) as u64;
             let chain_id = self.genesis.chain_id.clone();
             let epoch = prevote.epoch;
-            let round = prevote.round as u64;
+            // Use the globally-monotonic view number (height*10_000+round) so the
+            // safety-store floor is never violated when rounds restart at 1 per height.
+            let round = chain_forge_consensus::QuorumCertificate::view(prevote.height, prevote.round);
             match self.consensus.sign_local_vote(&chain_id, epoch, round, block_id, parent_id, pol_round, pol_round) {
                 Ok(sig) if !sig.is_empty() => {
                     prevote.signature = sig;
@@ -4447,7 +4451,7 @@ impl Node {
             let pol_round = proposal.pol_round.unwrap_or(0) as u64;
             let chain_id = self.genesis.chain_id.clone();
             let epoch = precommit.epoch;
-            let round = precommit.round as u64;
+            let round = chain_forge_consensus::QuorumCertificate::view(precommit.height, precommit.round);
             match self.consensus.sign_local_vote(&chain_id, epoch, round, block_id, parent_id, pol_round, pol_round) {
                 Ok(sig) if !sig.is_empty() => {
                     precommit.signature = sig;
