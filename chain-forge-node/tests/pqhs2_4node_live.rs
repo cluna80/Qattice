@@ -321,12 +321,12 @@ fn poll_until_height(
 /// exist or no vote has been signed yet (record is in `Fresh` state).
 fn verify_fips204_last_vote(validator: &str, data_dir: &PathBuf) -> Option<String> {
     use chain_forge_consensus::pq_hotstuff::{
-        safety::{ConsensusVerifier, CTX_VOTE, Fips204Verifier, decode_record},
+        safety::{ConsensusVerifier, CTX_VOTE, Fips204Verifier, decode_record, STATE_FILE},
         wire::{AlgId, VoteMessage},
     };
 
     let safety_dir = data_dir.join("pq-safety").join(validator);
-    let record_path = safety_dir.join("safety_state.cbor");
+    let record_path = safety_dir.join(STATE_FILE);
 
     if !record_path.exists() {
         return None;
