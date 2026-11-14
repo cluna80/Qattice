@@ -4632,15 +4632,24 @@ impl Node {
         // state. Verify it and queue it; it is slashed when a block carrying
         // it commits (`apply_committed_evidence`), identically everywhere.
         for eq in equivocations {
+            // Enforce canonical hash ordering (hash_a < hash_b).
+            // The engine already sorts, but re-sort defensively here so the
+            // evidence struct invariant holds regardless of engine path.
+            let (hash_a, sig_a, hash_b, sig_b) = if eq.block_hash_a.0 <= eq.block_hash_b.0 {
+                (eq.block_hash_a.0, eq.signature_a, eq.block_hash_b.0, eq.signature_b)
+            } else {
+                (eq.block_hash_b.0, eq.signature_b, eq.block_hash_a.0, eq.signature_a)
+            };
             let evidence = EquivocationEvidence {
                 validator_id:   eq.validator_id.0.clone(),
                 height:         eq.height,
                 round:          eq.round as u64,
-                block_hash_a:   eq.block_hash_a.0.clone(),
-                block_hash_b:   eq.block_hash_b.0.clone(),
-                signature_a:    eq.signature_a,
-                signature_b:    eq.signature_b,
+                block_hash_a:   hash_a,
+                block_hash_b:   hash_b,
+                signature_a:    sig_a,
+                signature_b:    sig_b,
                 vote_type_byte: eq.vote_type_byte,
+                epoch:          eq.epoch,
             };
             let vs = self.historical_validator_sets.get(&evidence.height)
                 .unwrap_or_else(|| self.consensus.validator_set());
@@ -4666,6 +4675,10 @@ impl Node {
         if ev.block_hash_a == ev.block_hash_b {
             return Err("evidence names the same block twice".into());
         }
+        // Canonical ordering invariant: hash_a must be lexicographically ≤ hash_b.
+        if ev.block_hash_a > ev.block_hash_b {
+            return Err("evidence hashes are not in canonical order (hash_a must be ≤ hash_b)".into());
+        }
         let vote_type = match ev.vote_type_byte {
             0 => VoteType::Prevote,
             1 => VoteType::Precommit,
@@ -4677,8 +4690,25 @@ impl Node {
             return Err(format!("{} has no consensus key in the set at height {}", ev.validator_id, ev.height));
         }
         for (hash, sig) in [(&ev.block_hash_a, &ev.signature_a), (&ev.block_hash_b, &ev.signature_b)] {
-            let msg = vote_signing_bytes(&self.genesis.chain_id, &vote_type, ev.height, round,
-                                         Some(&BlockHash(hash.clone())));
+            let msg = {
+                #[cfg(feature = "pq-hotstuff")]
+                if ev.epoch > 0 {
+                    // PQ-HotStuff-2: use v2 signing bytes with epoch and validator-set commitment.
+                    let set_hash = canonical_set_hash(vs);
+                    vote_signing_bytes_v2(&self.genesis.chain_id, &vote_type, ev.height, round,
+                                          ev.epoch, &set_hash, Some(&BlockHash(hash.clone())))
+                } else {
+                    vote_signing_bytes(&self.genesis.chain_id, &vote_type, ev.height, round,
+                                       Some(&BlockHash(hash.clone())))
+                }
+                #[cfg(not(feature = "pq-hotstuff"))]
+                {
+                    // Without PQ-HotStuff, epoch is always 0 and v1 signing is used.
+                    let _ = ev.epoch; // suppress unused warning
+                    vote_signing_bytes(&self.genesis.chain_id, &vote_type, ev.height, round,
+                                       Some(&BlockHash(hash.clone())))
+                }
+            };
             chain_forge_crypto::verify_consensus(&msg, sig, key)
                 .map_err(|e| format!("evidence signature does not verify: {e}"))?;
         }
@@ -9646,6 +9676,7 @@ mod tests {
                 validator_id: who.into(), height: h, round: 0,
                 block_hash_a: "hash_A".into(), block_hash_b: "hash_B".into(),
                 signature_a: a.signature, signature_b: b.signature, vote_type_byte: 0,
+                epoch: 0,
             }
         }
 
@@ -12101,6 +12132,7 @@ mod tests {
             signature_a:    vec![],
             signature_b:    vec![],
             vote_type_byte: 1,
+            epoch:          0,
         };
         let epoch = node.consensus.current_height();
         node.apply_committed_evidence(&[eq_evidence], epoch);
@@ -12159,6 +12191,7 @@ mod tests {
             block_hash_b:   "hash_B".to_string(),
             signature_a:    vec![],
             signature_b:    vec![],
+            epoch:          0,
         };
 
         let epoch = node.consensus.current_height();

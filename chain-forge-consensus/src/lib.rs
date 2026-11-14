@@ -1025,13 +1025,20 @@ impl FbaEngine {
         if let Some(prior_hash) = self.vote_index.get(validator) {
             if prior_hash != hash {
                 // Equivocation! Validator voted for two different hashes.
+                // Canonical ordering: sort so hash_a < hash_b lexicographically.
+                let (block_hash_a, block_hash_b) = if prior_hash.0 <= hash.0 {
+                    (prior_hash.clone(), hash.clone())
+                } else {
+                    (hash.clone(), prior_hash.clone())
+                };
                 let equiv = tendermint::EquivocationDetected {
                     validator_id:   validator.clone(),
                     height:         self.height,
                     round:          self.round,
                     vote_type_byte: 1, // 1 = Precommit (FBA uses precommit votes)
-                    block_hash_a:   prior_hash.clone(),
-                    block_hash_b:   hash.clone(),
+                    epoch:          0, // FBA uses v1 signing (no ML-DSA sigs)
+                    block_hash_a,
+                    block_hash_b,
                     signature_a:    vec![],
                     signature_b:    vec![],
                 };
@@ -1752,15 +1759,22 @@ impl HsVoteAccum {
                         .unwrap_or_else(|| BlockHash("nil".into()));
                     let hash_b = vote.block_hash.clone()
                         .unwrap_or_else(|| BlockHash("nil".into()));
+                    // Canonical ordering: sort so hash_a < hash_b lexicographically.
+                    let (hash_a, sig_a, hash_b, sig_b) = if hash_a.0 <= hash_b.0 {
+                        (hash_a, prev.signature.clone(), hash_b, vote.signature.clone())
+                    } else {
+                        (hash_b, vote.signature.clone(), hash_a, prev.signature.clone())
+                    };
                     Err(crate::tendermint::EquivocationDetected {
                         validator_id:   vote.validator.clone(),
                         height:         vote.height,
                         round:          vote.round,
                         vote_type_byte,
+                        epoch:          prev.epoch,
                         block_hash_a:   hash_a,
                         block_hash_b:   hash_b,
-                        signature_a:    prev.signature.clone(),
-                        signature_b:    vote.signature.clone(),
+                        signature_a:    sig_a,
+                        signature_b:    sig_b,
                     })
                 }
             }

@@ -176,11 +176,15 @@ pub struct EquivocationDetected {
     pub round:          Round,
     /// 0 = Prevote, 1 = Precommit (matches vote_signing_bytes encoding).
     pub vote_type_byte: u8,
+    /// Epoch of the conflicting votes. 0 for Tendermint/FBA (v1 signing);
+    /// non-zero for PQ-HotStuff-2 (v2 ML-DSA-65 signing).
+    pub epoch:          u64,
+    /// Canonical ordering: block_hash_a < block_hash_b (lexicographic).
     pub block_hash_a:   BlockHash,
     pub block_hash_b:   BlockHash,
-    /// Raw signature bytes from the first vote (already accepted).
+    /// Raw signature bytes covering block_hash_a.
     pub signature_a:    Vec<u8>,
-    /// Raw signature bytes from the conflicting vote (just arrived).
+    /// Raw signature bytes covering block_hash_b.
     pub signature_b:    Vec<u8>,
 }
 
@@ -539,15 +543,22 @@ impl TendermintEngine {
         let kind = if is_prevote(&vote.vote_type) { "double-prevote" } else { "double-precommit" };
         warn!(validator = %vote.validator, height = vote.height, round = vote.round,
               hash_a = %hash_a, hash_b = %hash_b, "equivocation detected: {kind} (two real blocks)");
+        // Canonical ordering: sort so hash_a < hash_b lexicographically.
+        let (hash_a, sig_a, hash_b, sig_b) = if hash_a.0 <= hash_b.0 {
+            (hash_a, existing.signature.clone(), hash_b, vote.signature.clone())
+        } else {
+            (hash_b, vote.signature.clone(), hash_a, existing.signature.clone())
+        };
         self.pending_equivocations.push(EquivocationDetected {
             validator_id:   vote.validator.clone(),
             height:         vote.height,
             round:          vote.round,
             vote_type_byte: type_byte(&vote.vote_type),
+            epoch:          0, // Tendermint uses v1 signing (Ed25519)
             block_hash_a:   hash_a,
             block_hash_b:   hash_b,
-            signature_a:    existing.signature.clone(),
-            signature_b:    vote.signature.clone(),
+            signature_a:    sig_a,
+            signature_b:    sig_b,
         });
     }
 

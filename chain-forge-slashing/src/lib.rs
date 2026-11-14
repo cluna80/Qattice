@@ -154,6 +154,11 @@ pub struct EquivocationEvidence {
     /// Vote type both sigs cover: 0 = Prevote, 1 = Precommit.
     /// Ignored when signatures are empty (Phase 0 fast-path).
     pub vote_type_byte: u8,
+    /// Epoch of the conflicting votes. 0 = Tendermint/FBA (v1 Ed25519 signing);
+    /// non-zero = PQ-HotStuff-2 (v2 ML-DSA-65 signing).
+    /// Serde default=0 for backward compatibility with pre-epoch evidence records.
+    #[serde(default)]
+    pub epoch:          u64,
 }
 
 // -- LivenessWindow -----------------------------------------------------------
@@ -660,6 +665,7 @@ mod tests {
             signature_a:    vec![],
             signature_b:    vec![],
             vote_type_byte: 0, // Prevote (Phase 0 fast-path; sigs empty)
+            epoch:          0,
         }
     }
 
@@ -1004,6 +1010,7 @@ mod tests {
             signature_a: chain_forge_crypto::sign_consensus(&msg("blockA"), &kp).unwrap(),
             signature_b: chain_forge_crypto::sign_consensus(&msg("blockB"), &kp).unwrap(),
             vote_type_byte: 1,
+            epoch: 0,
         };
         let mut forged = genuine.clone();
         forged.signature_b[0] ^= 0xff;
@@ -1033,6 +1040,7 @@ mod tests {
             signature_a:    vec![0xde, 0xad, 0xbe, 0xef],
             signature_b:    vec![0xca, 0xfe, 0xba, 0xbe],
             vote_type_byte: 1, // Precommit
+            epoch:          0,
         };
         let mut slasher = SlashingModule::with_qcb_defaults();
         // Without real-crypto, any non-empty sig → InvalidEvidence
