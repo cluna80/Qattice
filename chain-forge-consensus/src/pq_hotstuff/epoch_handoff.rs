@@ -28,7 +28,7 @@
 
 use sha3::{Digest, Sha3_256};
 
-use crate::{BlockHeight, CommitCertificate, Round, ValidatorSet, VoteType, vote_signing_bytes};
+use crate::{BlockHeight, CommitCertificate, Round, ValidatorSet, VoteType, vote_signing_bytes_v2};
 #[cfg(not(feature = "real-crypto"))]
 use crate::pq_hotstuff::safety::{ConsensusVerifier, Fips204Verifier};
 pub use chain_forge_vca_pq::AdmissionError;
@@ -111,10 +111,12 @@ pub fn canonical_set_hash(vs: &ValidatorSet) -> [u8; 32] {
 ///
 /// # Checks (all must pass before the seal is written)
 /// 1. `child_qc_round == certificate.round + 1` (consecutive-round parent link)
-/// 2. Each precommit carries a valid ML-DSA-65 signature from a known outgoing validator
-/// 3. No duplicate signers
-/// 4. Total voting power of verified signers >= `outgoing_set.quorum_power()`
-/// 5. `canonical_set_hash(incoming_set) == expected_set_hash`
+/// 2. `certificate.epoch == expected_epoch`
+/// 3. Each precommit carries a valid ML-DSA-65 signature from a known outgoing validator,
+///    signed with v2 bytes binding `vote.epoch` and `canonical_set_hash(incoming_set)`
+/// 4. No duplicate signers
+/// 5. Total voting power of verified signers >= `outgoing_set.quorum_power()`
+/// 6. `canonical_set_hash(incoming_set) == expected_set_hash`
 pub fn verify_handoff_proof(
     chain_id: &str,
     certificate: &CommitCertificate,
@@ -122,6 +124,7 @@ pub fn verify_handoff_proof(
     child_qc_round: Round,
     incoming_set: &ValidatorSet,
     expected_set_hash: [u8; 32],
+    expected_epoch: u64,
 ) -> Result<(), HandoffError> {
     // ── 1. Consecutive-round parent link ──────────────────────────────────────
     if child_qc_round != certificate.round + 1 {
@@ -131,11 +134,18 @@ pub fn verify_handoff_proof(
         });
     }
 
-    // ── 2–4. Signature verification and quorum ────────────────────────────────
-    // When chain-forge-crypto is built with real-pqc (always the case in the
-    // node binary), use verify_consensus to match the dilithium3 signing path
-    // used by sign_vote in node.rs. The Fips204Verifier path is kept for
-    // future use when devnet keys are regenerated in FIPS 204 format.
+    // ── 2. Epoch binding ──────────────────────────────────────────────────────
+    if certificate.epoch != expected_epoch {
+        return Err(HandoffError::EpochMismatch {
+            cert_epoch: certificate.epoch,
+            expected_epoch,
+        });
+    }
+
+    // ── 3–5. Signature verification and quorum ────────────────────────────────
+    // Compute incoming set hash once; every vote signs over it.
+    let incoming_hash = canonical_set_hash(incoming_set);
+
     #[cfg(not(feature = "real-crypto"))]
     let verifier = Fips204Verifier;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -159,10 +169,10 @@ pub fn verify_handoff_proof(
             return Err(HandoffError::DuplicateSigner { id: vid });
         }
 
-        // Reconstruct the signed message.
-        let msg = vote_signing_bytes(
+        // Reconstruct the v2 signed message (epoch + set_hash bound).
+        let msg = vote_signing_bytes_v2(
             chain_id, &VoteType::Precommit, vote.height, vote.round,
-            vote.block_hash.as_ref(),
+            vote.epoch, &incoming_hash, vote.block_hash.as_ref(),
         );
 
         // Verify using the same scheme as node.rs::sign_vote / verify_vote_signature.

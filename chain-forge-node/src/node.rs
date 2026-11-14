@@ -7,6 +7,10 @@ use tracing::{debug, info, warn, error};
 use chain_forge_core::{GenesisConfig, HashWidth};
 use chain_forge_crypto::{ClassicalScheme, KeyPair, SchemeId, Signature, SignatureScheme};
 use chain_forge_consensus::{proposal_signing_bytes, vote_signing_bytes};
+#[cfg(feature = "pq-hotstuff")]
+use chain_forge_consensus::vote_signing_bytes_v2;
+#[cfg(feature = "pq-hotstuff")]
+use chain_forge_consensus::pq_hotstuff::epoch_handoff::canonical_set_hash;
 use chain_forge_consensus::{
     ConsensusConfig, ConsensusVariant, PersonhoodConfig,
     ValidatorId, ValidatorInfo, ValidatorSet, BlockHash, BlockProposal, Vote, VoteType,
@@ -60,6 +64,10 @@ pub struct NodeStatus {
     /// The node's libp2p peer ID as a base58-encoded string.
     /// Set once the P2P network starts; None before startup.
     pub local_peer_id: Option<String>,
+    /// The pruning watermark: all `chain_store` entries below this height have
+    /// been removed.  Zero until the first prune fires.  Exposed for tests and
+    /// observability; the actual pruning window is `CHAIN_STORE_KEEP` entries.
+    pub chain_store_watermark: u64,
 }
 
 pub type SharedStatus = Arc<Mutex<NodeStatus>>;
@@ -292,6 +300,9 @@ pub struct BlockSummary {
     /// PREVIOUS block (the committed `last_commit`), sorted. Liveness is judged
     /// from exactly this set.
     pub last_commit_signers: Vec<String>,
+    /// The commit certificate that caused this block to be finalized.
+    /// Present for multi-node consensus commits; `None` for single-node and replay paths.
+    pub last_commit: Option<chain_forge_consensus::CommitCertificate>,
 }
 
 /// One transaction's summary for the explorer.
@@ -483,6 +494,20 @@ impl RefusedTxLog {
 pub const MAX_GC_RECEIPTS: usize = 500;
 
 pub const MAX_RECENT_BLOCKS: usize = 100;
+
+/// Number of committed block payloads to retain in `chain_store` after each
+/// commit.  Entries older than `committed_height - CHAIN_STORE_KEEP` are
+/// removed from the in-memory map (and therefore from `chain_store.json` on
+/// the next persist).  Peers that need older history must catch up from
+/// another node that still holds it, or via a future snapshot-sync mechanism.
+///
+/// 20 is enough to cover a node that is a full gossip-round behind and needs
+/// to request the most recent N blocks.  The explorer already caps at 100.
+/// (The standalone devnet used 64; 20 is used here because the two-chain
+/// PQ-HotStuff commit rule produces one block every ~9 s on the Windows
+/// devnet, so a larger window would make the pruning integration test take
+/// much longer to run.)
+pub const CHAIN_STORE_KEEP: u64 = 20;
 
 pub type SharedExplorer = Arc<Mutex<ExplorerState>>;
 
@@ -686,13 +711,11 @@ pub struct Node {
     /// moved past a round before its peers had even finished connecting.
     round_watch: Option<(u64, u32)>,
     round_watch_started: Option<std::time::Instant>,
-    /// Every committed block this node has ever seen, kept for the life of
-    /// the process so a peer that falls behind (misses the moment quorum
-    /// happened, was disconnected, or just started) can request and replay
-    /// history it missed. Without this, a node that misses even one commit
-    /// is permanently stuck outside the network -- there is no other way
-    /// for it to ever learn what it missed, since gossipsub delivers each
-    /// message once and never replays it.
+    /// Recent committed blocks, kept so a peer that falls slightly behind can
+    /// request and replay blocks it missed.  Bounded to the last
+    /// `CHAIN_STORE_KEEP` entries: older entries are pruned on each commit.
+    /// Peers that need deeper history must catch up from a node that still
+    /// holds it, or via a future snapshot-sync mechanism.
     chain_store: std::collections::BTreeMap<u64, (chain_forge_consensus::CommitCertificate, BlockProposal)>,
     /// Identity registry (Whitepaper Section 4 / Identity Pilot Design) --
     /// backs RegisterIdentity and Attest transactions, and the
@@ -1339,6 +1362,7 @@ impl Node {
             attestation_cap_per_window,
             insecure_dev_identity_overrides: insecure_identity,
             local_peer_id:  None,
+            chain_store_watermark: 0,
         }));
 
         let validator_id = validator_address.map(ValidatorId);
@@ -2057,6 +2081,13 @@ impl Node {
         if self.persistence_halted() { return; }          // PERSIST-HALT-1: no signature after a persistence failure
         let Some(ref kp) = self.signing_key else { return };
         let chain_id = self.genesis.chain_id.as_str();
+        #[cfg(feature = "pq-hotstuff")]
+        let bytes = {
+            let set_hash = canonical_set_hash(&self.consensus.validator_set());
+            vote_signing_bytes_v2(chain_id, &vote.vote_type, vote.height, vote.round,
+                                  vote.epoch, &set_hash, vote.block_hash.as_ref())
+        };
+        #[cfg(not(feature = "pq-hotstuff"))]
         let bytes = vote_signing_bytes(
             chain_id, &vote.vote_type, vote.height, vote.round,
             vote.block_hash.as_ref(),
@@ -2130,6 +2161,13 @@ impl Node {
         }
 
         let chain_id = self.genesis.chain_id.as_str();
+        #[cfg(feature = "pq-hotstuff")]
+        let msg = {
+            let set_hash = canonical_set_hash(&vs);
+            vote_signing_bytes_v2(chain_id, &vote.vote_type, vote.height, vote.round,
+                                  vote.epoch, &set_hash, vote.block_hash.as_ref())
+        };
+        #[cfg(not(feature = "pq-hotstuff"))]
         let msg = chain_forge_consensus::vote_signing_bytes(
             chain_id,
             &vote.vote_type,
@@ -2802,6 +2840,7 @@ impl Node {
                         proposer:     proposal.proposer.0.clone(),
                         last_commit_signers: BlockPayload::decode(&proposal.tx_data).last_commit
                             .as_ref().map(commit_signers).unwrap_or_default(),
+                        last_commit: None,
                     });
                 }
                 // Ensure newest-first ordering after the loop.
@@ -4151,6 +4190,7 @@ impl Node {
             block_hash: Some(proposal.block_hash.clone()),
             signature:  vec![],
             scheme:     Vote::default_scheme(),
+            epoch:      self.consensus.current_epoch(),
         };
         self.sign_vote(&mut prevote);
         if let Err(e) = self.consensus.receive_vote(prevote.clone()).await {
@@ -4169,6 +4209,7 @@ impl Node {
             block_hash: Some(proposal.block_hash.clone()),
             signature:  vec![],
             scheme:     Vote::default_scheme(),
+            epoch:      self.consensus.current_epoch(),
         };
         self.sign_vote(&mut precommit);
         let cert = self.consensus.receive_vote(precommit.clone()).await
@@ -4535,6 +4576,11 @@ impl Node {
                 ));
             }
         }
+        // PQ-HotStuff embeds the CommitCertificate in the engine, not the block payload.
+        // Use `cert` directly; Tendermint nodes embed last_commit in the payload.
+        #[cfg(feature = "pq-hotstuff")]
+        let participation = Some(cert.clone());
+        #[cfg(not(feature = "pq-hotstuff"))]
         let participation = payload.last_commit.clone();
         let txs: Vec<Transaction> = payload.txs;
         self.remove_committed_from_mempool(&txs);
@@ -5500,6 +5546,7 @@ impl Node {
                 tx_ids,
                 proposer:     proposal.proposer.0.clone(),
                 last_commit_signers: participation.as_ref().map(commit_signers).unwrap_or_default(),
+                last_commit: participation.clone(),
             });
             while ex.blocks.len() > MAX_RECENT_BLOCKS {
                 ex.blocks.pop_back();
@@ -5551,10 +5598,20 @@ impl Node {
         self.pending_proposals.retain(|(h, _), _| *h > committed_height);
         self.pending_certs.retain(|(h, _), _| *h > committed_height);
 
-        // Unlike pending_proposals (a short-lived voting cache), chain_store
-        // keeps every committed block permanently, so a peer that falls
-        // behind has something to actually request and replay.
+        // chain_store serves catch-up requests from peers that missed a commit.
+        // Insert first, then prune: a peer requesting the block we just committed
+        // will always find it here even if it falls exactly at the watermark.
         self.chain_store.insert(committed_height, (cert.clone(), proposal.clone()));
+        if committed_height >= CHAIN_STORE_KEEP {
+            let new_watermark = committed_height - CHAIN_STORE_KEEP + 1;
+            let prev = self.status.lock().map(|s| s.chain_store_watermark).unwrap_or(0);
+            if new_watermark > prev {
+                self.chain_store.retain(|&h, _| h >= new_watermark);
+                if let Ok(mut s) = self.status.lock() {
+                    s.chain_store_watermark = new_watermark;
+                }
+            }
+        }
 
         // H0-2: the evidence the next proposer publishes starts from this
         // node's own certificate and grows with late precommits.
@@ -5718,6 +5775,7 @@ impl Node {
         }
         let candidate = chain_forge_consensus::CommitCertificate {
             precommits: vec![vote.clone()],
+            epoch:      0,
             ..evidence.clone()
         };
         // Signature/power check against the set effective at that height;
@@ -5815,6 +5873,13 @@ impl Node {
                         vote.validator, cert.height
                     ));
                 }
+                #[cfg(feature = "pq-hotstuff")]
+                let msg = {
+                    let set_hash = canonical_set_hash(historical_vs);
+                    vote_signing_bytes_v2(&self.genesis.chain_id, &vote.vote_type, vote.height,
+                                         vote.round, vote.epoch, &set_hash, vote.block_hash.as_ref())
+                };
+                #[cfg(not(feature = "pq-hotstuff"))]
                 let msg = chain_forge_consensus::vote_signing_bytes(
                     &self.genesis.chain_id, &vote.vote_type, vote.height, vote.round,
                     vote.block_hash.as_ref(),
@@ -6463,6 +6528,7 @@ impl Node {
                     block_hash: Some(proposal.block_hash.clone()),
                     signature:  vec![],
                     scheme:     Vote::default_scheme(),
+                    epoch:      0,
                 };
                 if let Some(ref kp) = devnet_sim_key {
                     let bytes = vote_signing_bytes(
@@ -6952,6 +7018,7 @@ impl Node {
                 tx_ids,
                 proposer:     proposal.proposer.0.clone(),
                 last_commit_signers: vec![],
+                last_commit: None,
             });
             while ex.blocks.len() > MAX_RECENT_BLOCKS {
                 ex.blocks.pop_back();
@@ -7255,6 +7322,7 @@ mod tests {
             block_hash: Some(block_hash.clone()),
             signature:  vec![],
             scheme:     Vote::default_scheme(),
+            epoch:      0,
         };
         assert!(
             restarted.verify_vote_signature(&unsigned).is_err(),
@@ -7279,6 +7347,7 @@ mod tests {
             block_hash: Some(block_hash.clone()),
             signature:  forged_sig.bytes,
             scheme:     Vote::default_scheme(),
+            epoch:      0,
         };
         assert!(
             restarted.verify_vote_signature(&forged).is_err(),
@@ -7300,6 +7369,7 @@ mod tests {
             block_hash: Some(block_hash),
             signature:  real_sig.bytes,
             scheme:     Vote::default_scheme(),
+            epoch:      0,
         };
         assert!(
             restarted.verify_vote_signature(&honest).is_ok(),
@@ -7386,6 +7456,7 @@ mod tests {
         fn evidence(h: u64, block_hash: &BlockHash, signers: &[&str]) -> CommitCertificate {
             CommitCertificate {
                 height: h, round: 0, block_hash: block_hash.clone(),
+                epoch:  0,
                 precommits: signers.iter()
                     .map(|v| signed_vote(CHAIN, VoteType::Precommit, h, 0, v, block_hash.clone()))
                     .collect(),
@@ -7917,8 +7988,8 @@ mod tests {
         /// V2-9: pinned canonical bytes; identical on every platform (the Windows run is the check).
         fn golden_block() -> (CommitCertificate, BlockProposal) {
             let v = Vote { vote_type: VoteType::Precommit, height: 7, round: 1, validator: ValidatorId("v1".into()), block_hash: Some(BlockHash("bh7".into())),
-                           signature: vec![1, 2, 3], scheme: "classical".into() };
-            (CommitCertificate { height: 7, round: 1, block_hash: BlockHash("bh7".into()), precommits: vec![v] },
+                           signature: vec![1, 2, 3], scheme: "classical".into(), epoch: 0 };
+            (CommitCertificate { height: 7, round: 1, block_hash: BlockHash("bh7".into()), epoch: 0, precommits: vec![v] },
              BlockProposal { height: 7, round: 1, proposer: ValidatorId("v1".into()), block_hash: BlockHash("bh7".into()), parent_hash: BlockHash("bh6".into()),
                              timestamp_ms: 1000, tx_data: vec![9, 9], signature: vec![4, 5], pol_round: Some(0) })
         }
@@ -8383,7 +8454,7 @@ mod tests {
                 assert!(!n.status.lock().unwrap().is_running, "status reports the node as not running");
                 // a. the engine's vote path
                 let vote = Vote { vote_type: VoteType::Prevote, height: 2, round: 0, validator: ValidatorId("qcb1carol".into()), block_hash: Some(BlockHash("x".into())),
-                                  signature: vec![], scheme: "classical".into() };
+                                  signature: vec![], scheme: "classical".into(), epoch: 0 };
                 n.cast_engine_vote(vote.clone()).await;
                 assert_eq!(n.sign_guard.last, guard, "v2={v2}: no vote was recorded or signed");
                 // b. proposals, c. the raw signing primitives (a safety net under every path)
@@ -8397,7 +8468,7 @@ mod tests {
                 assert_eq!(n.sign_guard.last, guard, "v2={v2}: nothing signed at height 2");
                 assert_eq!(n.status.lock().unwrap().height, height, "v2={v2}: height did not advance");
                 // e. commits are refused, f. ticks and the action queue do nothing
-                let cert = chain_forge_consensus::CommitCertificate { height: 2, round: 0, block_hash: p2.block_hash.clone(), precommits: vec![] };
+                let cert = chain_forge_consensus::CommitCertificate { height: 2, round: 0, block_hash: p2.block_hash.clone(), epoch: 0, precommits: vec![] };
                 let r = n.commit_block(cert, &p2).await;
                 assert!(r.as_ref().err().map_or(false, |e| e.contains("refusing to commit")), "v2={v2}: commit refused, got {r:?}");
                 n.consensus_tick().await; n.drive_consensus().await; n.catch_up_round_if_behind(2, 5).await;
@@ -8491,12 +8562,12 @@ mod tests {
                 assert!(!n.status.lock().unwrap().is_running);
                 let guard = n.sign_guard.last;
                 // every later signing / committing path refuses
-                let vote = Vote { vote_type: VoteType::Precommit, height: 1, round: 0, validator: ValidatorId("qcb1carol".into()), block_hash: Some(p1.block_hash.clone()), signature: vec![], scheme: "classical".into() };
+                let vote = Vote { vote_type: VoteType::Precommit, height: 1, round: 0, validator: ValidatorId("qcb1carol".into()), block_hash: Some(p1.block_hash.clone()), signature: vec![], scheme: "classical".into(), epoch: 0 };
                 n.cast_engine_vote(vote.clone()).await; assert_eq!(n.sign_guard.last, guard, "v2={v2}: no further vote recorded");
                 let prop = BlockProposal { height: 2, round: 0, proposer: ValidatorId("qcb1carol".into()), block_hash: BlockHash("h2".into()), parent_hash: BlockHash("p".into()), timestamp_ms: 0, tx_data: vec![], signature: vec![], pol_round: None };
                 assert!(n.sign_and_register_own_proposal(prop).await.is_none(), "v2={v2}: no proposal");
                 let mut sv = vote.clone(); n.sign_vote(&mut sv); assert!(sv.signature.is_empty(), "v2={v2}: no raw signature");
-                let cert = chain_forge_consensus::CommitCertificate { height: 1, round: 0, block_hash: p1.block_hash.clone(), precommits: vec![] };
+                let cert = chain_forge_consensus::CommitCertificate { height: 1, round: 0, block_hash: p1.block_hash.clone(), epoch: 0, precommits: vec![] };
                 assert!(n.commit_block(cert, &p1).await.is_err(), "v2={v2}: commits refused");
                 n.consensus_tick().await; n.drive_consensus().await;
                 assert_eq!(n.sign_guard.last, guard);
@@ -8527,7 +8598,7 @@ mod tests {
                 assert!(n.sign_and_register_own_proposal(prop.clone()).await.is_none(), "v2={v2}: the proposal is withheld");
                 assert!(n.persistence_failure().map_or(false, |e| e.contains("signing guard write failed (proposal at height 1)")), "v2={v2}: latched: {:?}", n.persistence_failure());
                 // and now nothing else signs either (a vote at height 1)
-                let vote = Vote { vote_type: VoteType::Prevote, height: 1, round: 0, validator: ValidatorId("qcb1carol".into()), block_hash: Some(BlockHash("h1".into())), signature: vec![], scheme: "classical".into() };
+                let vote = Vote { vote_type: VoteType::Prevote, height: 1, round: 0, validator: ValidatorId("qcb1carol".into()), block_hash: Some(BlockHash("h1".into())), signature: vec![], scheme: "classical".into(), epoch: 0 };
                 let before = n.sign_guard.last; n.cast_engine_vote(vote).await;
                 assert_eq!(n.sign_guard.last, before, "v2={v2}: no vote after a failed proposal guard write");
                 assert!(n.sign_and_register_own_proposal(prop).await.is_none());
@@ -10028,7 +10099,7 @@ mod tests {
             .map(|v| signed_vote("qcb-testnet-1", VoteType::Precommit, h, 0, v, proposal.block_hash.clone()))
             .collect();
         let cert = chain_forge_consensus::CommitCertificate {
-            height: h, round: 0, block_hash: proposal.block_hash.clone(), precommits,
+            height: h, round: 0, block_hash: proposal.block_hash.clone(), epoch: 0, precommits,
         };
         node.commit_block(cert, &proposal).await.unwrap();
 
@@ -10088,6 +10159,7 @@ mod tests {
             block_hash: Some(cert.block_hash.clone()),
             signature:  vec![],
             scheme:     Vote::default_scheme(),
+            epoch:      0,
         };
         let result = node.consensus.receive_vote(unsigned).await;
         assert!(
@@ -10123,6 +10195,7 @@ mod tests {
             block_hash: Some(cert.block_hash.clone()),
             signature:  forged_sig.bytes,
             scheme:     Vote::default_scheme(),
+            epoch:      0,
         };
         let result = node.consensus.receive_vote(forged).await;
         assert!(
@@ -10290,6 +10363,7 @@ mod tests {
                 block_hash: Some(BlockHash("block7".to_string())),
                 signature: vec![],
                 scheme:     Vote::default_scheme(),
+                epoch:      0,
             };
             let kp = ClassicalScheme.generate_keypair(addr).unwrap();
             let bytes = vote_signing_bytes("qcb-testnet-1", &vote.vote_type, vote.height, vote.round, vote.block_hash.as_ref());
@@ -10302,6 +10376,7 @@ mod tests {
         // the live set's quorum (4) if ever (wrongly) checked against it.
         let cert = CommitCertificate {
             height: 7, round: 0, block_hash: BlockHash("block7".to_string()),
+            epoch: 0,
             precommits: vec![sign("qcb1alice"), sign("qcb1bob"), sign("qcb1carol")],
         };
         assert!(
@@ -10315,6 +10390,7 @@ mod tests {
         // the 3 needed) must fail.
         let short_cert = CommitCertificate {
             height: 7, round: 0, block_hash: BlockHash("block7".to_string()),
+            epoch: 0,
             precommits: vec![sign("qcb1alice"), sign("qcb1bob")],
         };
         assert!(
@@ -10328,6 +10404,7 @@ mod tests {
         // pad out a certificate's power.
         let padded_cert = CommitCertificate {
             height: 7, round: 0, block_hash: BlockHash("block7".to_string()),
+            epoch: 0,
             precommits: vec![sign("qcb1alice"), sign("qcb1bob"), sign("qcb1erin")],
         };
         assert!(
@@ -10342,6 +10419,7 @@ mod tests {
         let no_history_cert = CommitCertificate {
             height: 999, round: 0, block_hash: BlockHash("block999".to_string()),
             precommits: vec![sign("qcb1alice"), sign("qcb1bob"), sign("qcb1carol")],
+            epoch:      0,
         };
         let err = node.verify_certificate_against_history(&no_history_cert).err()
             .expect("missing historical set must be a hard error");
@@ -10535,6 +10613,7 @@ mod tests {
             block_hash: Some(block_hash),
             signature:  vec![],
             scheme:     Vote::default_scheme(),
+            epoch:      0,
         };
         let kp = ClassicalScheme.generate_keypair(validator)
             .expect("deterministic devnet keypair generation must not fail");
@@ -10635,6 +10714,7 @@ mod tests {
             CommitCertificate {
                 height: h, round: 0, block_hash: hash.clone(),
                 precommits: VALS.iter().map(|v| signed_vote(CHAIN, VoteType::Precommit, h, 0, v, hash.clone())).collect(),
+                epoch:      0,
             }
         }
 
@@ -13437,6 +13517,7 @@ mod tests {
             block_hash: Some(block_hash.clone()),
             signature:  sig.bytes,
             scheme:     "ml-dsa-65".to_string(),
+            epoch:      0,
         }
     }
 
@@ -13461,6 +13542,7 @@ mod tests {
             block_hash: Some(block_hash.clone()),
             signature:  sig.bytes,
             scheme:     "classical".to_string(),
+            epoch:      0,
         }
     }
 
@@ -13913,6 +13995,7 @@ mod tests {
             block_hash: Some(cert2.block_hash.clone()),
             signature:  sig.bytes,
             scheme:     "falcon-512".to_string(), // unknown scheme
+            epoch:      0,
         };
         let result = node.verify_consensus_vote(&vote);
         assert!(
@@ -13993,6 +14076,7 @@ mod tests {
             vote_type: VoteType::Prevote, height: 1, round: 0,
             validator: chain_forge_consensus::ValidatorId("qcb1bob".into()),
             block_hash: Some(BlockHash("b".into())), signature: vec![], scheme: Vote::default_scheme(),
+            epoch: 0,
         };
         node.sign_vote(&mut vote);
         assert_eq!(vote.scheme, "ml-dsa-65");
@@ -14059,10 +14143,12 @@ mod tests {
                 validator: chain_forge_consensus::ValidatorId(addr.into()), block_hash: Some(hash.clone()),
                 signature: chain_forge_crypto::sign_consensus(&msg, &mldsa_validator_key(addr)).unwrap(),
                 scheme: tag.into(),
+                epoch:      0,
             }
         };
         let cert = |tag: &str| chain_forge_consensus::CommitCertificate {
             height: 7, round: 0, block_hash: hash.clone(),
+            epoch: 0,
             precommits: VALS4[..3].iter().map(|a| precommit(a, tag)).collect(),
         };
         node.verify_certificate_against_history(&cert("ml-dsa-65"))
@@ -14086,6 +14172,7 @@ mod tests {
                 vote_type: VoteType::Prevote, height: h, round: 0,
                 validator: chain_forge_consensus::ValidatorId("qcb1bob".into()), block_hash: Some(hash),
                 signature: chain_forge_crypto::sign_consensus(&msg, &bob).unwrap(), scheme: "ml-dsa-65".into(),
+                epoch: 0,
             }
         };
         let (a, b) = (prevote("hash_A"), prevote("hash_B"));
@@ -14174,6 +14261,7 @@ mod tests {
             block_hash: Some(cert2.block_hash.clone()),
             signature:  chain_forge_crypto::sign_consensus(&bytes, &mldsa_kp).unwrap(),
             scheme:     "ml-dsa-65".into(),
+            epoch:      0,
         };
         node.verify_vote_signature(&vote).expect("gossip check must accept the ML-DSA vote");
         node.consensus.receive_vote(vote).await.expect("engine must accept the ML-DSA vote");
@@ -14184,6 +14272,7 @@ mod tests {
             vote_type: VoteType::Prevote, height, round,
             validator: chain_forge_consensus::ValidatorId(addr.clone()),
             block_hash: Some(cert2.block_hash.clone()), signature: ed, scheme: Vote::default_scheme(),
+            epoch: 0,
         };
         assert!(node.verify_vote_signature(&forged).is_err());
         assert!(node.consensus.receive_vote(forged).await.is_err());
@@ -16858,6 +16947,7 @@ mod tests {
                 block_hash: Some(cert7.block_hash.clone()),
                 signature:  sig.bytes,
                 scheme:     Vote::default_scheme(),
+                epoch:      0,
             };
             node.consensus.receive_vote(vote).await
                 .expect("Phase C.key: Eve's signed prevote must be ACCEPTED \
@@ -16915,6 +17005,7 @@ mod tests {
                 block_hash: Some(cert8.block_hash.clone()),
                 signature:  sig.bytes,
                 scheme:     Vote::default_scheme(),
+                epoch:      0,
             };
             // receive_vote must reject: voting_power=0 means Eve can't contribute to quorum.
             let result = node.consensus.receive_vote(vote).await;
@@ -17120,7 +17211,7 @@ mod p02a_gaps {
             vote_type: VoteType::Precommit, height, round: 0,
             validator: chain_forge_consensus::ValidatorId("qcb1alice".into()),
             block_hash: Some(chain_forge_consensus::BlockHash(hash.into())),
-            signature: vec![], scheme: "classical".into(),
+            signature: vec![], scheme: "classical".into(), epoch: 0,
         }
     }
 

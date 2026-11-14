@@ -29,9 +29,17 @@ use std::{
     time::{Duration, Instant},
 };
 
+// serde_json is a workspace dev-dependency used for structured block JSON parsing
+// in `fetch_last_commit`.
+use serde_json;
+
 const VALIDATORS: &[&str] = &["qcb1alice", "qcb1bob", "qcb1carol", "qcb1dave"];
-const API_PORTS: &[u16]   = &[19090, 19091, 19092, 19093];
-const P2P_PORTS: &[u16]   = &[28010, 28011, 28012, 28013];
+
+// Each test gets its own port range so they can run in parallel without conflicts.
+const API_PORTS_EPOCH:    &[u16] = &[19090, 19091, 19092, 19093];
+const P2P_PORTS_EPOCH:    &[u16] = &[28010, 28011, 28012, 28013];
+const API_PORTS_BOUNDARY: &[u16] = &[19094, 19095, 19096, 19097];
+const P2P_PORTS_BOUNDARY: &[u16] = &[28014, 28015, 28016, 28017];
 
 const GENESIS_FILE: &str = "genesis-4node-pqhs2-epoch.json";
 const KEY_DIR:      &str = "keys/mldsa";
@@ -118,6 +126,32 @@ fn fetch_block_epoch(api_port: u16, height: u64) -> Option<u64> {
         .and_then(|s| s.trim().parse().ok())
 }
 
+struct LastCommitInfo {
+    height: u64,
+    epoch:  u64,
+    /// Epochs from the constituent precommit votes.
+    vote_epochs: Vec<u64>,
+}
+
+/// Fetch and parse `last_commit` from `/api/blocks/{height}` using structured
+/// JSON decoding. Returns `None` if the block is unavailable or has no
+/// `last_commit` field.
+fn fetch_last_commit(api_port: u16, height: u64) -> Option<LastCommitInfo> {
+    let body = http_get_body(api_port, &format!("/api/blocks/{height}"))?;
+    let v: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let lc = v.get("last_commit")?;
+    let cert_height = lc.get("height")?.as_u64()?;
+    let cert_epoch  = lc.get("epoch")?.as_u64()?;
+    let vote_epochs: Vec<u64> = lc
+        .get("precommits")
+        .and_then(|a| a.as_array())
+        .map(|votes| votes.iter()
+            .filter_map(|vote| vote.get("epoch")?.as_u64())
+            .collect())
+        .unwrap_or_default();
+    Some(LastCommitInfo { height: cert_height, epoch: cert_epoch, vote_epochs })
+}
+
 // ── RAII process guard ────────────────────────────────────────────────────────
 
 struct NodeProcess {
@@ -164,14 +198,19 @@ fn read_peer_id(log_path: &PathBuf, timeout: Duration) -> String {
 
 // ── Spawn ─────────────────────────────────────────────────────────────────────
 
-fn spawn_nodes(bin: &PathBuf, log_dir: &PathBuf) -> Vec<NodeProcess> {
+fn spawn_nodes(
+    bin: &PathBuf,
+    log_dir: &PathBuf,
+    api_ports: &[u16],
+    p2p_ports: &[u16],
+) -> Vec<NodeProcess> {
     let genesis = genesis_path();
     let mut nodes: Vec<NodeProcess> = Vec::new();
     let mut bootstrap: Option<String> = None;
 
     for (i, &validator) in VALIDATORS.iter().enumerate() {
-        let api_port = API_PORTS[i];
-        let p2p_port = P2P_PORTS[i];
+        let api_port = api_ports[i];
+        let p2p_port = p2p_ports[i];
         let log_path = log_dir.join(format!("{validator}.log"));
         let log_file = std::fs::File::create(&log_path)
             .unwrap_or_else(|e| panic!("cannot create log {log_path:?}: {e}"));
@@ -347,7 +386,7 @@ fn pqhs2_4node_epoch_change_reaches_new_epoch() {
     println!("   epoch-change: height 2 (epoch 0 → 1)");
     println!("   target:  height >= 5  timeout: {timeout_secs}s\n");
 
-    let mut nodes = spawn_nodes(&bin, &log_dir);
+    let mut nodes = spawn_nodes(&bin, &log_dir, API_PORTS_EPOCH, P2P_PORTS_EPOCH);
     // Target height 5: heights 2–4 cover the boundary; 5 confirms epoch 2 is stable
     poll_until_height(&mut nodes, 5, timeout, &log_dir);
 
@@ -361,4 +400,137 @@ fn pqhs2_4node_epoch_change_reaches_new_epoch() {
     assert_agreement_and_epoch(&nodes, 5, 1);
 
     println!("\n[pqhs2_4node_epoch_change_reaches_new_epoch] PASS");
+}
+
+// ── QC cert-epoch boundary assertion ─────────────────────────────────────────
+
+/// Check that every node's `last_commit` certificate at `block_height`:
+///   - certifies `expected_cert_height`
+///   - carries `expected_cert_epoch` on the CommitCertificate.epoch field
+///   - has all constituent precommit votes carrying the same epoch
+fn assert_cert_epoch(
+    nodes: &[NodeProcess],
+    block_height: u64,
+    expected_cert_height: u64,
+    expected_cert_epoch: u64,
+) {
+    println!(
+        "\n── Cert check: block {block_height} → last_commit for h{expected_cert_height} \
+         (expected cert epoch {expected_cert_epoch}) ──"
+    );
+    for node in nodes {
+        let lc = fetch_last_commit(node.api_port, block_height)
+            .unwrap_or_else(|| panic!(
+                "{} block {block_height} last_commit unavailable", node.validator
+            ));
+        println!(
+            "   {}  last_commit.height={}  cert.epoch={}  vote_epochs={:?}",
+            node.validator, lc.height, lc.epoch, lc.vote_epochs
+        );
+        assert_eq!(
+            lc.height, expected_cert_height,
+            "{} block {block_height}: last_commit.height={}, expected {expected_cert_height}",
+            node.validator, lc.height
+        );
+        assert_eq!(
+            lc.epoch, expected_cert_epoch,
+            "{} block {block_height}: CommitCertificate.epoch={}, expected {expected_cert_epoch}",
+            node.validator, lc.epoch
+        );
+        for (i, &ve) in lc.vote_epochs.iter().enumerate() {
+            assert_eq!(
+                ve, expected_cert_epoch,
+                "{} block {block_height}: precommits[{i}].epoch={ve}, expected {expected_cert_epoch}",
+                node.validator
+            );
+        }
+    }
+    println!(
+        "   ✓ block {block_height}: last_commit certifies h{expected_cert_height} epoch={expected_cert_epoch}"
+    );
+}
+
+/// PQ-HotStuff-2 QC cert-epoch boundary test.
+///
+/// Same devnet as `pqhs2_4node_epoch_change_reaches_new_epoch` (epoch-change at h2,
+/// epoch 0 → 1). Additionally asserts the **certificate** epochs carried in each
+/// block's `last_commit` field.
+///
+/// `last_commit` for block H is the CommitCertificate for block H itself
+/// (the QC passed to commit_block by the two-chain rule).
+///
+/// Two-chain commit semantics: block H is committed when two consecutive-round
+/// QCs exist AT HEIGHT H (locked_qc.round + 1 == new_qc.round, both at height H).
+/// CommitCertificate.epoch is derived from the constituent votes' epoch field
+/// (set at signing time).
+///
+/// Timeline with epoch-change at h=2:
+///   Round 1 at h=2: QC(h=2, r=1) forms under epoch 0
+///   Round 2 at h=2: QC(h=2, r=2) forms under epoch 0 → triggers commit of h=2
+///                   → on_commit(h=2) fires → epoch advances 0→1
+///   Round 1 at h=3: QC(h=3, r=1) forms under epoch 1
+///   Round 2 at h=3: QC(h=3, r=2) forms under epoch 1 → triggers commit of h=3
+///
+///   Block h2: votes cast at epoch 0 → cert.epoch = 0
+///   Block h3: votes cast at epoch 1 (after on_commit(h2) advanced epoch) → cert.epoch = 1
+///   Block h4: votes cast at epoch 1 → cert.epoch = 1
+///
+/// The epoch flip in cert.epoch is between h2 and h3. This confirms the
+/// outgoing validator set (epoch 0) certified h2, and the incoming set (epoch 1)
+/// certified h3 onward.
+#[test]
+fn pqhs2_4node_qc_cert_epoch_boundary() {
+    let bin = node_binary();
+    if !bin.exists() {
+        println!(
+            "SKIP: node binary not found at {bin:?}. \
+             Run `cargo build -p chain-forge-node --features pq-hotstuff` first."
+        );
+        return;
+    }
+
+    let genesis = genesis_path();
+    if !genesis.exists() {
+        println!("SKIP: genesis file not found at {genesis:?}");
+        return;
+    }
+
+    let timeout_secs: u64 = std::env::var("DEVNET_TIMEOUT_SECS")
+        .ok().and_then(|s| s.parse().ok()).unwrap_or(90);
+    let timeout = Duration::from_secs(timeout_secs);
+
+    let log_dir = std::env::temp_dir().join("pqhs2_4node_qc_epoch_boundary");
+    std::fs::create_dir_all(&log_dir).expect("create log dir");
+
+    println!("\n╔══════════════════════════════════════════════════════╗");
+    println!("║  PQ-HotStuff-2 · QC cert-epoch boundary · ML-DSA-65 ║");
+    println!("╚══════════════════════════════════════════════════════╝\n");
+    println!("   binary:  {bin:?}");
+    println!("   genesis: {genesis:?}");
+    println!("   logs:    {log_dir:?}");
+    println!("   epoch-change: height 2 (epoch 0 → 1)");
+    println!("   target:  height >= 5  timeout: {timeout_secs}s\n");
+
+    let mut nodes = spawn_nodes(&bin, &log_dir, API_PORTS_BOUNDARY, P2P_PORTS_BOUNDARY);
+    poll_until_height(&mut nodes, 5, timeout, &log_dir);
+
+    // Block-epoch assertions (same as the companion test)
+    assert_agreement_and_epoch(&nodes, 2, 0);
+    assert_agreement_and_epoch(&nodes, 3, 1);
+    assert_agreement_and_epoch(&nodes, 4, 1);
+    assert_agreement_and_epoch(&nodes, 5, 1);
+
+    // QC cert-epoch boundary assertions.
+    // CommitCertificate.epoch = epoch of the precommit votes (set at signing time).
+    // Block H commits when two consecutive-round QCs form at height H.
+    //
+    //   h2: QCs form at epoch 0 (before on_commit(h2) transitions epoch) → cert.epoch = 0
+    assert_cert_epoch(&nodes, 2, 2, 0);
+    //   h3: QCs form at epoch 1 (after on_commit(h2) advanced the epoch) → cert.epoch = 1
+    //       epoch flip from 0→1 happens between h2 and h3 cert.epoch
+    assert_cert_epoch(&nodes, 3, 3, 1);
+    //   h4: continued epoch 1 → cert.epoch = 1
+    assert_cert_epoch(&nodes, 4, 4, 1);
+
+    println!("\n[pqhs2_4node_qc_cert_epoch_boundary] PASS");
 }

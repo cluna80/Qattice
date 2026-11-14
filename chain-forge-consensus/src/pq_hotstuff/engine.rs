@@ -252,11 +252,16 @@ impl PqHotStuffEngine {
     /// never trigger a commit in the current height.
     fn try_two_chain_commit(&self, to_commit: &Qc) -> Option<CommitCertificate> {
         if to_commit.height == self.height && self.locked_qc.round == to_commit.round + 1 {
+            // cert.epoch = epoch under which the votes were cast, derived from the
+            // constituent votes. self.epoch can differ: on_commit for a prior block at
+            // a later round may have already advanced it before this commit fires.
+            let vote_epoch = to_commit.precommits.first().map(|v| v.epoch).unwrap_or(0);
             return Some(CommitCertificate {
                 height: to_commit.height,
                 round: to_commit.round,
                 block_hash: to_commit.block_hash.clone(),
                 precommits: to_commit.precommits.clone(),
+                epoch: vote_epoch,
             });
         }
         None
@@ -522,6 +527,7 @@ impl ConsensusEngine for PqHotStuffEngine {
             block_hash: None,
             signature,
             scheme: Vote::default_scheme(),
+            epoch: 0,
         })
     }
 
@@ -582,6 +588,7 @@ impl ConsensusEngine for PqHotStuffEngine {
                     child_qc_round,
                     &vs,
                     set_hash,
+                    self.epoch,
                 ).map_err(|e| ConsensusError::Internal(format!("handoff proof rejected: {e}")))?;
             }
 
@@ -906,6 +913,7 @@ mod tests {
             validator: ValidatorId(validator.into()),
             signature: vec![],
             scheme: Vote::default_scheme(),
+            epoch: 0,
         }
     }
 

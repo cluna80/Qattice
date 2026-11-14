@@ -38,7 +38,7 @@ fn enc_vote(e: &mut Enc, v: &Vote) {
 fn dec_vote(d: &mut Dec<'_>) -> Result<Vote, CanonError> {
     let vote_type = match d.u8()? { 0 => VoteType::Prevote, 1 => VoteType::Precommit, 2 => VoteType::Nil, t => return Err(CanonError::BadTag(t)) };
     Ok(Vote { vote_type, height: d.u64()?, round: d.u32()?, validator: ValidatorId(d.str()?.to_string()),
-              block_hash: d.opt(|d| Ok(BlockHash(d.str()?.to_string())))?, signature: d.bytes()?.to_vec(), scheme: d.str()?.to_string() })
+              block_hash: d.opt(|d| Ok(BlockHash(d.str()?.to_string())))?, signature: d.bytes()?.to_vec(), scheme: d.str()?.to_string(), epoch: 0 })
 }
 
 /// `(CommitCertificate, BlockProposal)` → canonical bytes (schema byte, then the fields in declaration order).
@@ -52,7 +52,7 @@ pub fn encode_block(cert: &CommitCertificate, p: &BlockProposal) -> Vec<u8> {
 pub fn decode_block(bytes: &[u8]) -> Result<(CommitCertificate, BlockProposal), CanonError> {
     let mut d = Dec::new(bytes);
     let v = d.u8()?; if v != SCHEMA_V1 { return Err(CanonError::UnknownVersion(v)); }
-    let cert = CommitCertificate { height: d.u64()?, round: d.u32()?, block_hash: BlockHash(d.str()?.to_string()), precommits: d.seq(dec_vote)? };
+    let cert = CommitCertificate { height: d.u64()?, round: d.u32()?, block_hash: BlockHash(d.str()?.to_string()), precommits: d.seq(dec_vote)?, epoch: 0 };
     let p = BlockProposal { height: d.u64()?, round: d.u32()?, proposer: ValidatorId(d.str()?.to_string()), block_hash: BlockHash(d.str()?.to_string()),
         parent_hash: BlockHash(d.str()?.to_string()), timestamp_ms: d.u64()?, tx_data: d.bytes()?.to_vec(), signature: d.bytes()?.to_vec(),
         pol_round: d.opt(|d| d.u32())? };

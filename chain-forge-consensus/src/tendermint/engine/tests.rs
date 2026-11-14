@@ -62,7 +62,7 @@ fn reproposal(b: &BlockProposal, round: Round, pol_round: Round) -> BlockProposa
 
 fn vote(t: VoteType, round: Round, who: &str, hash: Option<&BlockHash>) -> Vote {
     Vote { vote_type: t, height: 0, round, validator: id(who), block_hash: hash.cloned(),
-           signature: vec![], scheme: Vote::default_scheme() }
+           signature: vec![], scheme: Vote::default_scheme(), epoch: 0 }
 }
 
 fn drain(e: &mut TendermintEngine) -> Vec<ConsensusAction> {
@@ -374,7 +374,7 @@ async fn verify_commit_requires_one_round_and_counts_each_validator_once() {
     let h = block("b", 0, None).block_hash;
     let pc = |r, who| vote(VoteType::Precommit, r, who, Some(&h));
     let ok = CommitCertificate { height: 0, round: 0, block_hash: h.clone(),
-        precommits: vec![pc(0, "val_00"), pc(0, "val_01"), pc(0, "val_02")] };
+        precommits: vec![pc(0, "val_00"), pc(0, "val_01"), pc(0, "val_02")], epoch: 0 };
     assert!(e.verify_commit(&ok, &vs).is_ok());
 
     let mixed_rounds = CommitCertificate { precommits: vec![pc(0, "val_00"), pc(0, "val_01"), pc(1, "val_02")], ..ok.clone() };

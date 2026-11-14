@@ -2,54 +2,213 @@
 
 > **Start here:** [PQ-PoP-HotStuff-2 prerequisite](docs/PQ-POP-PREREQUISITE.md) defines the current protocol direction and the native Phase 0 and Phase 0.5 gates. Once those gates pass, continue the applicable milestones below with PQ-HotStuff-2 and defensive pruning. Earlier Tendermint, Ed25519, and QRC entries document historical plans and evidence.
 
-## Next: QC epoch assertion test — open
+## Full stack re-confirmation — 2026-11-14
 
-**Next boundary test: assert the epoch carried by each quorum certificate (QC epoch field)**
+✅ **All five suites Windows-confirmed on integration candidate** (owner-run, BossKing MINGW64, `feat/vote-format-v2` at `a7c2f5a`)
 
-**Goal:** Identify the last block certified by the outgoing validator set and the first certified by the incoming set, via the epoch encoded in the QC itself — not the block record's `epoch` field (which is the engine epoch active at `commit_block` time, not which set signed the QC).
+Re-run after stack review of PRs #160 → #161 → #164. All production src changes were present at their tested revision; the five suites cover the entire diff of #164.
 
-**Agreed boundary trace (epoch-change at height 2):**
+| Suite | Features | Result | Time |
+|---|---|---|---|
+| `prop_vote_format` | `pq-hotstuff` | 12/12 ✅ | 0.17s |
+| `prop_handoff` | `epoch-transition` | 6/6 ✅ | 0.30s |
+| `prop_sign_verify` | `real-pqc` | 6/6 ✅ | 1.24s |
+| `pqhs2_4node_epoch_live` (2 tests) | `pq-hotstuff` | 2/2 ✅ | 63.17s |
+| `pqhs2_4node_pruning_live` | `pq-hotstuff` | 1/1 ✅ | 223.45s |
 
-| Block record | `last_commit` certifies | Expected certificate epoch |
-|---|---|---|
-| h3 | h2 (epoch-change block) | 0 |
-| h4 | h3 (boundary child) | **0** |
-| h5 | h4 (first incoming-set block) | 1 |
-
-The outgoing validator set certifies **both** the epoch-change block (h2) and its boundary child (h3). The incoming set first certifies h4. The boundary certificate epoch flips from 0 to 1 between h4's `last_commit` (h3's cert, epoch=0) and h5's `last_commit` (h4's cert, epoch=1).
-
-**Why h3's certificate carries epoch=0 (protocol design):** The certificate epoch of a block is set to the engine epoch at QC formation time, **before** `on_commit` fires for the block that triggers the transition. In the two-chain commit trace, h3's QC is what delivers the commit signal for h2 (the epoch-change block). Validators cast their h3 precommits while the engine is still at epoch=0 — h2 has not yet been delivered to `on_commit`. The QC forms, `on_commit(h2)` fires and advances the epoch to 1, then h4 is proposed and voted under epoch=1. h4's QC therefore carries epoch=1.
-
-**What the test will assert:**
-
-```rust
-// h3's last_commit certifies h2 — outgoing set, epoch 0
-assert_eq!(api.block(3).last_commit.epoch, 0);
-assert_eq!(api.block(3).last_commit.height, 2);
-// h4's last_commit certifies h3 — still outgoing set, epoch 0
-assert_eq!(api.block(4).last_commit.epoch, 0);
-assert_eq!(api.block(4).last_commit.height, 3);
-// h5's last_commit certifies h4 — incoming set, epoch 1
-assert_eq!(api.block(5).last_commit.epoch, 1);
-assert_eq!(api.block(5).last_commit.height, 4);
-// Verify both handoff QCs against the authenticated outgoing set
-verify_handoff_proof(chain, &api.block(3).last_commit, &outgoing_set, ...); // h2 cert
-verify_handoff_proof(chain, &api.block(4).last_commit, &outgoing_set, ...); // h3 cert
+**Run commands:**
+```
+cargo test -p chain-forge-consensus --features pq-hotstuff --test prop_vote_format -- --nocapture
+cargo test -p chain-forge-consensus --features epoch-transition --test prop_handoff -- --nocapture
+cargo test -p chain-forge-crypto --features real-pqc --test prop_sign_verify -- --nocapture
+cargo test -p chain-forge-node --features pq-hotstuff --test pqhs2_4node_epoch_live -- --nocapture
+cargo test -p chain-forge-node --features pq-hotstuff --test pqhs2_4node_pruning_live -- --nocapture
 ```
 
-**Current state (gap):** `Vote` has no `epoch` field; `vote_signing_bytes` does not include epoch; `CommitCertificate` does not carry an epoch. The API `BlockSummary` exposes `last_commit_signers` (validator IDs only) but not the full `CommitCertificate`. There is no way for a test to assert "this QC was signed under epoch N" without reading internal engine state.
+The stack is clean. #164 is ready to merge into #161 when #161 and #160 are approved.
 
-**Required changes (separate branch — protocol break):**
-1. Add `epoch: u64` to `Vote`. Every vote in a certificate must carry the same epoch and must sign the same epoch value. Add a version prefix to `vote_signing_bytes` so legacy-format bytes cannot be accepted under the new format: `CFV2| chain_id | type | height | round | epoch | block_hash` (increment prefix from `CFV|` to `CFV2|`).
-2. Add `epoch: u64` to `CommitCertificate`. Must match the signed epoch of all constituent votes. Set at QC formation time (before `on_commit` fires).
-3. Expose the full `last_commit: Option<CommitCertificate>` in `BlockSummary` (or a separate `/api/blocks/{height}/qc` endpoint) so the devnet test can read it without internal access.
-4. Update `verify_handoff_proof` to: (a) require `certificate.epoch == expected_outgoing_epoch`, (b) verify both handoff QCs (h2's cert and h3's cert) against the outgoing set before accepting the transition.
-5. Update `sign_vote` and all vote construction sites to set `Vote.epoch`.
-6. Update `gate_b_admission`, `gate_b_epoch_handoff`, and all unit tests that call `vote_signing_bytes` directly.
+---
 
-**Note on same-validator-set transition:** In this test the outgoing and incoming validator membership is identical (same 4 nodes). The certificate epoch distinguishes which epoch's bookkeeping the signers operated under. For a future membership-change test, the certificate epoch also distinguishes which key material was active.
+## vote-format v2 property tests — sandbox pass, Windows pending — 2026-11-12
 
-**Blocking dependency:** `vote_signing_bytes` prefix change is a protocol break. All existing live and unit tests that construct `Vote` structs or call `vote_signing_bytes` must be updated atomically. Do not mix with the current epoch-change milestone.
+**Branch:** `feat/vote-format-v2` — commits `2037c7a` (format change) + `3813fe2` (property tests)
+
+**What landed:**
+
+- `Vote.epoch: u64` and `CommitCertificate.epoch: u64` added (`#[serde(default)]` for backward-compatible v1 deserialization). All existing construction sites updated to `epoch: 0`.
+- `vote_signing_bytes_v2` with unambiguous encoding: `CFV2\x00 | u16-BE chain_id_len | chain_id | type_byte | u64-LE height | u32-LE round | u64-LE epoch | 32-byte set_hash | 0x00/0x01 | [u16-BE bh_len | bh_bytes]`.
+- Three property test files:
+
+| File | Features | Tests | Sandbox |
+|---|---|---|---|
+| `chain-forge-consensus/tests/prop_vote_format.rs` | `pq-hotstuff` | P1 field binding (epoch, height, round, set_hash, absent/present block_hash, chain_id, all VoteType variants, boundary values), P2 v1≠v2 bytes, fixed v1/v2 encoding vectors | 12/12 ✅ |
+| `chain-forge-consensus/tests/prop_vote_format.rs` | `epoch-transition` | P4 canonical_set_hash: order-independent, ID/power/pubkey sensitive | included above |
+| `chain-forge-consensus/tests/prop_handoff.rs` | `epoch-transition` | P3/P7 valid h2/h3 pair, mixed-epoch vote, wrong child QC round, wrong cert epoch (placeholder), 1-of-4 quorum, set hash mismatch | 6/6 ✅ |
+| `chain-forge-crypto/tests/prop_sign_verify.rs` | `real-pqc` | P5 roundtrip/wrong-key/mutated-message, P6 bit-flip/boundaries/truncation | 6/6 ✅ |
+
+**Sandbox run commands (all passed):**
+```
+cargo test -p chain-forge-consensus --features pq-hotstuff --test prop_vote_format -- --nocapture
+cargo test -p chain-forge-consensus --features epoch-transition --test prop_handoff -- --nocapture
+cargo test -p chain-forge-crypto --features real-pqc --test prop_sign_verify -- --nocapture
+```
+
+**Windows confirmation (owner-run, 2026-11-12):** `feat/vote-format-v2` at `f8d52c4` — BossKing MINGW64. All 24/24 passed:
+- `prop_vote_format` (`--features pq-hotstuff`): 12/12 in 0.28s
+- `prop_handoff` (`--features epoch-transition`): 6/6 in 0.60s
+- `prop_sign_verify` (`--features real-pqc`): 6/6 in 1.61s
+
+✅ **Windows-confirmed**
+
+**Next steps (not started):**
+- Wire `Vote.epoch` into `sign_vote` so the epoch is set at construction time (not just on literal initializers).
+- Wire `vote_signing_bytes_v2` into the verifier path and `verify_handoff_proof`.
+- Expose `last_commit: Option<CommitCertificate>` in `BlockSummary` so the devnet boundary test can assert QC epochs.
+- Four-node QC epoch boundary devnet test (requires all three wiring steps above).
+
+---
+
+## Native-node fixed-set pruning complete — 2026-11-14
+
+✅ **Windows-confirmed** (owner-run, 2026-11-14 at `d638f1a`)
+
+**Branch:** `feat/vote-format-v2` — commits `795d9f2` → `e3d95cd` → `fad230d` → `d638f1a`
+
+**What landed:**
+
+1. **`CHAIN_STORE_KEEP = 20` constant** in `chain-forge-node/src/node.rs`: retention window for the in-memory `chain_store: BTreeMap<u64, ...>`. After each commit at height H, entries below `H - CHAIN_STORE_KEEP + 1` are removed.
+
+2. **`chain_store_watermark`** in `NodeStatus`: exposed on `/api/status`; advances monotonically as blocks are pruned. Initialized to 0; first advances to 2 at block 21 (removes height 1).
+
+3. **`pqhs2_4node_pruning_live.rs`**: 8-phase integration test — 4-node ML-DSA-65 PQ-HotStuff devnet, fixed validator set, no epoch change.
+
+| Phase | Assertion |
+|---|---|
+| 1 | All 4 nodes reach height 21 within 240 s |
+| 2 | `chain_store_watermark >= 1` on all 4 nodes |
+| 3 | Poll (500 ms interval, 30 s timeout) for a committed gen-* snapshot (manifest.json present) on alice whose `chain_store.json` lacks key "1" |
+| 4 | All 4 nodes agree on `block_hash` and `state_root` at height 21 |
+| 5 | Kill dave; alice/bob/carol advance to height 23 |
+| 6 | Restart dave from its pruned data directory |
+| 7 | Dave catches up to height 23 within timeout |
+| 8 | Dave agrees with alice/bob/carol on `block_hash` and `state_root` at height 23 |
+
+**Genesis:** `tests/devnet/genesis-4node-pqhs2.json` (`block_time_ms=2000`; actual devnet rate ~9 s/block on Windows due to two-chain PQ-HotStuff + ML-DSA-65 overhead)
+
+**Run command:**
+```
+cargo test -p chain-forge-node --features pq-hotstuff --test pqhs2_4node_pruning_live -- --nocapture
+```
+
+**Windows confirmation (owner-run, 2026-11-14):** `feat/vote-format-v2` at `d638f1a` — BossKing MINGW64. 1/1 passed in 217.44s.
+
+```
+── All nodes reached height 21 in 174.0s ──
+  qcb1alice=21  qcb1bob=21  qcb1carol=21  qcb1dave=21
+
+── Phase 2: verifying chain_store_watermark > 0 on all nodes ──
+   qcb1alice  chain_store_watermark = 2
+   qcb1bob  chain_store_watermark = 2
+   qcb1carol  chain_store_watermark = 2
+   qcb1dave  chain_store_watermark = 2
+
+── Phase 3: verifying height 1 is absent from alice's chain_store.json ──
+   latest pruned gen: gen-000021
+   chain_store.json height keys: ["10", "11", "12", "13", "14", "15"]
+   ✓ height 1 is absent from chain_store.json (pruned)
+
+── Phase 4: agreement check at height 21 ──
+   (all 4 nodes: block_hash=e6fb3f49...  state_root=a92a28fe...)
+   ✓ all nodes agree on block_hash and state_root at height 21
+
+── Phase 7: waiting for dave to catch up to height 23 ──
+   [ 6.0s]  all nodes at height 23 (dave restarted from pruned storage)
+
+── Phase 8: agreement check at height 23 ──
+   ✓ dave (restarted from pruned storage) agrees with peers at height 23
+
+pqhs2_4node_fixed_set_pruning  PASS
+```
+
+**Epoch-handoff design note:** pruning across validator-set changes (V0 ≠ V1) requires the 6 items listed in `docs/pq-hotstuff-002-handoff-trace.md` and remains gated on owner decisions. This milestone covers fixed-set operation only.
+
+---
+
+## PQ-HotStuff v2 signing wiring + QC cert-epoch boundary — 2026-11-14
+
+✅ **Windows-confirmed** (re-confirmed 2026-11-14 at `e80214e` with structured JSON verification)
+
+**Branch:** `feat/vote-format-v2` — commits `cfaeea2` → `576c6f1` → `01b268f` → `e80214e`
+
+**What landed:**
+
+Five fixes across this milestone:
+
+1. **cfg guard bug** (`cfaeea2`): `#[cfg(not(feature = "epoch-transition"))]` in `node.rs` always evaluated true (epoch-transition is a `chain-forge-consensus` feature, not a `chain-forge-node` feature). Fixed to `#[cfg(not(feature = "pq-hotstuff"))]` at all 3 sign/verify sites.
+
+2. **CommitCertificate field reorder** (`a0e231f`): Moved `epoch` before `precommits` in the struct for deterministic JSON order.
+
+3. **Port separation for parallel tests** (`c683909`): Separate port ranges so both tests can run in parallel without WSAEADDRINUSE.
+
+4. **last_commit from engine cert** (`576c6f1`): `participation = payload.last_commit.clone()` was always `None` for PQ-HotStuff. Fixed with `#[cfg(feature = "pq-hotstuff")] let participation = Some(cert.clone())`.
+
+5. **cert.epoch from vote epoch** (`01b268f`): `try_two_chain_commit` set `epoch: self.epoch` (current engine epoch at assembly time). For the two-chain same-height commit rule, `self.epoch` can be ahead of the votes' signing epoch (on_commit for a concurrent block at another round may have already fired). Fixed to `epoch: to_commit.precommits.first().map(|v| v.epoch).unwrap_or(0)`.
+
+**Two-chain commit rule (same-height consecutive rounds):**
+
+Block H is committed when two consecutive-round QCs form **at the same height H** (`locked_qc.round + 1 == new_qc.round`, both at height H). The cert epoch matches the epoch under which the precommit votes were signed, which equals the engine epoch when those votes were cast.
+
+**Confirmed boundary trace (epoch-change at height 2, 4-node ML-DSA-65 devnet):**
+
+| Block | cert.height | cert.epoch | vote_epochs | Notes |
+|---|---|---|---|---|
+| h2 | 2 | 0 | [0,0,0] | epoch-change block; QCs form at epoch 0 |
+| h3 | 3 | 1 | [1,1,1] | QCs form at epoch 1 (after on_commit(h2) transitions epoch) |
+| h4 | 4 | 1 | [1,1,1] | continued epoch 1 |
+
+The epoch flip in `cert.epoch` (and `vote_epochs`) is between h2 and h3.
+
+**Milestone closed for the observed same-validator-set v2 certificate trace.** Both live tests passed on BossKing at `e80214e`. Structured decoding confirmed each certificate's height and epoch and agreement with its constituent vote epochs on all four nodes. This confirms the branch's same-height, consecutive-round QC behavior. The earlier parent–child handoff trace predicted a different boundary. Reconcile that specification and its PO-4 evidence with the implemented rule before using this result to approve dynamic membership.
+
+**Two tests in `chain-forge-node/tests/pqhs2_4node_epoch_live.rs`:**
+
+| Test | Windows result |
+|---|---|
+| `pqhs2_4node_epoch_change_reaches_new_epoch` | ✅ Windows-confirmed |
+| `pqhs2_4node_qc_cert_epoch_boundary` | ✅ Windows-confirmed |
+
+**Windows confirmation (owner-run, 2026-11-14):** `feat/vote-format-v2` at `e80214e` — BossKing MINGW64. Both tests passed in 57.01s. Structured JSON parser verified `cert.epoch` and `vote_epochs` on all 4 nodes at h2, h3, h4:
+
+```
+── Cert check: block 2 → last_commit for h2 (expected cert epoch 0) ──
+   qcb1alice  last_commit.height=2  cert.epoch=0  vote_epochs=[0, 0, 0]
+   ...
+   ✓ block 2: last_commit certifies h2 epoch=0
+── Cert check: block 3 → last_commit for h3 (expected cert epoch 1) ──
+   qcb1alice  last_commit.height=3  cert.epoch=1  vote_epochs=[1, 1, 1]
+   ...
+   ✓ block 3: last_commit certifies h3 epoch=1
+── Cert check: block 4 → last_commit for h4 (expected cert epoch 1) ──
+   qcb1alice  last_commit.height=4  cert.epoch=1  vote_epochs=[1, 1, 1]
+   ...
+   ✓ block 4: last_commit certifies h4 epoch=1
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 57.01s
+```
+
+**Run command:**
+```
+cargo test -p chain-forge-node --features pq-hotstuff --test pqhs2_4node_epoch_live -- --nocapture
+```
+
+**Open design question (different-set handoff, not blocking this milestone):**
+See `docs/pq-hotstuff-002-handoff-trace.md`. This milestone confirmed the
+same-validator-set trace. Before dynamic membership (V0 ≠ V1) is approved,
+three distinct claims in `verify_handoff_proof` must be evaluated: quorum
+signature (currently established), finality under the same-height
+consecutive-round rule (gap: trigger QC not stored), and outgoing cutoff for
+removed validators. The spec §6 commit rule description also needs correction
+to match the implementation. Branch unchanged pending owner decisions.
 
 ---
 

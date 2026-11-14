@@ -184,6 +184,12 @@ pub struct Vote {
     /// without any change to their construction sites.
     #[serde(default = "Vote::default_scheme")]
     pub scheme: String,
+
+    /// Consensus epoch under which this vote was cast (vote-format v2).
+    /// Included in `vote_signing_bytes_v2`; absent from v1 votes (defaults to 0).
+    /// Every vote in a `CommitCertificate` must carry the same epoch.
+    #[serde(default)]
+    pub epoch: u64,
 }
 
 impl Vote {
@@ -248,7 +254,12 @@ pub fn proposal_signing_bytes(
     b
 }
 
-/// Bytes a validator signs for `Vote::signature`.
+/// Bytes a validator signs for `Vote::signature` (v1 format, legacy).
+///
+/// Format: `CFV| <chain_id> | <type_byte> <height_8le> <round_4le> [<block_hash_bytes>]`
+///
+/// The `|` delimiter after chain_id is a vestigial separator; block_hash is
+/// appended without a length prefix. Use `vote_signing_bytes_v2` for new code.
 pub fn vote_signing_bytes(
     chain_id: &str, vote_type: &VoteType, height: BlockHeight, round: Round,
     block_hash: Option<&BlockHash>,
@@ -264,6 +275,57 @@ pub fn vote_signing_bytes(
     b
 }
 
+/// Bytes a validator signs for `Vote::signature` (v2 format).
+///
+/// All field boundaries are unambiguous: chain_id is length-prefixed (u16 BE),
+/// block_hash uses a presence flag followed by a length-prefixed value.
+/// The `CFV2\x00` prefix ensures no v2 byte string equals any v1 string.
+///
+/// Format:
+/// ```text
+/// b"CFV2\x00"                     5-byte prefix (null prevents | ambiguity)
+/// chain_id_len: u16 BE             length of chain_id in bytes
+/// chain_id: [u8]
+/// vote_type: u8                    0=Prevote, 1=Precommit, 2=Nil
+/// height: u64 LE
+/// round: u32 LE
+/// epoch: u64 LE
+/// set_hash: [u8; 32]              canonical_set_hash of active validator set
+/// block_hash_flag: u8             0x00 = absent, 0x01 = present
+/// [block_hash_len: u16 BE]        only when flag = 0x01
+/// [block_hash: [u8]]
+/// ```
+pub fn vote_signing_bytes_v2(
+    chain_id: &str,
+    vote_type: &VoteType,
+    height: BlockHeight,
+    round: Round,
+    epoch: u64,
+    set_hash: &[u8; 32],
+    block_hash: Option<&BlockHash>,
+) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(b"CFV2\x00");
+    let chain_bytes = chain_id.as_bytes();
+    b.extend_from_slice(&(chain_bytes.len() as u16).to_be_bytes());
+    b.extend_from_slice(chain_bytes);
+    b.push(match vote_type { VoteType::Prevote => 0, VoteType::Precommit => 1, VoteType::Nil => 2 });
+    b.extend_from_slice(&height.to_le_bytes());
+    b.extend_from_slice(&round.to_le_bytes());
+    b.extend_from_slice(&epoch.to_le_bytes());
+    b.extend_from_slice(set_hash);
+    match block_hash {
+        None => b.push(0x00),
+        Some(bh) => {
+            b.push(0x01);
+            let bh_bytes = bh.0.as_bytes();
+            b.extend_from_slice(&(bh_bytes.len() as u16).to_be_bytes());
+            b.extend_from_slice(bh_bytes);
+        }
+    }
+    b
+}
+
 /// Proof that a block was committed: the block hash plus the set of
 /// pre-commit votes whose combined power meets quorum.
 /// Stored in the block header so any light client can verify finality.
@@ -272,6 +334,15 @@ pub struct CommitCertificate {
     pub height: BlockHeight,
     pub round: Round,
     pub block_hash: BlockHash,
+
+    /// Consensus epoch at QC formation time (vote-format v2).
+    /// Set when the quorum threshold is crossed, before `on_commit` fires.
+    /// Must match every constituent vote's `epoch` field.
+    /// Defaults to 0 for v1 certificates (backward-compatible deserialization).
+    /// Serialized before `precommits` so the JSON field order is deterministic
+    /// and test parsers can find it via simple string splitting.
+    #[serde(default)]
+    pub epoch: u64,
 
     /// The pre-commit votes that form the quorum. Must cover ≥ 2/3+1 power.
     pub precommits: Vec<Vote>,
@@ -962,6 +1033,7 @@ impl FbaEngine {
                 block_hash: Some(hash.clone()),
                 signature:  vec![],
                 scheme:     Vote::default_scheme(),
+                epoch:      0,
             }).collect())
             .unwrap_or_default();
 
@@ -970,6 +1042,7 @@ impl FbaEngine {
             round:      self.round,
             block_hash: hash.clone(),
             precommits,
+            epoch:      0,
         }
     }
 
@@ -1151,6 +1224,7 @@ impl ConsensusEngine for FbaEngine {
             block_hash: None,
             signature:  vec![],
             scheme:     Vote::default_scheme(),
+                epoch:      0,
         })
     }
 
@@ -1765,6 +1839,7 @@ impl HotStuffEngine {
             round:      self.round,
             block_hash,
             precommits: self.commit_votes.to_precommits(),
+            epoch:      0,
         }
     }
 
@@ -2070,6 +2145,7 @@ impl ConsensusEngine for HotStuffEngine {
             block_hash: None,
             signature:  vec![],
             scheme:     Vote::default_scheme(),
+                epoch:      0,
         };
         Ok(nil_vote)
     }
@@ -2374,6 +2450,7 @@ mod tests {
                 block_hash: Some(block_hash.clone()),
                 signature:  vec![],
                 scheme:     Vote::default_scheme(),
+                epoch:      0,
             };
             cert = engine.receive_vote(vote).await.unwrap();
         }
@@ -2411,6 +2488,7 @@ mod tests {
                 block_hash: Some(block_hash_0.clone()),
                 signature:  vec![],
                 scheme:     Vote::default_scheme(),
+                epoch:      0,
             };
             cert = engine.receive_vote(vote).await.unwrap();
         }
@@ -2449,6 +2527,7 @@ mod tests {
                 block_hash: Some(block_hash.clone()),
                 signature:  vec![],
                 scheme:     Vote::default_scheme(),
+                epoch:      0,
             };
             cert = engine.receive_vote(vote).await.unwrap();
         }
@@ -2467,6 +2546,7 @@ mod tests {
             round: 0,
             block_hash: block_hash.clone(),
             precommits: vec![],
+            epoch: 0,
         };
 
         engine.on_commit(cert, None).await.unwrap();
@@ -2505,8 +2585,10 @@ mod tests {
                     block_hash: Some(block_hash.clone()),
                     signature:  vec![],
                     scheme:     Vote::default_scheme(),
+                    epoch:      0,
                 })
                 .collect(),
+            epoch: 0,
         };
 
         let result = engine.verify_commit(&cert, &vs);
@@ -2536,8 +2618,10 @@ mod tests {
                     block_hash: Some(block_hash.clone()),
                     signature:  vec![],
                     scheme:     Vote::default_scheme(),
+                    epoch:      0,
                 })
                 .collect(),
+            epoch: 0,
         };
 
         assert!(
@@ -2600,6 +2684,7 @@ mod tests {
             block_hash: Some(BlockHash("block_test".into())),
             signature:  vec![],  // empty — would have bypassed old opt-in check
             scheme:     Vote::default_scheme(),
+                epoch:      0,
         };
 
         let result = engine.receive_vote(spoofed_vote).await;
@@ -2676,6 +2761,7 @@ mod tests {
                     block_hash: Some(block_hash.clone()),
                     signature:  vec![],
                     scheme:     Vote::default_scheme(),
+                epoch:      0,
                 },
                 Vote {
                     vote_type:  VoteType::Precommit,
@@ -2685,6 +2771,7 @@ mod tests {
                     block_hash: Some(block_hash.clone()),
                     signature:  vec![],
                     scheme:     Vote::default_scheme(),
+                epoch:      0,
                 },
                 Vote {
                     vote_type:  VoteType::Precommit,
@@ -2694,6 +2781,7 @@ mod tests {
                     block_hash: Some(block_hash.clone()),
                     signature:  vec![],  // Carol has a key — this is a forgery attempt
                     scheme:     Vote::default_scheme(),
+                epoch:      0,
                 },
             ],
         };
@@ -2761,6 +2849,7 @@ mod tests {
                 block_hash: Some(block_hash.clone()),
                 signature:  raw_sig.bytes,
                 scheme:     Vote::default_scheme(),
+                epoch:      0,
             }
         };
 
@@ -2775,6 +2864,7 @@ mod tests {
             height: 0, round: 0,
             block_hash: block_hash.clone(),
             precommits: good_votes.clone(),
+            epoch: 0,
         };
         assert!(
             engine.verify_commit(&cert_good, &vs).is_ok(),
@@ -2789,6 +2879,7 @@ mod tests {
             height: 0, round: 0,
             block_hash: block_hash.clone(),
             precommits: bad_votes,
+            epoch: 0,
         };
         let err = engine.verify_commit(&cert_bad, &vs);
         assert!(
@@ -2824,6 +2915,7 @@ mod tests {
             block_hash: Some(block_a.clone()),
             signature:  vec![],
             scheme:     Vote::default_scheme(),
+                epoch:      0,
         };
         engine.receive_vote(vote_a).await.unwrap();
         assert!(engine.drain_equivocations().is_empty(),
@@ -2838,6 +2930,7 @@ mod tests {
             block_hash: Some(block_b.clone()),
             signature:  vec![],
             scheme:     Vote::default_scheme(),
+                epoch:      0,
         };
         engine.receive_vote(vote_b).await.unwrap();
 
@@ -2876,6 +2969,7 @@ mod tests {
             block_hash: Some(block_a.clone()),
             signature:  vec![],
             scheme:     Vote::default_scheme(),
+                epoch:      0,
         };
         engine.receive_vote(vote_a).await.unwrap();
         assert!(engine.drain_equivocations().is_empty());
@@ -2888,6 +2982,7 @@ mod tests {
             block_hash: Some(block_b.clone()),
             signature:  vec![],
             scheme:     Vote::default_scheme(),
+                epoch:      0,
         };
         engine.receive_vote(vote_b).await.unwrap();
 
@@ -2919,6 +3014,7 @@ mod tests {
             block_hash: Some(block.clone()),
             signature:  vec![],
             scheme:     Vote::default_scheme(),
+                epoch:      0,
         };
 
         engine.receive_vote(vote.clone()).await.unwrap();
@@ -2954,6 +3050,7 @@ mod tests {
             block_hash: None,         // precommit-nil
             signature:  vec![],
             scheme:     Vote::default_scheme(),
+                epoch:      0,
         };
         let real_vote = Vote {
             vote_type:  VoteType::Precommit,
@@ -2963,6 +3060,7 @@ mod tests {
             block_hash: Some(block),  // precommit-block (normal round-change)
             signature:  vec![],
             scheme:     Vote::default_scheme(),
+                epoch:      0,
         };
 
         engine.receive_vote(nil_vote).await.unwrap();
@@ -2998,6 +3096,7 @@ mod tests {
             block_hash: None,
             signature:  vec![],
             scheme:     Vote::default_scheme(),
+                epoch:      0,
         };
         let real_vote = Vote {
             vote_type:  VoteType::Prevote,
@@ -3007,6 +3106,7 @@ mod tests {
             block_hash: Some(block),
             signature:  vec![],
             scheme:     Vote::default_scheme(),
+                epoch:      0,
         };
 
         engine.receive_vote(nil_vote).await.unwrap();
@@ -3040,6 +3140,7 @@ mod tests {
             block_hash: Some(block_a),
             signature:  vec![],
             scheme:     Vote::default_scheme(),
+                epoch:      0,
         };
         let vote_b = Vote {
             vote_type:  VoteType::Precommit,
@@ -3049,6 +3150,7 @@ mod tests {
             block_hash: Some(block_b),
             signature:  vec![],
             scheme:     Vote::default_scheme(),
+                epoch:      0,
         };
 
         engine.receive_vote(vote_a).await.unwrap();
@@ -3081,6 +3183,7 @@ mod tests {
             block_hash: Some(block_a),
             signature:  vec![],
             scheme:     Vote::default_scheme(),
+                epoch:      0,
         };
         let vote_b = Vote {
             vote_type:  VoteType::Prevote,
@@ -3090,6 +3193,7 @@ mod tests {
             block_hash: Some(block_b),
             signature:  vec![],
             scheme:     Vote::default_scheme(),
+                epoch:      0,
         };
 
         engine.receive_vote(vote_a).await.unwrap();
@@ -3122,6 +3226,7 @@ mod tests {
             block_hash: Some(block_a),
             signature:  vec![],
             scheme:     Vote::default_scheme(),
+                epoch:      0,
         };
         // Different round — valid protocol re-proposal, not equivocation.
         let vote_round_1 = Vote {
@@ -3132,6 +3237,7 @@ mod tests {
             block_hash: Some(block_b),
             signature:  vec![],
             scheme:     Vote::default_scheme(),
+                epoch:      0,
         };
 
         engine.receive_vote(vote_round_0).await.unwrap();
@@ -3229,6 +3335,7 @@ mod tests {
                 block_hash: Some(proposal.block_hash.clone()),
                 signature:  vec![],
                 scheme:     Vote::default_scheme(),
+                epoch:      0,
             };
             let result = engine.receive_vote(vote).await.unwrap();
             assert!(result.is_none(), "no commit before 80% threshold");
@@ -3243,6 +3350,7 @@ mod tests {
             block_hash: Some(proposal.block_hash.clone()),
             signature:  vec![],
             scheme:     Vote::default_scheme(),
+                epoch:      0,
         };
         let cert = engine.receive_vote(vote4).await.unwrap();
         let cert = cert.expect("4th vote must trigger commit");
@@ -3269,6 +3377,7 @@ mod tests {
                 block_hash: Some(proposal.block_hash.clone()),
                 signature:  vec![],
                 scheme:     Vote::default_scheme(),
+                epoch:      0,
             };
             assert!(engine.receive_vote(vote).await.unwrap().is_none());
         }
@@ -3295,6 +3404,7 @@ mod tests {
             height: 0, round: 0,
             block_hash: BlockHash("fba_h0_r0_00000000".into()),
             precommits: vec![],
+            epoch: 0,
         };
         engine.on_commit(cert, None).await.unwrap();
 
@@ -3320,7 +3430,9 @@ mod tests {
                 block_hash: Some(BlockHash("test".into())),
                 signature:  vec![],
                 scheme:     Vote::default_scheme(),
+                epoch:      0,
             }).collect(),
+            epoch: 0,
         };
         assert!(engine.verify_commit(&cert_ok, &validators).is_ok());
 
@@ -3335,7 +3447,9 @@ mod tests {
                 block_hash: Some(BlockHash("test".into())),
                 signature:  vec![],
                 scheme:     Vote::default_scheme(),
+                epoch:      0,
             }).collect(),
+            epoch: 0,
         };
         assert!(engine.verify_commit(&cert_bad, &validators).is_err());
     }
@@ -3416,6 +3530,7 @@ mod tests {
             validator: ValidatorId("fba_val_1".into()),
             block_hash: Some(hash_a.clone()), signature: vec![],
             scheme:     Vote::default_scheme(),
+                epoch:      0,
         };
         assert!(engine.receive_vote(vote_a).await.unwrap().is_none());
         assert!(engine.drain_equivocations().is_empty());
@@ -3426,6 +3541,7 @@ mod tests {
             validator: ValidatorId("fba_val_1".into()),
             block_hash: Some(hash_b.clone()), signature: vec![],
             scheme:     Vote::default_scheme(),
+                epoch:      0,
         };
         assert!(engine.receive_vote(vote_b).await.unwrap().is_none());
 
@@ -3453,6 +3569,7 @@ mod tests {
             validator: ValidatorId("fba_val_1".into()),
             block_hash: Some(proposal.block_hash.clone()), signature: vec![],
             scheme:     Vote::default_scheme(),
+                epoch:      0,
         };
 
         // Send same vote twice — should not count as 2 votes.
@@ -3488,6 +3605,7 @@ mod tests {
             validator: ValidatorId("fba_val_1".into()),
             block_hash: Some(good_hash.clone()), signature: vec![],
             scheme:     Vote::default_scheme(),
+                epoch:      0,
         };
         assert!(engine.receive_vote(vote_good).await.unwrap().is_none());
         assert!(engine.drain_equivocations().is_empty(), "no equivocation yet");
@@ -3498,6 +3616,7 @@ mod tests {
             validator: ValidatorId("fba_val_1".into()),
             block_hash: Some(bad_hash.clone()), signature: vec![],
             scheme:     Vote::default_scheme(),
+                epoch:      0,
         };
         assert!(engine.receive_vote(vote_bad).await.unwrap().is_none());
 
@@ -3516,6 +3635,7 @@ mod tests {
                 validator: ValidatorId(format!("fba_val_{i}")),
                 block_hash: Some(bad_hash.clone()), signature: vec![],
                 scheme:     Vote::default_scheme(),
+                epoch:      0,
             };
             assert!(engine.receive_vote(vote).await.unwrap().is_none(),
                 "bad_hash should need fba_val_1's discarded vote to reach threshold");
@@ -3542,20 +3662,21 @@ mod tests {
                 Vote { vote_type: VoteType::Precommit, height: 0, round: 0,
                     validator: ValidatorId("fba_val_1".into()),
                     block_hash: Some(hash.clone()), signature: vec![],
-                    scheme: Vote::default_scheme() },
+                    scheme: Vote::default_scheme() , epoch: 0 },
                 Vote { vote_type: VoteType::Precommit, height: 0, round: 0,
                     validator: ValidatorId("fba_val_1".into()), // duplicate
                     block_hash: Some(hash.clone()), signature: vec![],
-                    scheme: Vote::default_scheme() },
+                    scheme: Vote::default_scheme() , epoch: 0 },
                 Vote { vote_type: VoteType::Precommit, height: 0, round: 0,
                     validator: ValidatorId("fba_val_2".into()),
                     block_hash: Some(hash.clone()), signature: vec![],
-                    scheme: Vote::default_scheme() },
+                    scheme: Vote::default_scheme() , epoch: 0 },
                 Vote { vote_type: VoteType::Precommit, height: 0, round: 0,
                     validator: ValidatorId("fba_val_3".into()),
                     block_hash: Some(hash.clone()), signature: vec![],
-                    scheme: Vote::default_scheme() },
+                    scheme: Vote::default_scheme() , epoch: 0 },
             ],
+            epoch: 0,
         };
         let result = engine.verify_commit(&cert_dup, &validators);
         assert!(result.is_err(), "verify_commit must reject duplicate validators");
@@ -3577,20 +3698,21 @@ mod tests {
                 Vote { vote_type: VoteType::Precommit, height: 0, round: 0,
                     validator: ValidatorId("fba_val_1".into()),
                     block_hash: Some(cert_hash.clone()), signature: vec![],
-                    scheme: Vote::default_scheme() },
+                    scheme: Vote::default_scheme() , epoch: 0 },
                 Vote { vote_type: VoteType::Precommit, height: 0, round: 0,
                     validator: ValidatorId("fba_val_2".into()),
                     block_hash: Some(wrong_hash.clone()), // wrong hash
-                    signature: vec![], scheme: Vote::default_scheme() },
+                    signature: vec![], scheme: Vote::default_scheme() , epoch: 0 },
                 Vote { vote_type: VoteType::Precommit, height: 0, round: 0,
                     validator: ValidatorId("fba_val_3".into()),
                     block_hash: Some(cert_hash.clone()), signature: vec![],
-                    scheme: Vote::default_scheme() },
+                    scheme: Vote::default_scheme() , epoch: 0 },
                 Vote { vote_type: VoteType::Precommit, height: 0, round: 0,
                     validator: ValidatorId("fba_val_4".into()),
                     block_hash: Some(cert_hash.clone()), signature: vec![],
-                    scheme: Vote::default_scheme() },
+                    scheme: Vote::default_scheme() , epoch: 0 },
             ],
+            epoch: 0,
         };
         let result = engine.verify_commit(&cert, &validators);
         assert!(result.is_err(), "verify_commit must reject mismatched block hash in vote");
@@ -3692,6 +3814,7 @@ mod tests {
                 validator: ValidatorId(format!("fba_val_{i}")),
                 block_hash: Some(proposal.block_hash.clone()), signature: vec![],
                 scheme:     Vote::default_scheme(),
+                epoch:      0,
             };
             engine.receive_vote(vote).await.unwrap();
         }
@@ -3805,6 +3928,7 @@ mod tests {
                 block_hash: Some(proposal.block_hash.clone()),
                 signature:  vec![],
                 scheme:     Vote::default_scheme(),
+                epoch:      0,
             };
             let result = engine.receive_vote(vote).await.unwrap();
             assert!(result.is_none(), "no commit until COMMIT phase");
@@ -3821,6 +3945,7 @@ mod tests {
                 block_hash: Some(proposal.block_hash.clone()),
                 signature:  vec![],
                 scheme:     Vote::default_scheme(),
+                epoch:      0,
             };
             let result = engine.receive_vote(vote).await.unwrap();
             assert!(result.is_none());
@@ -3838,6 +3963,7 @@ mod tests {
                 block_hash: Some(proposal.block_hash.clone()),
                 signature:  vec![],
                 scheme:     Vote::default_scheme(),
+                epoch:      0,
             };
             cert = engine.receive_vote(vote).await.unwrap();
         }
@@ -3870,6 +3996,7 @@ mod tests {
             round:      0,
             block_hash: BlockHash("hs_h0_r0_00000000".into()),
             precommits: vec![],
+            epoch: 0,
         };
         engine.on_commit(cert, None).await.unwrap();
 
@@ -3897,7 +4024,9 @@ mod tests {
                 block_hash: Some(BlockHash("test".into())),
                 signature:  vec![],
                 scheme:     Vote::default_scheme(),
+                epoch:      0,
             }).collect(),
+            epoch: 0,
         };
         assert!(engine.verify_commit(&cert_valid, &validators).is_ok());
 
@@ -3914,7 +4043,9 @@ mod tests {
                 block_hash: Some(BlockHash("test".into())),
                 signature:  vec![],
                 scheme:     Vote::default_scheme(),
+                epoch:      0,
             }).collect(),
+            epoch: 0,
         };
         assert!(engine.verify_commit(&cert_invalid, &validators).is_err());
     }
@@ -3973,6 +4104,7 @@ mod tests {
                 block_hash: Some(proposal.block_hash.clone()),
                 signature:  vec![],
                 scheme:     Vote::default_scheme(),
+                epoch:      0,
             };
             engine.receive_vote(v).await.unwrap();
         }
@@ -3988,6 +4120,7 @@ mod tests {
                 block_hash: Some(proposal.block_hash.clone()),
                 signature:  vec![],
                 scheme:     Vote::default_scheme(),
+                epoch:      0,
             };
             engine.receive_vote(v).await.unwrap();
         }
@@ -4027,6 +4160,7 @@ mod tests {
                 block_hash: Some(proposal.block_hash.clone()),
                 signature:  vec![],
                 scheme:     Vote::default_scheme(),
+                epoch:      0,
             };
             cert = engine.receive_vote(v).await.unwrap();
         }
@@ -4137,6 +4271,7 @@ mod tests {
             block_hash: Some(proposal.block_hash.clone()),
             signature:  vec![1],
             scheme:     Vote::default_scheme(),
+                epoch:      0,
         };
         engine.receive_vote(vote_a).await.unwrap();
         assert!(engine.pending_equivocations.is_empty());
@@ -4150,6 +4285,7 @@ mod tests {
             block_hash: Some(BlockHash("other_block".into())),
             signature:  vec![2],
             scheme:     Vote::default_scheme(),
+                epoch:      0,
         };
         engine.receive_vote(vote_b).await.unwrap();
 
@@ -4178,16 +4314,17 @@ mod tests {
                 Vote { vote_type: VoteType::Precommit, height: 0, round: 0,
                        validator: ValidatorId("hs_val_1".into()),
                        block_hash: Some(BlockHash("block_0".into())), signature: vec![],
-                       scheme: Vote::default_scheme() },
+                       scheme: Vote::default_scheme() , epoch: 0 },
                 Vote { vote_type: VoteType::Precommit, height: 0, round: 0,
                        validator: ValidatorId("hs_val_1".into()), // duplicate!
                        block_hash: Some(BlockHash("block_0".into())), signature: vec![],
-                       scheme: Vote::default_scheme() },
+                       scheme: Vote::default_scheme() , epoch: 0 },
                 Vote { vote_type: VoteType::Precommit, height: 0, round: 0,
                        validator: ValidatorId("hs_val_2".into()),
                        block_hash: Some(BlockHash("block_0".into())), signature: vec![],
-                       scheme: Vote::default_scheme() },
+                       scheme: Vote::default_scheme() , epoch: 0 },
             ],
+            epoch: 0,
         };
         let result = engine.verify_commit(&dup_cert, &validators);
         assert!(result.is_err(), "verify_commit must reject duplicate validators");
@@ -4208,12 +4345,13 @@ mod tests {
                 Vote { vote_type: VoteType::Precommit, height: 0, round: 0,
                        validator: ValidatorId("hs_val_1".into()),
                        block_hash: Some(BlockHash("block_WRONG".into())), // mismatch
-                       signature: vec![], scheme: Vote::default_scheme() },
+                       signature: vec![], scheme: Vote::default_scheme() , epoch: 0 },
                 Vote { vote_type: VoteType::Precommit, height: 0, round: 0,
                        validator: ValidatorId("hs_val_2".into()),
                        block_hash: Some(BlockHash("block_correct".into())),
-                       signature: vec![], scheme: Vote::default_scheme() },
+                       signature: vec![], scheme: Vote::default_scheme() , epoch: 0 },
             ],
+            epoch: 0,
         };
         let result = engine.verify_commit(&bad_cert, &validators);
         assert!(result.is_err(), "verify_commit must reject votes for wrong block hash");
@@ -4618,7 +4756,9 @@ mod vca_quorum_floor {
                 block_hash: Some(block_hash.clone()),
                 signature:  vec![],
                 scheme:     Vote::default_scheme(),
+                epoch:      0,
             }).collect(),
+            epoch: 0,
         }
     }
 

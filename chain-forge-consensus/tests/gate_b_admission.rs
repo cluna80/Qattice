@@ -21,7 +21,7 @@ use chain_forge_consensus::pq_hotstuff::epoch_handoff::{
 };
 use chain_forge_consensus::pq_hotstuff::safety::{ConsensusSigner, CTX_VOTE, Fips204Signer};
 use chain_forge_consensus::{
-    BlockHash, BlockHeight, CommitCertificate, Round, VoteType, Vote, vote_signing_bytes,
+    BlockHash, BlockHeight, CommitCertificate, Round, VoteType, Vote, vote_signing_bytes_v2,
 };
 use chain_forge_vca_pq::{
     ContributionScore, IdentityHandle, PersonhoodFactor, StakeAmount,
@@ -87,9 +87,11 @@ fn sign_precommit(
     id: &str,
     height: BlockHeight,
     round: Round,
+    epoch: u64,
+    set_hash: &[u8; 32],
     bh: &BlockHash,
 ) -> Vote {
-    let msg = vote_signing_bytes(CHAIN, &VoteType::Precommit, height, round, Some(bh));
+    let msg = vote_signing_bytes_v2(CHAIN, &VoteType::Precommit, height, round, epoch, set_hash, Some(bh));
     let sig = signer.sign(CTX_VOTE, &msg).unwrap();
     Vote {
         vote_type: VoteType::Precommit,
@@ -99,6 +101,7 @@ fn sign_precommit(
         block_hash: Some(bh.clone()),
         signature: sig,
         scheme: "ml-dsa-65".into(),
+        epoch,
     }
 }
 
@@ -201,12 +204,13 @@ fn ad2_substituted_key() {
         }
     };
     let bh = BlockHash("epoch-change".into());
-    let precommit = sign_precommit(&mut s0, "v0", 10, 5, &bh);
+    let precommit = sign_precommit(&mut s0, "v0", 10, 5, 0, &real_hash, &bh);
     let cert = CommitCertificate {
         height: 10,
         round: 5,
         block_hash: bh,
         precommits: vec![precommit],
+        epoch: 0,
     };
 
     // Altered incoming: alice's key replaced with a different one.
@@ -215,7 +219,7 @@ fn ad2_substituted_key() {
     let altered_incoming = admit_pq_native(&altered_reg, HEIGHT).unwrap();
 
     // verify_handoff_proof: real_hash but altered_incoming → SetHashMismatch.
-    let err = verify_handoff_proof(CHAIN, &cert, &out, 6, &altered_incoming, real_hash)
+    let err = verify_handoff_proof(CHAIN, &cert, &out, 6, &altered_incoming, real_hash, 0)
         .unwrap_err();
     use chain_forge_consensus::pq_hotstuff::epoch_handoff::HandoffError;
     assert!(matches!(err, HandoffError::SetHashMismatch { .. }),
@@ -245,12 +249,6 @@ fn ad7_happy_path_end_to_end() {
             }).collect(),
         }
     };
-    let bh = BlockHash("epoch-change-happy".into());
-    let precommits: Vec<Vote> = signers.iter_mut().enumerate()
-        .map(|(i, (s, _))| sign_precommit(s, &format!("v{i}"), 10, 5, &bh))
-        .collect();
-    let cert = CommitCertificate { height: 10, round: 5, block_hash: bh, precommits };
-
     // Incoming set derived from registry via admit_pq_native.
     let mut reg = make_registry();
     add_validator(&mut reg, "new_alice", mldsa65_key(0x01), 1.0, 1.0);
@@ -259,6 +257,12 @@ fn ad7_happy_path_end_to_end() {
     let incoming = admit_pq_native(&reg, HEIGHT + 1).unwrap();
     let set_hash = canonical_set_hash(&incoming);
 
-    verify_handoff_proof(CHAIN, &cert, &out, 6, &incoming, set_hash).unwrap();
+    let bh = BlockHash("epoch-change-happy".into());
+    let precommits: Vec<Vote> = signers.iter_mut().enumerate()
+        .map(|(i, (s, _))| sign_precommit(s, &format!("v{i}"), 10, 5, 0, &set_hash, &bh))
+        .collect();
+    let cert = CommitCertificate { height: 10, round: 5, block_hash: bh, precommits, epoch: 0 };
+
+    verify_handoff_proof(CHAIN, &cert, &out, 6, &incoming, set_hash, 0).unwrap();
     println!("[AD-7] end-to-end happy path PASS");
 }

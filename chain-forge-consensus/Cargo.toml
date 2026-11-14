@@ -34,4 +34,5 @@ gate-b-harness = ["pq-hotstuff-fips204", "dep:crc32fast"]
 epoch-transition = ["pq-hotstuff-fips204"]
 
 [dev-dependencies]
-tokio = { workspace = true }
+tokio    = { workspace = true }
+proptest = { workspace = true }
