@@ -3469,29 +3469,35 @@ impl Node {
                                     let mut nil_vote = Vote { validator: my_id.clone(), ..nil_vote_template };
                                     #[cfg(feature = "pq-hotstuff")]
                                     let pq_signed = if self.consensus.variant() == ConsensusVariant::PqHotStuff {
-                                        let chain_id = self.genesis.chain_id.clone();
-                                        let epoch = nil_vote.epoch;
-                                        // high_qc_round is not directly exposed; use 0 as the floor
-                                        let high_qc_round = 0u64;
-                                        let view = chain_forge_consensus::QuorumCertificate::view(height, round);
-                                        match self.consensus.sign_local_timeout(&chain_id, epoch, view, high_qc_round) {
-                                            Ok(sig) if !sig.is_empty() => {
-                                                nil_vote.signature = sig;
-                                                nil_vote.scheme = "ml-dsa-65-fips204".to_string();
-                                                true
-                                            }
-                                            Ok(_) => true, // no context (test mode)
-                                            Err(ref e) if e.contains("FloorViolation") || e.contains("RoundBelowSigned") => {
-                                                // Safety floor already above this view (e.g. a vote at this view
-                                                // was signed before the pacemaker fired).  Broadcast unsigned timeout
-                                                // so the round still advances on other nodes.
-                                                warn!(error = %e, "PQ timeout safety floor — broadcasting unsigned timeout (observer mode)");
-                                                true
-                                            }
-                                            Err(e) => {
-                                                error!(error = %e, "PQ timeout signing failed");
-                                                self.latch_persistence_failure(&format!("PQ timeout sign failed: {e}"));
-                                                false
+                                        if !nil_vote.signature.is_empty() {
+                                            // The engine already signed durably via its internal signing
+                                            // context (using the global view number).  Use that signature;
+                                            // calling sign_local_timeout here would be a double-write that
+                                            // bumps hvr and causes FloorViolation on the next prevote.
+                                            nil_vote.scheme = "ml-dsa-65-fips204".to_string();
+                                            true
+                                        } else {
+                                            // Engine has no signing context (test mode / no FsCounter).
+                                            // Sign here as fallback, using the global view number.
+                                            let chain_id = self.genesis.chain_id.clone();
+                                            let epoch = nil_vote.epoch;
+                                            let view = chain_forge_consensus::QuorumCertificate::view(height, round);
+                                            match self.consensus.sign_local_timeout(&chain_id, epoch, view, 0) {
+                                                Ok(sig) if !sig.is_empty() => {
+                                                    nil_vote.signature = sig;
+                                                    nil_vote.scheme = "ml-dsa-65-fips204".to_string();
+                                                    true
+                                                }
+                                                Ok(_) => true,
+                                                Err(ref e) if e.contains("FloorViolation") || e.contains("RoundBelowSigned") => {
+                                                    warn!(error = %e, "PQ timeout safety floor — broadcasting unsigned timeout");
+                                                    true
+                                                }
+                                                Err(e) => {
+                                                    error!(error = %e, "PQ timeout signing failed");
+                                                    self.latch_persistence_failure(&format!("PQ timeout sign failed: {e}"));
+                                                    false
+                                                }
                                             }
                                         }
                                     } else { false };
@@ -4329,17 +4335,27 @@ impl Node {
                 let mut nil_vote = Vote { validator: my_id, ..nil_vote_template };
                 #[cfg(feature = "pq-hotstuff")]
                 let pq_signed = if self.consensus.variant() == ConsensusVariant::PqHotStuff {
-                    let chain_id = self.genesis.chain_id.clone();
-                    let epoch = nil_vote.epoch;
-                    let view = chain_forge_consensus::QuorumCertificate::view(height, their_round - 1);
-                    match self.consensus.sign_local_timeout(&chain_id, epoch, view, 0) {
-                        Ok(sig) if !sig.is_empty() => {
-                            nil_vote.signature = sig;
-                            nil_vote.scheme = "ml-dsa-65-fips204".to_string();
-                            true
+                    if !nil_vote.signature.is_empty() {
+                        // Engine already signed durably (global view).  Avoid double-write.
+                        nil_vote.scheme = "ml-dsa-65-fips204".to_string();
+                        true
+                    } else {
+                        let chain_id = self.genesis.chain_id.clone();
+                        let epoch = nil_vote.epoch;
+                        let view = chain_forge_consensus::QuorumCertificate::view(height, their_round - 1);
+                        match self.consensus.sign_local_timeout(&chain_id, epoch, view, 0) {
+                            Ok(sig) if !sig.is_empty() => {
+                                nil_vote.signature = sig;
+                                nil_vote.scheme = "ml-dsa-65-fips204".to_string();
+                                true
+                            }
+                            Ok(_) => true,
+                            Err(ref e) if e.contains("FloorViolation") || e.contains("RoundBelowSigned") => {
+                                warn!(error = %e, "PQ catch-up timeout safety floor — broadcasting unsigned");
+                                true
+                            }
+                            Err(e) => { error!(error = %e, "PQ catch-up timeout signing failed"); false }
                         }
-                        Ok(_) => true,
-                        Err(e) => { error!(error = %e, "PQ catch-up timeout signing failed"); false }
                     }
                 } else { false };
                 #[cfg(not(feature = "pq-hotstuff"))]

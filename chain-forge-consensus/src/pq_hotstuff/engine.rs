@@ -520,8 +520,14 @@ impl ConsensusEngine for PqHotStuffEngine {
         // Sign timeout via SafetyStore when available; fall back to empty
         // signature so the round still advances even if the store is not set up
         // (e.g. in devnet integration tests without a persistent FsCounter).
+        //
+        // Use the globally-monotonic view number (height*10_000+round) as the
+        // safety-store round so this internal signing is consistent with the
+        // external sign_local_timeout call in node.rs, which uses the same scheme
+        // to prevent floor pollution across heights.
+        let view = crate::QuorumCertificate::view(height, old_round);
         let signature = if let Some(ctx) = self.signing_ctx.as_mut() {
-            ctx.sign_timeout(&self.config.chain_id, self.epoch, old_round as u64, self.high_qc.round as u64)
+            ctx.sign_timeout(&self.config.chain_id, self.epoch, view, self.high_qc.round as u64)
                 .map(|s| s.signature)
                 .unwrap_or_default()
         } else {
