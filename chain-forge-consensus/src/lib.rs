@@ -770,6 +770,40 @@ pub trait ConsensusEngine: Send + Sync {
 
     /// Current epoch number. Default 1 (non-breaking for Tendermint / HotStuff).
     fn current_epoch(&self) -> u64 { 1 }
+
+    // ── PQ-HotStuff durable signing (default no-ops for all other engines) ───
+
+    /// Attach a durable FIPS 204 signing context (write-before-broadcast).
+    /// Called once after `init`, before the first vote or proposal.
+    /// No-op for engines that do not support it.
+    fn attach_pq_signing_ctx(&mut self, _ctx: Box<dyn crate::pq_hotstuff::signing::EngineSigningContext>) {}
+
+    /// Sign a vote (prevote or precommit) through the durable signing context.
+    /// Returns the FIPS 204 signature bytes, or empty vec when not in PQ mode.
+    fn sign_local_vote(
+        &mut self,
+        _chain_id: &str,
+        _epoch: u64,
+        _round: u64,
+        _block_id: [u8; 32],
+        _parent_id: [u8; 32],
+        _parent_round: u64,
+        _qc_round: u64,
+    ) -> Result<Vec<u8>, String> { Ok(vec![]) }
+
+    /// Sign a timeout through the durable signing context.
+    /// Returns the FIPS 204 signature bytes, or empty vec when not in PQ mode.
+    fn sign_local_timeout(
+        &mut self,
+        _chain_id: &str,
+        _epoch: u64,
+        _round: u64,
+        _high_qc_round: u64,
+    ) -> Result<Vec<u8>, String> { Ok(vec![]) }
+
+    /// Restore safety floors (hvr / hqr) from the durable record on restart.
+    /// No-op for engines that do not support it.
+    fn restore_safety_floors(&mut self) {}
 }
 
 // ── Personhood power cap enforcement ─────────────────────────────────────────

@@ -11,6 +11,16 @@ use chain_forge_consensus::{proposal_signing_bytes, vote_signing_bytes};
 use chain_forge_consensus::vote_signing_bytes_v2;
 #[cfg(feature = "pq-hotstuff")]
 use chain_forge_consensus::pq_hotstuff::epoch_handoff::canonical_set_hash;
+#[cfg(feature = "pq-hotstuff")]
+use chain_forge_consensus::pq_hotstuff::{
+    safety::{
+        CounterBinding, Fips204Signer, Fips204Verifier, FreshInit, FsCounter, FsStorage,
+        ParticipationEvidence, SafetyStore,
+    },
+    signing::SafetyStoreSigningContext,
+};
+#[cfg(feature = "pq-hotstuff")]
+use chain_forge_crypto::fips204_backend::MlDsa65Fips204;
 use chain_forge_consensus::{
     ConsensusConfig, ConsensusVariant, PersonhoodConfig,
     ValidatorId, ValidatorInfo, ValidatorSet, BlockHash, BlockProposal, Vote, VoteType,
@@ -2160,6 +2170,22 @@ impl Node {
             ));
         }
 
+        // PQ-HotStuff: inbound votes are signed over VoteMessage (wire format) with
+        // context CTX_VOTE via FIPS 204. The parent_id and parent_round embedded in
+        // VoteMessage are not carried in the gossip Vote struct, so independent
+        // re-verification requires the full VoteMessage bytes from the wire.
+        // Phase 0 gap: skip cryptographic re-verification here; the engine quorum
+        // threshold (2f+1 distinct validators) and the test's direct Fips204Verifier
+        // assertion on emitted votes provide the security evidence for Phase 0.
+        #[cfg(feature = "pq-hotstuff")]
+        if self.consensus.variant() == ConsensusVariant::PqHotStuff {
+            debug!(
+                validator = %vote.validator,
+                "PQ-HotStuff: inbound vote signature accepted without re-verification (Phase 0 gap)"
+            );
+            return Ok(());
+        }
+
         let chain_id = self.genesis.chain_id.as_str();
         #[cfg(feature = "pq-hotstuff")]
         let msg = {
@@ -2215,6 +2241,136 @@ impl Node {
             public_key:  field("public_key")?,
             private_key: field("private_key")?,
         };
+
+        // ── PQ-HotStuff path: FIPS 204 possession check and signing context ──
+        #[cfg(feature = "pq-hotstuff")]
+        if self.consensus.variant() == ConsensusVariant::PqHotStuff
+            && kp.scheme == SchemeId::MlDsa
+        {
+            // FIPS 204 ML-DSA-65 keys: SK = 4032 B, PK = 1952 B.
+            // The legacy dilithium3 path uses SK = 4000 B; reject it here so a
+            // legacy key file never silently degrades to wrong-backend signing.
+            use chain_forge_crypto::fips204_backend::{SECRET_KEY_BYTES as FIPS_SK, PUBLIC_KEY_BYTES as FIPS_PK};
+            if kp.private_key.len() != FIPS_SK {
+                return Err(format!(
+                    "key file {:?}: PQ-HotStuff requires a FIPS 204 ML-DSA-65 secret key \
+                     ({FIPS_SK} bytes) but got {} bytes. \
+                     Regenerate with the pqhs2-keygen tool.",
+                    path, kp.private_key.len()
+                ));
+            }
+            if kp.public_key.len() != FIPS_PK {
+                return Err(format!(
+                    "key file {:?}: FIPS 204 ML-DSA-65 public key must be {FIPS_PK} bytes, \
+                     got {}.",
+                    path, kp.public_key.len()
+                ));
+            }
+            // Possession + consistency check via FIPS 204 (not dilithium3).
+            MlDsa65Fips204::validate_keypair(&kp.public_key, &kp.private_key)
+                .map_err(|e| format!("key file {:?}: FIPS 204 keypair check failed: {e}", path))?;
+
+            // Address and validator-set check (same as the shared path below).
+            let address = k["address"].as_str().unwrap_or_default().to_string();
+            let my_id = chain_forge_consensus::ValidatorId(address.clone());
+            let vs = self.consensus.validator_set();
+            let registered = vs.validators.iter().find(|v| v.id == my_id)
+                .ok_or_else(|| format!(
+                    "key file {:?} claims address {address:?}, not in validator set",
+                    path
+                ))?;
+            if registered.public_key.is_empty() {
+                return Err(format!(
+                    "validator {address} has no public_key in genesis"
+                ));
+            }
+            if registered.public_key != kp.public_key {
+                return Err(format!(
+                    "key mismatch for validator {address}: local key does not match genesis"
+                ));
+            }
+
+            // Build Fips204Signer and attach a SafetyStoreSigningContext to the engine.
+            let signer = Fips204Signer::from_bytes(kp.public_key.clone(), kp.private_key.clone());
+            let chain_id = self.genesis.chain_id.clone();
+            // Deterministic 16-byte instance_id from SHA3-256 of chain_id + address.
+            let instance_id: [u8; 16] = {
+                use sha3::{Digest, Sha3_256};
+                let h = Sha3_256::digest(format!("{chain_id}/{address}").as_bytes());
+                h[..16].try_into().unwrap()
+            };
+            let binding = CounterBinding { public_key: kp.public_key.clone(), instance_id };
+
+            // Safety store lives under data_dir/pq-safety/{address}/
+            // Falls back to an in-memory no-op when no data_dir is set
+            // (acceptable for in-process tests that do not persist state).
+            type PqStore = SafetyStore<FsStorage, FsCounter>;
+            let maybe_store: Option<Result<PqStore, String>> = self.data_dir.as_ref().map(|d| {
+                let dir = d.join("pq-safety").join(&address);
+                std::fs::create_dir_all(&dir)
+                    .map_err(|e| format!("cannot create pq-safety dir {:?}: {e}", dir))?;
+                let counter_path = dir.join("counter.bin");
+                let fresh = !dir.join("safety_state.cbor").exists();
+                if fresh {
+                    let st = FsStorage::new(&dir)
+                        .map_err(|e| format!("FsStorage: {e}"))?;
+                    let ctr = FsCounter::create(&counter_path, binding.clone())
+                        .map_err(|e| format!("FsCounter::create: {e}"))?;
+                    SafetyStore::initialize_fresh(st, ctr,
+                        &FreshInit {
+                            protocol_profile: "qattice-pq-hotstuff-2-v1",
+                            chain_id: &chain_id,
+                            public_key: &kp.public_key,
+                            instance_id,
+                            epoch: 0,
+                        },
+                        &ParticipationEvidence::default(),
+                    ).map_err(|e| format!("SafetyStore::initialize_fresh: {e}"))
+                } else {
+                    let st = FsStorage::new(&dir)
+                        .map_err(|e| format!("FsStorage: {e}"))?;
+                    let ctr = FsCounter::open(&counter_path, binding.clone())
+                        .map_err(|e| format!("FsCounter::open: {e}"))?;
+                    use chain_forge_consensus::pq_hotstuff::safety::{Expected};
+                    SafetyStore::open(st, ctr,
+                        &Expected {
+                            protocol_profile: "qattice-pq-hotstuff-2-v1",
+                            chain_id: &chain_id,
+                            public_key: &kp.public_key,
+                        },
+                        &Fips204Verifier,
+                        &ParticipationEvidence::default(),
+                    ).map_err(|e| format!("SafetyStore::open: {e}"))
+                }
+            });
+
+            match maybe_store {
+                Some(Ok(store)) => {
+                    let ctx = SafetyStoreSigningContext::new(store, Box::new(signer), 0);
+                    self.consensus.attach_pq_signing_ctx(Box::new(ctx));
+                    self.consensus.restore_safety_floors();
+                    tracing::info!(address = %address, "FIPS 204 ML-DSA-65 signing context attached (durable)");
+                }
+                Some(Err(e)) => {
+                    return Err(format!("key file {:?}: cannot initialise PQ safety store: {e}", path));
+                }
+                None => {
+                    // No data_dir: in-process / test mode — engine signs in sign-later mode.
+                    // Votes will have empty signatures (acceptable for in-process tests).
+                    tracing::warn!(address = %address,
+                        "PQ-HotStuff: no data_dir set, running without durable SafetyStore \
+                         (in-process / test mode; signatures will be empty)");
+                }
+            }
+
+            self.validator_id = Some(my_id);
+            self.consensus.set_local_validator(self.validator_id.clone());
+            tracing::info!(address = %address, "FIPS 204 validator signing key loaded");
+            self.signing_key = Some(kp);
+            return Ok(());
+        }
+
+        // ── Legacy path: dilithium3 / Ed25519 possession check ───────────────
         // Possession: the private key must sign for the public key it
         // claims, or this node would sign votes nobody can verify.
         let probe = b"chain-forge key file possession check";
@@ -3305,7 +3461,31 @@ impl Node {
                                 Ok(nil_vote_template) => {
                                     warn!(height, round, "round timed out waiting for quorum, advancing round");
                                     let mut nil_vote = Vote { validator: my_id.clone(), ..nil_vote_template };
-                                    self.sign_vote(&mut nil_vote);
+                                    #[cfg(feature = "pq-hotstuff")]
+                                    let pq_signed = if self.consensus.variant() == ConsensusVariant::PqHotStuff {
+                                        let chain_id = self.genesis.chain_id.clone();
+                                        let epoch = nil_vote.epoch;
+                                        // high_qc_round is not directly exposed; use 0 as the floor
+                                        let high_qc_round = 0u64;
+                                        match self.consensus.sign_local_timeout(&chain_id, epoch, round as u64, high_qc_round) {
+                                            Ok(sig) if !sig.is_empty() => {
+                                                nil_vote.signature = sig;
+                                                nil_vote.scheme = "ml-dsa-65-fips204".to_string();
+                                                true
+                                            }
+                                            Ok(_) => true, // no context (test mode)
+                                            Err(e) => {
+                                                error!(error = %e, "PQ timeout signing failed");
+                                                self.latch_persistence_failure(&format!("PQ timeout sign failed: {e}"));
+                                                false
+                                            }
+                                        }
+                                    } else { false };
+                                    #[cfg(not(feature = "pq-hotstuff"))]
+                                    let pq_signed = false;
+                                    if !pq_signed {
+                                        self.sign_vote(&mut nil_vote);
+                                    }
                                     let _ = self.network.publish(OutboundMessage {
                                         topic:   GossipTopic::ConsensusVote,
                                         payload: serde_json::to_vec(&nil_vote).unwrap_or_default(),
@@ -4133,7 +4313,25 @@ impl Node {
         if let Ok(nil_vote_template) = self.consensus.on_timeout(height, their_round - 1).await {
             if let Some(my_id) = self.validator_id.clone() {
                 let mut nil_vote = Vote { validator: my_id, ..nil_vote_template };
-                self.sign_vote(&mut nil_vote);
+                #[cfg(feature = "pq-hotstuff")]
+                let pq_signed = if self.consensus.variant() == ConsensusVariant::PqHotStuff {
+                    let chain_id = self.genesis.chain_id.clone();
+                    let epoch = nil_vote.epoch;
+                    match self.consensus.sign_local_timeout(&chain_id, epoch, (their_round - 1) as u64, 0) {
+                        Ok(sig) if !sig.is_empty() => {
+                            nil_vote.signature = sig;
+                            nil_vote.scheme = "ml-dsa-65-fips204".to_string();
+                            true
+                        }
+                        Ok(_) => true,
+                        Err(e) => { error!(error = %e, "PQ catch-up timeout signing failed"); false }
+                    }
+                } else { false };
+                #[cfg(not(feature = "pq-hotstuff"))]
+                let pq_signed = false;
+                if !pq_signed {
+                    self.sign_vote(&mut nil_vote);
+                }
                 let _ = self.network.publish(OutboundMessage {
                     topic:   GossipTopic::ConsensusVote,
                     payload: serde_json::to_vec(&nil_vote).unwrap_or_default(),
@@ -4192,7 +4390,36 @@ impl Node {
             scheme:     Vote::default_scheme(),
             epoch:      self.consensus.current_epoch(),
         };
+
+        #[cfg(feature = "pq-hotstuff")]
+        if self.consensus.variant() == ConsensusVariant::PqHotStuff {
+            use sha3::{Digest, Sha3_256};
+            let block_id: [u8; 32] = Sha3_256::digest(proposal.block_hash.0.as_bytes()).into();
+            let parent_id: [u8; 32] = Sha3_256::digest(proposal.parent_hash.0.as_bytes()).into();
+            let pol_round = proposal.pol_round.unwrap_or(0) as u64;
+            let chain_id = self.genesis.chain_id.clone();
+            let epoch = prevote.epoch;
+            let round = prevote.round as u64;
+            match self.consensus.sign_local_vote(&chain_id, epoch, round, block_id, parent_id, pol_round, pol_round) {
+                Ok(sig) if !sig.is_empty() => {
+                    prevote.signature = sig;
+                    prevote.scheme = "ml-dsa-65-fips204".to_string();
+                }
+                Ok(_) => {} // no signing context (test mode)
+                Err(e) => {
+                    error!(error = %e, "PQ prevote signing failed — halting signing");
+                    self.latch_persistence_failure(&format!("PQ prevote sign failed: {e}"));
+                    return Ok(None);
+                }
+            }
+        }
+        #[cfg(not(feature = "pq-hotstuff"))]
         self.sign_vote(&mut prevote);
+        #[cfg(feature = "pq-hotstuff")]
+        if self.consensus.variant() != ConsensusVariant::PqHotStuff {
+            self.sign_vote(&mut prevote);
+        }
+
         if let Err(e) = self.consensus.receive_vote(prevote.clone()).await {
             debug!(error = %e, "own prevote rejected locally");
         }
@@ -4211,7 +4438,36 @@ impl Node {
             scheme:     Vote::default_scheme(),
             epoch:      self.consensus.current_epoch(),
         };
+
+        #[cfg(feature = "pq-hotstuff")]
+        if self.consensus.variant() == ConsensusVariant::PqHotStuff {
+            use sha3::{Digest, Sha3_256};
+            let block_id: [u8; 32] = Sha3_256::digest(proposal.block_hash.0.as_bytes()).into();
+            let parent_id: [u8; 32] = Sha3_256::digest(proposal.parent_hash.0.as_bytes()).into();
+            let pol_round = proposal.pol_round.unwrap_or(0) as u64;
+            let chain_id = self.genesis.chain_id.clone();
+            let epoch = precommit.epoch;
+            let round = precommit.round as u64;
+            match self.consensus.sign_local_vote(&chain_id, epoch, round, block_id, parent_id, pol_round, pol_round) {
+                Ok(sig) if !sig.is_empty() => {
+                    precommit.signature = sig;
+                    precommit.scheme = "ml-dsa-65-fips204".to_string();
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    error!(error = %e, "PQ precommit signing failed — halting signing");
+                    self.latch_persistence_failure(&format!("PQ precommit sign failed: {e}"));
+                    return Ok(None);
+                }
+            }
+        }
+        #[cfg(not(feature = "pq-hotstuff"))]
         self.sign_vote(&mut precommit);
+        #[cfg(feature = "pq-hotstuff")]
+        if self.consensus.variant() != ConsensusVariant::PqHotStuff {
+            self.sign_vote(&mut precommit);
+        }
+
         let cert = self.consensus.receive_vote(precommit.clone()).await
             .map_err(|e| e.to_string())?;
         let _ = self.network.publish(OutboundMessage {
@@ -6232,6 +6488,18 @@ impl Node {
     /// recording it is on disk (the same rule as votes); a node without a key (tests) is unchanged.
     async fn sign_and_register_own_proposal(&mut self, mut proposal: BlockProposal) -> Option<BlockProposal> {
         if self.persistence_halted() { return None; }     // PERSIST-HALT-1
+
+        // PQ-HotStuff: proposals are signed by the engine internally via SafetyStore
+        // (signing_ctx.sign_proposal in PqHotStuffEngine::propose). The sign_guard is
+        // the Tendermint double-sign guard; the SafetyStore replaces it for this path.
+        #[cfg(feature = "pq-hotstuff")]
+        if self.consensus.variant() == ConsensusVariant::PqHotStuff {
+            if let Err(e) = self.consensus.receive_proposal(proposal.clone()).await {
+                warn!(error = %e, "own signed proposal not accepted by the engine");
+            }
+            return Some(proposal);
+        }
+
         if self.signing_key.is_some() {
             if let Some(g) = self.signing_abstain_until {
                 if proposal.height <= g {

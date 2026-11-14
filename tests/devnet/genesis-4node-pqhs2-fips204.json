@@ -1,0 +1,189 @@
+{
+  "chain_id": "qcb-devnet-4node-pqhs2-fips204",
+  "chain_name": "Qattice PQ-HotStuff-2 FIPS 204 Devnet",
+  "engine_version": "0.1.0",
+  "genesis_time": "2026-09-29T00:00:00Z",
+  "environment": {
+    "mode": "devnet",
+    "faucet_enabled": true,
+    "relaxed_limits": true
+  },
+  "native_token": {
+    "name": "QuarkCharm",
+    "symbol": "QCB",
+    "denom": "uqcb",
+    "max_supply": "210000000"
+  },
+  "address_prefix": "qcb",
+  "consensus": {
+    "type": "proof-of-stake",
+    "validator_set_size": 4,
+    "block_time_ms": 2000,
+    "personhood_weighted": true,
+    "bft_variant": "pq-hotstuff"
+  },
+  "execution": {
+    "state_model": "account",
+    "parallel_execution": false,
+    "gas_model": "dynamic",
+    "require_signatures": false,
+    "allow_zero_recovery_timelock": true
+  },
+  "cryptography": {
+    "signature_scheme": "pqc-native",
+    "pqc_algorithm": "ml-dsa",
+    "migration_trigger": "nist-guidance",
+    "hash_width": 256,
+    "validator_scheme": "ml-dsa-65"
+  },
+  "network": {
+    "network_id": "qcb-devnet-4node-mldsa",
+    "p2p_port": 27000,
+    "rpc_port": 27001,
+    "bootstrap_nodes": [],
+    "peer_discovery": "bootstrap",
+    "max_peers": 10
+  },
+  "limits": {
+    "max_block_bytes": 1048576,
+    "max_tx_bytes": 262144,
+    "block_gas_limit": 10000000,
+    "mempool_size": 100,
+    "mempool_ttl_seconds": 60
+  },
+  "modules": [
+    "bank",
+    "staking",
+    "identity",
+    "agents",
+    "pocd"
+  ],
+  "custom_modules": [],
+  "genesis_accounts": [
+    {
+      "label": "Alice",
+      "address": "qcb1alice",
+      "balance": "500000000",
+      "role": "validator",
+      "public_key": "4a0fe4fc1ecbe92aec36b616c56de643fa1865fcd8fd49bcb81d56502b333437a9354cfd009db3839210f4b98c1af0c3419fd37fa2ef867641a0994893fdb587a880e8899b20528803f33cf6d37d2217819e7ac2be1f49ed7a12a22b8de15a922cf8ac4e6c13e203ae7f93f9740c05ee1fb160610502a7ffbc9587835e3d0bb1b25a6e9ec9d0a11af8cca4877086325d546263b9b89241a688b79e946618fb21de9b2c9f4588ba5750a5386018993e0d9c8c9524c894468a85823fbe2ed2bafd60c03cf56af08dcf5dfc96281f2ff9d49737215caacc051545d46788ce4f645529dd1117de6d4b63f83fdffc08d3c96c0cd0f5ea0b1a9d7c71234747fa61ee49d77dc94e354b1884478fba29fa04cb277d73962dada84edfb5d3757edbb8951eae6c2a2d03fba9379acb2f36593c45cf7a91e5d86bc312057bb3e966e99da54de3d9981210b7501ce7f14a1bd66e405a826b0ad3a89f784a7d63a0204b5d22476357de679143f8461bdba7ac2a3075fdfc75cb2d6fd44383f4a261b4d718defb49db24ff5167a24cd1253ac51d22570a6012118ab2e3fb2fc4ffaaf914902ff51b88fe86cf8941c964059bc54fe9893219b2b936096d961ca575df2c894d4cfc107eea27a6364ebce62f75f930665895966d060fb62183816a77b1c4cd179f194c6858dee800b35a276bafd01b3e5a458afadc4048ed3529311eaa6070eeb3b8ca058435b5c163086a1c4f95174ed8167c97846dc391473a04cb24769cc2435fd43385e758047a7f0d607c461a8ce5126dba1290aa7727bfbda42d98e4725c9c3a25c1f584cf9f9b7cc28d864bdfc3478965437cbf625c14617cfe3ac41a9a4581d741f0f6018cb4be2c04845c33ff09a47d0b7067dd05e31ded92dc4c987599cef102085f39f18a19e037dd3351f508140613586b2480f2d5746019ad925b46436976f0b4258e2e70c939b135c9aac339d8d31b631951b8ec1f6e60ca138d6739288b0866bf9c5f3ef0203ed1e4abd57a84bc7fc49ff270ed5624c369074bac0c87d390d1af1053716ca870ce3d7a9288a8c691aad3586759f4d4836001b88c47a56144243f02895374615aed1fbe9b63a2bd5a9e02e07339889bd3893215d321f6ccb3796827a9ffb186ec732d6b1d4f3da52227c5dc8b0e17eda3d1ac6ea55940fb5b4cff8e4d5bfab576dadbdf75d71d62098654f00a7298dcf525c233589910558ed340f80563c03d06dc17330a48fb3f41a4d9166d46a642f8f84ed3da96bb269bd1348855fea2c0f39447218e96d7bc474cdaf20ea807559f71566b1522312088f5fb903c664d95e234f73e2dafc2c6e0dad47fbf99b22d0361da7aed99f60833eac406a67ecd393354b36c8532a2cb29180d6c5605e5699b39809d430c74efec31a27fe3f1d05b159fb8fd8633c624b3449a3cdb6a41968f2b55e88f4865844dda05c9146defb686241aca402ebc129b16bcdaff55604fe1d7dd8f5f68acc98679643b6fdb54ebab08c1e8febff7a283494941f0ef4a06721098cad997b0ebf5d06807900f589c6669d767e09506520fdc343905c1d4ff590b286cd5ebc9a6987d9c44140ffffa129a5252844d1456f51fe53c6e4222602978f725e287b6aa9a0f6632de9146a47d8862f90e774e8ea68b2287a1956ad58c556cfa4ae4dcf56fb123c756273b3a7e95a887c031344e0e420a830b48f9481ca1c5444bb4b7cdd3b4a856fda7d6d5dc74c7104468f7422f48181f854d1747d72b712b38de533352e9674eb38db3aadee3b2817f8697e16358ae08c000a9f46f937a5161a9a79b41332ddd837d08d93e23a88d194fe65151471671fb0d8fa026373c89c513042164a63d1ed246f6b0c3a2c630053cadd34124c17b8baa0ece4be1903cb64cb6040977ee89936429c3991990ba96cb55a76d55bcb743962216d18d6d971db4e1029107861af389359c06476e9b87ce85bfe263c81af0f7c19d32053a48e861439a4911960712ea8328f124e34b99d8f9816c212a5dea448f61a08c861d7e0797d08711b0d7f3759b78dde0ddd3d3406ad984e11b18700d28f4456207740c2970fb4395cdb12b97c24d6f572ea7e3a9abc34345bcccd027939fe8b10522859ac53f00deb5c539b0c66af431bccf2d9065d8c6a41c2ed4b2b317c59e4846477c318565d1a52118a497b6e4d51e0cb6db53e9e1072ee27248bf48ea6d0598d166831416874056786ed163f2c39cd8dba74e8361a092fbd0ecf10e8a9170d35406b2909238b12ed538e14bee1bf393010662465246e80909ea67c8244742d7a4d6a48daa28336091e5187c5bcdf44ea22ff2ae02be0604150ea058d116584be74f2e95cce4fc6b6691a7995bc022c06e1e2d2061a95fd4ba5074e5316b3d1b430ab75bebf4c60bfeaa12171dca8b0bf453db467ca92bca507e5aefd5efb9b524d77bf6e9316e8f25259441af43bd3ec212f05b24c3c864debcf494511fee1fbec48a10b305f7bcbebef7bd905e6b611df538c596f781cb39aa1374ee9713a8288a44b4daed8896d283004389efa1bcda8766ecae0f9ce13fe47bf7297eea194d84e77c9e9f7f1a321fdf2d801207e7f6042d03fac975c9f0e0332d404fda6f5f5023c2fec883814b26a4b9d91a6dd9e5f4c331db72b59cc481e5f362913cf6322cdf48b9a2e7438b2f5bcae8179f30e25e0f5a22be9e76cbc33d43800cf2bd804ea9df3b992f753af9df9dc4a6caa8a0672d3a34e02cba64fe6c7ba7de28c5b0",
+      "_comment": "500 QCB = 500_000_000 uqcb; 10x the max equivocation slash (5% of 500 QCB = 25 QCB). Raised from 5 QCB to fix KNOWN_ISSUES \u00a71. public_key = FIPS 204 ML-DSA-65 validator public key (1952 bytes) \u2014 generated from deterministic seed.",
+      "signature_scheme": "pqc-native"
+    },
+    {
+      "label": "Bob",
+      "address": "qcb1bob",
+      "balance": "500000000",
+      "role": "validator",
+      "public_key": "200902e42e64c934b582721ebffb8c787b83d20ac61e5956adf181a6f1469b66a476a0e8cdee71fc39577613d4fbbe0c5bc89c05e1fe722eea1d585f8b2eca6935700598502b1c80397cfc6203f7b7012c6bf44af0cb8d00dff851379579141abd82d0483f4357b5718cb8763abdc236fb3d92d657d04be75706869855f1bf903e1e322dcfd8885877aa55e11e33528b5c85fb61ec463c5483c21c61dcf0ea4aa7f25dcf0408f4bde60adc2b0da69efa1580778e268b0fdaa5d63d17bc1e7f71d2cdef845f4ad02ef4c002a0bd9eb73cc093277f126b320aff5a838f34f9c4b0e4ac89c8f8db7b9a12a3b19f61b2474a1bee41277c19345c0a3d894606cb6c0bc702f93e43bebfe19a14dc17c5458a22c5bb460929a93d8c0e3d53b137950be5e012d49cd779156ad93d6c71284ab78d02ef50de7505b66a1a80f015d73b3a1f54ef567362055802710f19fa3c73f4aeefd2c898f1b9809869e281257e562b630cd067de5fe504d3f8df8af1b7f97aace7a8f259a3ff7a2a7287c5d1636533e40f0d44e5bb12b0fbc5ef6fc80956f52168008598e4e1abfbde293991f8773ac73f8e9e594471b0b9cd33e8d7996196e07ef60f9e03ac25747c2bfe3b63c8df6d834c78ece0c05967baefc9273845856abf8a5eb9e70c09d76dc909c4039c0da343f7cea14bf75bbdfe654fb983608b9bbf74e827af16b2d77ee278c7164816b2074b742f736ab3f10f96817159771192fc66fc61309349555967db8a7eb818ec1f2eabe0268a5f230caa57f65ddae585dd63ab05c4160e84bb3dabbf8316c605a3a8a2ed7d5efe8a5da2e1cd4b3d8925cdb06ac26e0255c70ac26353db1ed0dde80d882ccca03b98050ff296c131af79e67ccf3775d457dbd34cc927d0a9c1607819d85de20284a355e9db68846c23653dbdfda37cfa19425489ab427c74e3aef531a583db56f6840705bb66df6969316fc0f338ec354a4a197a236025225c3c7e413a105b47b243c7501a53d9d860dcde703276048da41994050c5b17c7c185a0393d91132002aa08178d0585aaf3ad78156d5fb0b7a3951e8f4862ccc843d508d86ab484b1f2844092b0cf9266c0b3ecad4014dc921073814fb38b5f7124f48586181b80d7ec1cce954e3a59a7320870627c8fdf6c7ef53ef837ee495496ac7160f43db5d2098bf73dc880d2e13388f8947b8accb2c486d2169c063f8e84dc89d4141d693a3725bc51bd47d4c153c39d0916357c591ff8d2f44a62e2a93553b141501fddc8272d4156f7f16649e53a90d481000b2d31590c824b12aab07041477cb49b06c3f85b1024be24a7cedfd35e865efc6db8b2a783fe3028369fb792f36445aa3b1cfaff2667d0ca74dca3ffc2eae69ed8fd493db6f6b92f10ff14c899d88556b043f185268fb07baeb902e22054af833e121b6c25567a95e5b35154eef0a7e71a80199c2daa9f986524d76d0a756d5adef177bb60842814f59355ecdfcaf75b74c6b0577fcfdf9b7346950a89f2cdf267a66407f3cc82b4306b8e945e4a40179ef331c13fbb7d762078293c7fc23d41cf17a5333f5230f33e459e3f02b6446e0da4c3cb7b93535893a7ca347b5d826f22ce37c969ae8eaa8f240f497c9523211dea1cbb8ccb8fb27b113997b7364b8573faeec815904f39fa22161ccbcbdc511a733d758bd2fbe2c9c03bea05f5729a2b40e2c86f1e151b80c4db4311a5c6e874835d78d8869d32b498da19db25429213c589ba179ebd7ccbfd4e4afc3b467a0df1e819029cf8d456cd7f608f7bc99ea305f7a3b86a174dcf20c33fbc15a8e1927b275d39a2758b57f73e09438b3e750cee577ab598d6a0f9f3181190ab6a3598f25711182834400ff521027beadd6011a6e71169f3a9fd26769c55c0422590a0e07e4c6f689ce9ccb9403e95c966544e4683175388f87c83cddbd3e27892c952b1f85e9a5f08bb6ba0830ddde9f2aa3526bb1218a96f04bfc773b15c3a25f4741cf3e9e57d88f2139ad37d0baecf0da086f7f7f39ab48906862e46b446db0776de02dc7ee953f9d784c7bc6b0d6c41c549c39b0fdc9eb3386c60c2d8c5f5b8dc773e35b514f9fe3e7916ee9057ec6f78d52604aed7f8b3befc2d7f302dbd7cf0ed4c604a4c592ae782bee76903aa24e7c6cfd717cd83fe104914084d1d32ff0cc5a3912dc4549489e6df02ebbb068a561b8eee7d74c9749f71821afdd1bb9fbd2e58320a76b73f4686bfa8a027604a126003a723c7e7aba3808d3140cf73e8cd4fc04cae24f1982b11a58d182d1bc04e8681fdcb096e21c8d8b91c122659ddf8d95ae9312dbca69b27fe6f5429aed4cc8713ea8e31e9e89b61fd366ca2feca24c45827612b6fda57f874f199e07635d6bf48c78d919f29cc4909de768481f4f263a5422bb53019e515c3b7482ee34c9cc3c4b4a230a47562ec5cb4e2f5de9ae95252ff0f5473934ddad77547697e7733d8ba5e34687ff16a647c94ca9dd98e16dcd26668f788c1afa182a3bfe56efbed3221b13217ed289a087d9619911799c46f10c20b73d8fc3b688271ef27a07276b073302aabb89f742c6d051eda80b4953574e0f39b50ea33b159f07429955c641c51672f977ffe7f02ca07ead310cf82193d8e6136d97aafe200f97624a8bef45fd71214ef0d3d46602ffcdd1ea675fe9c00fab4e35fe01ce540e2b1e7d3eefe17d794c739294acad1dea7adee1ce149ce01a2b64df2066c24322c3214244396af3f6826a261420848ecc4",
+      "_comment": "public_key = FIPS 204 ML-DSA-65 validator public key (1952 bytes) \u2014 generated from deterministic seed",
+      "signature_scheme": "pqc-native"
+    },
+    {
+      "label": "Carol",
+      "address": "qcb1carol",
+      "balance": "500000000",
+      "role": "validator",
+      "public_key": "94104567b54511dc53a1a5711459452d90ec58050367b4e4bb6f50b562ee1fd62f2825b5b1a4eb3b54ed182f67272a0c3993dea227b65be6ce7d42a92d93a7d737b8f083fe77225157c2236de010c49d2e5a2bfccdbee846bd30f46ca7cb8bd8a5a4253b9119e3a2a83bef98c26e51061dfc725daf61d77cfb03e43536c9f55af2d304148fbc38f5d3f948a8fd7f8d0adc80ddeed8f88019205aeda94db9d2110822053c72c63cd463091f1c49dc6d52b86c1d957db9aad5673f4ee6e2fb6c711c4785110fb37a2768a5e0811d2eea0ee7bc6828042b2314433d3be6df4d2d804785db773a9707a1dfe4b258d339df84dda6bdc789e5efc71c560c0c330466ccc333f0935d88fd247e6df8257f0f3ab1500fe5499aab9a554a1795503ee70bf1e6de131d399be909a891ea7b0e8deb77feef0deebda80664c6323e88d5a1e1707af0ed45a5b34b6eca5d08782c438c679d0f7b3afb9235cf492a37dfbf3f4a9462947b379dbb86a7abe9fde9261b635281d4f70440d1a750d2a387a7e228e6d422f2303dab2896c41f1a7fa813a28db371d1d11fa970b47e201ecf339cdbc52097a47d1c729db4ce8b4966fc0b958432e5f5cc134120ab69a24fd758a8a27b7f78a206c37582941da099159c3fff3104d211e3384b49d03d56cb5d03cbe9a1819c5adb90a2f090360ceadd8e4dfb70e9b0b1199d050d3c7c5f7350e0cc1ed8c5eeec22c0c4df5cf2a61853338563aa9f4aa44917826a63e910e3a79d2c6cf7c5ec33e2b93b4b84ee5b47a329724013ec5bef142375c87076f632dfaa8faf5f46ad2ab1b3513babe2db8deaa6a286256af6f4197aef6c7009e30e6601bce987e6a77d4521e0deb3dabd984edde6bb9be32f08c5021a8543d68577073f615ed8ac83f5223ef90f16bfb459ab8c41b496058fed7f477585de5f50b8654748d4285f03225b62dff0c4cfa564742cbc42865e571598809c536e511dc29bae8fe739bb62bc9820d95680e2040c190c28fa4e3b9dabbf6049db69717984c425f89a0853bc00cfec7b02141d4cde03376e9ef5df8f47f561cc64195bc7a84b5ac0d9ef2fb868e395a8c10fd4c18271b6e886e072e4482f0e0174d127410f119ea6190efc3c888e3ec13aac8232e04e4ca271ed7a3e7de46cc1785525812b2eec9218590114bd3adf6a72d3dc50ae88194a657b7a91e73319802ee5e369f331b885ad4f3936567bd1d579d94949bc5f04274d50ea138e7ae0e898970e8feb4691b0c7e4e8c6928ec170564fdb8817f5f706ce7e09ef09ce20e496f15c16fe3eb4c4ecea99dc8e2f92fe35f18f11db102df8b7cb540e91ac446d0789684fef4b83bc84a36568cbd8737b669abe5b3039cc343573ad2f39d2f8e08b8f46715210bcf17e212cbebf7273dc1e674a734837d71f0cced09eb697adc9c778189fb9be3140d27c06a437701e018f9dd422adbc4db517e45dc87640ce2e07beda59c1d16a6389e0387406b5736a2bf906e83ef69c7e6eb2dffba1f5cf6883c257633626494f25b934ecd8cbed88e9623f5ee13071ddf96b78a67a3f14a607a3c5c2ca5b2041f7325d0e7ae29c31caf5acc11fba065d9456fad046d9afb91e90d9d25b61643ef8a8a70905ba306b4f3de4e5124be0d29e2bf7c7f319996aa3a69ddaf8b8a0fd7c446dbd09067bbe98fe5e474c03aa243b167ba908a19d2b35d7b9e0f29eb332f664585045ef501a59fe0e494f136a6f34152d1e1943f3e905f2a0bd24e2a557357390412c0e68b13dcc103a51a921309c0cc739438b1b8bbabc3726b011593692bec5face6e4d798e5564f85ef56aafa2753a59b28a9b18b03d12c7bb85f478ec1b430654e244310cded823bbd0537398ab88e8d22c21b1a1d2f0fa9dac4c5bbcc1049c9fa77dcf7c7f50345e16e37385097e6fa65a0afe25f1a4da09a50b389e6be40a48cfcf22135b1d956302d61147a6f212b6d1517a2bd76936052b1793ae0d3f9b6c5ece0b68dab9993592778a06bbb30189561eb3cf73380c45dff2d81c4a93c8672611d1ba847068ad53d1ab25a252ab463446242578c34144bd4f2273dca0e9d9ee7fa46aa7a96296e1f108245885a5535155f1b22bc9fe89be86f1c600bb72e5a4407592bd1bbc7a60f5877cea7453a0698293dee6a048b184211a15f50fd6caeccebe9d8f343bf41932fc38c2d773e98b792f656616b5a3164d515c412f97e405d0d84334dc77ebd3df2a0462882b2e4b62dbc790b47ab383648fef81f4e20ee900f22c3597f7e99771ad0867978df48d12194c7d4d04a83643c32f5e4e618c781b26ba9f73ed72b9ebf57c8e050f7f7ab1cf62a5f64d898301bfefb77887789048f3b691aaec5c81c09bc948cd570d25b47b718af35947415171db00a25c61e7f8d7ba8a23ddc5c7249d09f6851bcaf9d9994e322438278dba3e21a8c3287d52a106be5a0c5bd6ba07627e16ed20a274648fff42f430d30ff03a4cc56d1d552493f0e9444472143922cd430b8eb7ff02b91a882582a2093680ec042788c02af7cbdc83419ec55c94d6ea805a0b385c3a5dfd5fade17361f52076717724827a898e4bc512daee43eeaca10690b72d0c672f1c98328cf0e8365a7f6ef234e8943feb45316540baa1eb878f373018df04721d4696608f6313fa888b5304065de8b1dca955a128825c5fe4f916055e8dd8f5c37f622364edb736a5e018690e4ed07e6d554aff4f63d0b4742fb18bba57971fff2582dc62a28742f0bbc36a09",
+      "_comment": "public_key = FIPS 204 ML-DSA-65 validator public key (1952 bytes) \u2014 generated from deterministic seed",
+      "signature_scheme": "pqc-native"
+    },
+    {
+      "label": "Dave",
+      "address": "qcb1dave",
+      "balance": "500000000",
+      "role": "validator",
+      "public_key": "9b52145fc450bc1d7278322363f354288ab3bdadaec2bbe48000271564d5fff3e0dd7ca337f3c72c35b5eb868a583128e6a94adf4f30306a17745a1d97d5ebc72f1241d849192fc4b29332d7b3684b26e242ba48ed7e25372641f4a4f1f6abc05fc347e19723b81569baf71e0ac4c7be7e46d2fecc6747f8ec0cb4ec641eacd3640e7747ff7eafcbbd2a27cdd90cc3f2914895a74c18a4d500fb2ae25ee3858c8d924c07679e8c974bcc5912ad1ae130e359f769d62e638a7338cf771ed749114a93d471c109ad78695d161c8a88c3a3be2999926c3c9ed68194cc82535e299420947450116abb0ff161e56477d0e353480cfff9039deade1f2d3dc251a43c0f9260374f6ea3c52da0b01945c9bc356a20e7f1fc14173573db7dac2d5b859e88695b24733db2dcac65ee808783b507d0149a8981fa211b872aee6b2e560358c2fa326ec16cfcc077f7f7212a85f23f4426bd2718a69923403818236d4c16148b829719a3341b591a68e079e8e5a19356b519e366d1418b3daa571b50d4b3f6a44d82faf694dbaf1e468f28655f28f9c90626c9328ae3c2ac690ffcf1d1f9a39c7df9ed63d40c0a69049dc7c31c0cbefe4e465cfb7e3d52ef361031a4cd07349fd60ae44dd0b7e1a043892ae6a2d2cefe8c0344c7fe95e118333ed141dce7d991f93cdd3aaac3a444b6f036fc219b7e29696c24a07d92ed5015e79e0d3aaac35383bc2b1e5b48fd72b3280e5c381f717a5d9e6afad10ac2a2c28a65cee68d4e70235fd0ee7f2ba53fd62084c8138dba7b6863bd9e75fe2f4ebfe75f7b1e0173ee109d0a82ffd1c9e7cb18d64dcdae6bf26a6ab8aff31c9a9b69003cb836487678aff842ed344e9da5e46e6a21fcd9caaea0a10f561b9d399b8dd1dbdee44a03272c553f56cb9fee9468a3e979b9ebf7c4db62ffde3d103e30615391dff2572bfaf5f72133a38034fc40585b26deb97aa9e4500d0ea03978d287a097717df2b2c88e73eece4cdbe48b51fcfd99c09bae3974ce24da573ed22fb1f7839c34b4aef53a620c677789ec532bb9dad88916fc3ad09e679d1deb2bc5bb853526eac7c30a466e16c469e8b2f0ba0e5fa7070152a9c625df588935a5d03518d43bc6f3aac7e23a6a8c64ce1482d016954765c303e3eef845631d8304965dbe7f8cbb36ac658ef6b9c64dfb8d0c4e22de604db4ea942eba4334f3b855acd289f16a19e8b3f4800463c91cd909cba7ad8ba0bfeb9d718540c266ae62bf38f853f4a96feb93f1ad913bc7969750fed8c4684d0f3100486c353ac76d0408b5c865ffa585607cd6e045fdb5afd996c516817ce9856400ddfeab6e3ab127096eef2df0bb425e977f4cba1250b9b06f2721106d0010166e09aa45ca58428301cf1580874ffa336ab14f68d907908b010f32de2185718849cf0f7ad10ac7af64e3c5b8e1e8a75c23c06ec501a7f2c6c82fdc81fc8f4ab45f50138ad81fa66b0764480366d7de4670f95ac96ac8ad54e87e47a71438f4a0a4023a525828f51dc4fc962e585ce25cdf9d8db754d6330946b10a235aea7fe7427473048acaa6f82b2abba4bba724694fcad5bdf17985d805ee5bca8c0bddefd96b32ef91dce88e7e967f2ca66dbb9e8fc6d41c937eb7311ffefc8861741020379d909272487c1ed7e545c2b7760e1a1b49dd0a501983c2163d9d9daa4b4403176ae6799b1ce9de0777a5328bd1549e3b01f7fe1e2ce6e4e98ff94e6be2cbfec955e76919560e149b0d7ec816d97bcd473eeec915724ac411596accd3736e1a9c6559482643e5d00490478aa4e84d3da2ea9b6a90f2aea64a697fe3eba62c355f00289e2958dd501b9f6dbb6e6521ffce4c366fd17d43cce4a30795b43caa1c06cc07e05cef1fdf629de5ce2d2d56c86676181a2ee8420626234e6b8bbfa86bd30337c2317ede8bd0d6fc0ae187403a3012069682d5ffe7b1a0a47b2c84cb890e44622852252b9fde206f2319ce4426a44920d33cc816602cb562032475fa829928fa5688c858308eca0fc532d4d2ae3cfc46e09e9ad8705943857280941b50395de7782530b744442e847ff56820fc27f884f001b9d368c65ccf52bf1387bb89f892269625393c9a6ac1ddd2eb4213fa9825614c461aa4acdab6525329902618a50c68ad73c763d0f838f4f872cba172ff41ee9d178d1353252e7cefd777f242a9062b28cbb1543207e2d6e960c1a6ac588d0b83b8b120644bee9a7a2a6f53e1e4382516bb9e9d0ef83235c34d59e06490c2207d20c8af77aa214e8b8c5599d5e96d91c7d32146838ec6575cf616dabfbc2b269dd28c664492f6abf965750b16c26c92ec5d1b86d9c8ea68932427244552c86d9b6d7c164b490209acc174653c3fb74de55c6191db41163e4ee87ec26086c466f5b7de3aed810e8bb47ebd0bef991826b938f0f3bbcc0cd79a593bf798f62291144365a0b370b686e30229b0d950ec84ec808ca4fe5c2efbe15894b3ff2e67a5b5c39c81b1c179e3fa51050ee06b0f5b5c2f191fc3f274c362fe4ff99696d4d7b70403813118c9e3bc71081e4c6af70ec571719fee59129f38abb769688c771a9a34425a2836d18257e1e99dee6a783d1c564d2c2f5c78e9b7d506099db296ab435b5924473cdd9811e72134e438071777e329873f4b69d8c0f2655c24b0c61407e506fb56e469cc37d156747caa41569121c59d18dbb19f8505a4a3bb722b695499ee20dd39bb94a8e64dcf0959c920cf6e08241176ca171aeee2fb5ac2",
+      "_comment": "public_key = FIPS 204 ML-DSA-65 validator public key (1952 bytes) \u2014 generated from deterministic seed",
+      "signature_scheme": "pqc-native"
+    },
+    {
+      "label": "PoCD Treasury",
+      "address": "treasury:pocd",
+      "balance": "50000000000",
+      "role": "treasury",
+      "_comment": "PoCD epoch reward treasury: 50 billion uqcb (50,000 QCB) for miner reward distribution"
+    },
+    {
+      "label": "PoCD Research Treasury",
+      "address": "treasury:pocd-research",
+      "balance": "10000000000",
+      "role": "treasury",
+      "_comment": "PoCD research reward treasury: 10 billion uqcb (10,000 QCB) for QcbResearchRewardPolicy-v1 settlement"
+    }
+  ],
+  "attestation_coordinator": "qcb1alice",
+  "pocd": {
+    "enabled": true,
+    "chain_id": "qcb-devnet-4node",
+    "challenge_tracks": [
+      "Mathematics",
+      "Cryptography",
+      "ComputationalEfficiency",
+      "PhysicsAndOpenScience",
+      "AiAssistedDiscovery"
+    ],
+    "reward_epoch_blocks": 720,
+    "require_verified_identity": false,
+    "min_seal_difficulty_bits": 8
+  },
+  "genesis_challenges": [
+    {
+      "challenge_id": "qcb-devnet-4node::Mathematics::testnet-pilot-1",
+      "chain_id": "qcb-devnet-4node",
+      "track": "Mathematics",
+      "name": "Testnet Pilot \u2014 Fibonacci Discovery",
+      "verification_criteria": "Compute Fibonacci(n) for n derived from challenge_id seed (range 100-200). Submit SHA256 of decimal string representation as output_hash. Verifiers reproduce n = 100 + (SHA256(challenge_id+'fib')[0:16] as uint64) % 101, then check SHA256(str(fib(n)).encode()).",
+      "seal_difficulty_bits": 8,
+      "search_space_size": null,
+      "activated_at_block": null,
+      "status": "Active"
+    },
+    {
+      "challenge_id": "qcb-devnet-4node::Cryptography::testnet-crypto-1",
+      "chain_id": "qcb-devnet-4node",
+      "track": "Cryptography",
+      "name": "Testnet Crypto \u2014 Hash Pre-image Search",
+      "verification_criteria": "Find an input x = 'qcb-preimage-{N}' such that SHA256(x) starts with nibble 0 (4 leading zero bits). Submit SHA256(x) as output_hash. Starting nonce N = SHA256(challenge_id+'preimage')[0:16] as uint64 & 0xFFFFFFFF. Verifiers check output_hash starts with '0'.",
+      "seal_difficulty_bits": 8,
+      "search_space_size": null,
+      "activated_at_block": null,
+      "status": "Active"
+    },
+    {
+      "challenge_id": "qcb-devnet-4node::ComputationalEfficiency::testnet-perf-1",
+      "chain_id": "qcb-devnet-4node",
+      "track": "ComputationalEfficiency",
+      "name": "Testnet Perf \u2014 Matrix Multiply Benchmark",
+      "verification_criteria": "Run 16\u00d716 integer matrix multiply (seeded from challenge_id). Seed = SHA256(challenge_id+'matmul')[0:16] as uint64 & 0xFFFF. Entries mod 997; compute diagonal sum of C=A\u00d7B mod 2^31. Submit SHA256('matmul-16x16-seed{S}-diag{D}') as output_hash.",
+      "seal_difficulty_bits": 8,
+      "search_space_size": null,
+      "activated_at_block": null,
+      "status": "Active"
+    },
+    {
+      "challenge_id": "qcb-devnet-4node::PhysicsAndOpenScience::testnet-lattice-1",
+      "chain_id": "qcb-devnet-4node",
+      "track": "PhysicsAndOpenScience",
+      "name": "Testnet Lattice \u2014 Shortest Vector Problem (4-dim)",
+      "verification_criteria": "Find shortest non-zero vector in the 4-dimensional integer lattice with basis B derived from challenge_id seed. Seed = SHA256(challenge_id+'lattice')[0:16] as uint64. Build 4\u00d74 basis using LCG (mult=6364136223846793005, add=1442695040888963407, entries = (state>>32)%31 - 15). Exhaustively search coefficient vectors in [-6,6]^4; find minimum non-zero ||Bv||^2. Submit SHA256('svp-dim4-seed{S}-vec{V}-norm{N}') as output_hash. Any verifier can reproduce B and check the submitted vector is genuinely shortest.",
+      "seal_difficulty_bits": 8,
+      "search_space_size": null,
+      "activated_at_block": null,
+      "status": "Active"
+    },
+    {
+      "challenge_id": "qcb-devnet-4node::AiAssistedDiscovery::testnet-primes-1",
+      "chain_id": "qcb-devnet-4node",
+      "track": "AiAssistedDiscovery",
+      "name": "Testnet Primes \u2014 Prime Counting Function \u03c0(n)",
+      "verification_criteria": "Compute \u03c0(n) \u2014 number of primes \u2264 n \u2014 for challenge-seeded n. n = 10000 + (SHA256(challenge_id+'primes')[0:16] as uint64) % 40001, so 10000 \u2264 n \u2264 50000. Submit SHA256('pi(n)={count}') as output_hash. Verifiers run a sieve and check pi_n independently.",
+      "seal_difficulty_bits": 8,
+      "search_space_size": null,
+      "activated_at_block": null,
+      "status": "Active"
+    }
+  ],
+  "settlement_operators": [
+    "qcb1alice"
+  ]
+}

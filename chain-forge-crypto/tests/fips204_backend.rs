@@ -245,3 +245,24 @@ mod legacy {
         assert_eq!(B::verify(&long, b"m", &sig, b"c"), Err(Error::BadPublicKeyLength));
     }
 }
+
+/// Verifies that the four FIPS 204 devnet keypairs (deterministic seeds) round-trip
+/// through `validate_keypair`. Run with `--nocapture` to also print the JSON used in
+/// `chain-forge-node/tests/devnet/keys/fips204/` and `genesis-4node-pqhs2-fips204.json`.
+/// Seeds: SHA3-256("qattice-pqhs2-devnet/<name>/v1").
+#[test]
+fn gen_fips204_devnet_keys_validate() {
+    let entries: &[(&str, &str)] = &[
+        ("alice", "ade42af24ba50cc3a822b57c8121f86e8391b5d5d2a0b5a5f929536d6d304bcf"),
+        ("bob",   "70d56a60c13236cc30dcdbf26cf84179e4756c3330437761f08cee5e4deaf4b2"),
+        ("carol", "55f9cf29721407056d6d33c1e9e74b76cac74210a95cad6c71bc614f809ebdc3"),
+        ("dave",  "426c20ce2935b508e01c20a402d9b646ea2b7d65dcc2ee9d408be18a3fe97121"),
+    ];
+    for (name, seed_hex) in entries {
+        let seed: [u8; 32] = unhex(seed_hex).try_into().unwrap();
+        let kp = B::keygen_from_seed(&seed);
+        B::validate_keypair(&kp.public_key, &kp.private_key)
+            .unwrap_or_else(|e| panic!("fips204 devnet key for {name} failed validate_keypair: {e:?}"));
+        println!("{name}: pk_prefix={}", hex::encode(&kp.public_key[..8]));
+    }
+}

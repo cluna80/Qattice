@@ -1,7 +1,7 @@
 //! PQ-HotStuff-2 four-node devnet integration test (QAT-07, `pq-hotstuff` feature).
 //!
 //! Spawns four `chain-forge-node` processes (Alice, Bob, Carol, Dave) against
-//! `tests/devnet/genesis-4node-pqhs2.json` (ML-DSA-65 consensus keys,
+//! `tests/devnet/genesis-4node-pqhs2-fips204.json` (FIPS 204 ML-DSA-65 consensus keys,
 //! `bft_variant = "pq-hotstuff"`), then polls each node's `/api/status`
 //! endpoint until all four report `height >= 3` or the test times out.
 //!
@@ -9,7 +9,10 @@
 //!   - `PqHotStuffEngine` is selected when `bft_variant = "pq-hotstuff"` in genesis
 //!   - Message dispatch (propose / receive_vote / on_timeout) works over TCP
 //!   - Peer handshake completes and gossip propagates votes to all four nodes
-//!   - Four nodes commit at least 3 blocks using real ML-DSA-65 consensus keys
+//!   - Four nodes commit at least 3 blocks using genuine FIPS 204 ML-DSA-65 consensus keys
+//!   - At least one emitted vote carries a valid FIPS 204 ML-DSA-65 signature
+//!     (verified independently via `chain_forge_consensus::pq_hotstuff::safety::decode_record`
+//!     + `Fips204Verifier` over `CTX_VOTE` and the canonical `VoteMessage` encoding)
 //!
 //! Run (Windows/Linux):
 //!   cargo build -p chain-forge-node --features pq-hotstuff
@@ -31,8 +34,8 @@ const VALIDATORS: &[&str] = &["qcb1alice", "qcb1bob", "qcb1carol", "qcb1dave"];
 const API_PORTS: &[u16] = &[19080, 19081, 19082, 19083];
 const P2P_PORTS: &[u16] = &[28000, 28001, 28002, 28003];
 
-const GENESIS_FILE: &str = "genesis-4node-pqhs2.json";
-const KEY_DIR: &str = "keys/mldsa";
+const GENESIS_FILE: &str = "genesis-4node-pqhs2-fips204.json";
+const KEY_DIR: &str = "keys/fips204";
 
 // ── Path helpers ─────────────────────────────────────────────────────────────
 
@@ -152,6 +155,7 @@ struct NodeProcess {
     validator: &'static str,
     child: Child,
     api_port: u16,
+    data_dir: PathBuf,
 }
 
 impl Drop for NodeProcess {
@@ -210,6 +214,9 @@ fn spawn_nodes(bin: &PathBuf, log_dir: &PathBuf) -> Vec<NodeProcess> {
         let key_file = repo_root()
             .join("tests").join("devnet").join(KEY_DIR)
             .join(format!("{short_name}.key.json"));
+        let data_dir = log_dir.join(format!("{validator}-data"));
+        std::fs::create_dir_all(&data_dir)
+            .unwrap_or_else(|e| panic!("cannot create data dir {data_dir:?}: {e}"));
 
         let mut cmd = Command::new(bin);
         cmd.args([
@@ -218,6 +225,7 @@ fn spawn_nodes(bin: &PathBuf, log_dir: &PathBuf) -> Vec<NodeProcess> {
             "--key-file",  key_file.to_str().unwrap(),
             "--api-port",  &api_port.to_string(),
             "--p2p-port",  &p2p_port.to_string(),
+            "--data-dir",  data_dir.to_str().unwrap(),
         ]);
         if let Some(b) = &bootstrap {
             cmd.args(["--bootstrap", b]);
@@ -229,7 +237,7 @@ fn spawn_nodes(bin: &PathBuf, log_dir: &PathBuf) -> Vec<NodeProcess> {
             .spawn()
             .unwrap_or_else(|e| panic!("failed to spawn {validator}: {e}"));
 
-        nodes.push(NodeProcess { validator, child, api_port });
+        nodes.push(NodeProcess { validator, child, api_port, data_dir });
 
         if i == 0 {
             let peer = read_peer_id(&log_path, Duration::from_secs(15));
@@ -301,6 +309,62 @@ fn poll_until_height(
     }
 }
 
+// ── FIPS 204 wire-vote verification ─────────────────────────────────────────
+
+/// Read a node's persisted safety record and independently verify the last
+/// signed vote with the FIPS 204 backend.
+///
+/// The node must have been started with `--data-dir`; the safety store is at
+/// `<data_dir>/pq-safety/<validator>/safety_state.cbor`.
+///
+/// Returns `Some(description)` on success, `None` if the record path does not
+/// exist or no vote has been signed yet (record is in `Fresh` state).
+fn verify_fips204_last_vote(validator: &str, data_dir: &PathBuf) -> Option<String> {
+    use chain_forge_consensus::pq_hotstuff::{
+        safety::{ConsensusVerifier, CTX_VOTE, Fips204Verifier, decode_record},
+        wire::{AlgId, VoteMessage},
+    };
+
+    let safety_dir = data_dir.join("pq-safety").join(validator);
+    let record_path = safety_dir.join("safety_state.cbor");
+
+    if !record_path.exists() {
+        return None;
+    }
+
+    let cbor = std::fs::read(&record_path)
+        .unwrap_or_else(|e| panic!(
+            "cannot read safety record for {validator} at {record_path:?}: {e}"
+        ));
+
+    let rec = decode_record(&cbor).unwrap_or_else(|e| {
+        panic!("decode_record for {validator} failed: {e:?}")
+    });
+
+    let item = rec.last_vote.as_ref()?;
+    let sig  = &item.envelope.signature;
+
+    let vm = VoteMessage::decode(&item.message, AlgId::MLDSA65_FIPS204).unwrap_or_else(|e| {
+        panic!("VoteMessage::decode for {validator} failed: {e:?}")
+    });
+
+    let ok = Fips204Verifier.verify(&rec.public_key, CTX_VOTE, &item.message, sig);
+
+    assert!(
+        ok,
+        "FIPS 204 vote signature FAILED for {validator} — \
+         chain={} epoch={} round={} sig_len={}",
+        vm.chain_id, vm.epoch, vm.round, sig.len()
+    );
+
+    Some(format!(
+        "{validator}: FIPS 204 vote signature VALID — \
+         chain={} epoch={} round={} block_id={}",
+        vm.chain_id, vm.epoch, vm.round,
+        hex::encode(&vm.block_id[..8])
+    ))
+}
+
 // ── Test ─────────────────────────────────────────────────────────────────────
 
 /// PQ-HotStuff-2 four-node devnet: message dispatch and peer handshake with
@@ -349,6 +413,29 @@ fn pqhs2_4node_reaches_target_height() {
     // Cross-node agreement: all 4 nodes must have the same block_hash and
     // state_root at the target height. This catches forks and state divergence.
     assert_four_node_agreement(&nodes, target);
+
+    // FIPS 204 wire-vote verification: collect data-dir paths, drop nodes
+    // (which kills and waits for each child so safety stores are fully flushed),
+    // then read back the persisted records and verify independently.
+    println!("\n── FIPS 204 vote signature verification ─────────────────────────────────────");
+    let data_dirs: Vec<(&str, PathBuf)> = nodes.iter()
+        .map(|n| (n.validator, n.data_dir.clone()))
+        .collect();
+    drop(nodes); // kills and waits for all four node processes
+
+    let mut verified = 0usize;
+    for (validator, data_dir) in &data_dirs {
+        match verify_fips204_last_vote(validator, data_dir) {
+            Some(msg) => { println!("   ✓ {msg}"); verified += 1; }
+            None => { println!("   - {validator}: no safety record found or Fresh state — skipping"); }
+        }
+    }
+
+    assert!(
+        verified >= 1,
+        "FIPS 204 verification: at least 1 node must have a signed vote in its safety store"
+    );
+    println!("\n   {verified}/4 validators had their FIPS 204 vote signatures verified.");
 
     println!("\n[pqhs2_4node_reaches_target_height] PASS");
 }

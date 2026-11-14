@@ -28,6 +28,12 @@ impl Fips204Signer {
         seed.fill(0);
         Ok(Fips204Signer { public_key: kp.public_key, secret_key: kp.private_key })
     }
+
+    /// Construct from raw FIPS 204 key bytes (SK = 4032 B, PK = 1952 B).
+    /// The caller must have verified the keypair is consistent before calling this.
+    pub fn from_bytes(public_key: Vec<u8>, secret_key: Vec<u8>) -> Self {
+        Fips204Signer { public_key, secret_key }
+    }
 }
 
 impl ConsensusSigner for Fips204Signer {

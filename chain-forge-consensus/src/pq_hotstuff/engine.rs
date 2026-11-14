@@ -664,6 +664,47 @@ impl ConsensusEngine for PqHotStuffEngine {
         self.pending_proposal = None;
         Ok(())
     }
+
+    fn attach_pq_signing_ctx(&mut self, ctx: Box<dyn crate::pq_hotstuff::signing::EngineSigningContext>) {
+        self.attach_signing_context(ctx);
+    }
+
+    fn sign_local_vote(
+        &mut self,
+        chain_id: &str,
+        epoch: u64,
+        round: u64,
+        block_id: [u8; 32],
+        parent_id: [u8; 32],
+        parent_round: u64,
+        qc_round: u64,
+    ) -> Result<Vec<u8>, String> {
+        if let Some(ctx) = self.signing_ctx.as_mut() {
+            ctx.sign_vote(chain_id, epoch, round, block_id, parent_id, parent_round, qc_round)
+                .map(|s| s.signature)
+        } else {
+            Ok(vec![])
+        }
+    }
+
+    fn sign_local_timeout(
+        &mut self,
+        chain_id: &str,
+        epoch: u64,
+        round: u64,
+        high_qc_round: u64,
+    ) -> Result<Vec<u8>, String> {
+        if let Some(ctx) = self.signing_ctx.as_mut() {
+            ctx.sign_timeout(chain_id, epoch, round, high_qc_round)
+                .map(|s| s.signature)
+        } else {
+            Ok(vec![])
+        }
+    }
+
+    fn restore_safety_floors(&mut self) {
+        self.restore_floors();
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
