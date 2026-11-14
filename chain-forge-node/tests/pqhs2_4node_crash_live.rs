@@ -45,8 +45,18 @@ use std::{
 // ── Constants ──────────────────────────────────────────────────────────────────
 
 const VALIDATORS: &[&str] = &["qcb1alice", "qcb1bob", "qcb1carol", "qcb1dave"];
-const API_PORTS:  &[u16]  = &[19210, 19211, 19212, 19213];
-const P2P_PORTS:  &[u16]  = &[29210, 29211, 29212, 29213];
+
+// Each test gets its own port block so the three tests can run in parallel
+// without port collisions.  Phase 0 DIS-TX suite uses 19200-19203/29200-29203.
+//   CJ-1: 19210-19213 / 29210-29213
+//   CJ-2: 19220-19223 / 29220-29223
+//   CJ-3: 19230-19233 / 29230-29233
+const CJ1_API: &[u16] = &[19210, 19211, 19212, 19213];
+const CJ1_P2P: &[u16] = &[29210, 29211, 29212, 29213];
+const CJ2_API: &[u16] = &[19220, 19221, 19222, 19223];
+const CJ2_P2P: &[u16] = &[29220, 29221, 29222, 29223];
+const CJ3_API: &[u16] = &[19230, 19231, 19232, 19233];
+const CJ3_P2P: &[u16] = &[29230, 29231, 29232, 29233];
 
 const GENESIS_TEMPLATE: &str = "genesis-4node-pqhs2-fips204.json";
 const KEY_DIR:           &str = "keys/fips204";
@@ -391,34 +401,34 @@ fn crash_proposer_before_commit() {
     let alice_data = dat_dir.join("alice");
     let mut alice  = spawn_node_with_genesis(
         &bin, &genesis, "qcb1alice",
-        API_PORTS[0], P2P_PORTS[0],
+        CJ1_API[0], CJ1_P2P[0],
         &alice_data, &alice_log, None, false,
     );
-    assert!(wait_port(API_PORTS[0], Duration::from_secs(30)),
+    assert!(wait_port(CJ1_API[0], Duration::from_secs(30)),
         "alice API never opened");
     let peer_id   = read_peer_id(&alice_log, Duration::from_secs(20));
-    let bootstrap = format!("/ip4/127.0.0.1/tcp/{}/p2p/{peer_id}", P2P_PORTS[0]);
+    let bootstrap = format!("/ip4/127.0.0.1/tcp/{}/p2p/{peer_id}", CJ1_P2P[0]);
     println!("   bootstrap: {bootstrap}");
 
     let mut bob   = spawn_node_with_genesis(
         &bin, &genesis, "qcb1bob",
-        API_PORTS[1], P2P_PORTS[1],
+        CJ1_API[1], CJ1_P2P[1],
         &dat_dir.join("bob"), &log_dir.join("qcb1bob.log"),
         Some(&bootstrap), false,
     );
     let mut carol = spawn_node_with_genesis(
         &bin, &genesis, "qcb1carol",
-        API_PORTS[2], P2P_PORTS[2],
+        CJ1_API[2], CJ1_P2P[2],
         &dat_dir.join("carol"), &log_dir.join("qcb1carol.log"),
         Some(&bootstrap), false,
     );
     let mut dave  = spawn_node_with_genesis(
         &bin, &genesis, "qcb1dave",
-        API_PORTS[3], P2P_PORTS[3],
+        CJ1_API[3], CJ1_P2P[3],
         &dat_dir.join("dave"), &log_dir.join("qcb1dave.log"),
         Some(&bootstrap), false,
     );
-    for (port, name) in [(API_PORTS[1], "bob"), (API_PORTS[2], "carol"), (API_PORTS[3], "dave")] {
+    for (port, name) in [(CJ1_API[1], "bob"), (CJ1_API[2], "carol"), (CJ1_API[3], "dave")] {
         assert!(wait_port(port, Duration::from_secs(30)), "{name} API never opened");
     }
 
@@ -433,7 +443,7 @@ fn crash_proposer_before_commit() {
     let kill_target_height: u64 = 5;
     let kill_idx    = proposer_index(kill_target_height, 1);
     let kill_name   = VALIDATORS[kill_idx];
-    let kill_port   = API_PORTS[kill_idx];
+    let kill_port   = CJ1_API[kill_idx];
     println!("\n── Phase 2: kill proposer for height {kill_target_height} ({kill_name}, port {kill_port}) ──");
 
     // Wait until height 4 is committed on all nodes before killing, so the
@@ -470,12 +480,12 @@ fn crash_proposer_before_commit() {
     // Append restart output to same log so we can scan the whole log for FloorViolation.
     let restarted = spawn_node_with_genesis(
         &bin, &genesis, VALIDATORS[kill_idx],
-        API_PORTS[kill_idx], P2P_PORTS[kill_idx],
+        CJ1_API[kill_idx], CJ1_P2P[kill_idx],
         &restart_data, &restart_log,
         Some(&bootstrap), true,
     );
     assert!(
-        wait_port(API_PORTS[kill_idx], Duration::from_secs(30)),
+        wait_port(CJ1_API[kill_idx], Duration::from_secs(30)),
         "{kill_name} API did not reopen after restart"
     );
     all[kill_idx] = restarted;
@@ -549,23 +559,23 @@ fn crash_voter_after_prevote() {
     let alice_data = dat_dir.join("alice");
     let alice = spawn_node_with_genesis(
         &bin, &genesis, "qcb1alice",
-        API_PORTS[0], P2P_PORTS[0],
+        CJ2_API[0], CJ2_P2P[0],
         &alice_data, &alice_log, None, false,
     );
-    assert!(wait_port(API_PORTS[0], Duration::from_secs(30)), "alice API never opened");
+    assert!(wait_port(CJ2_API[0], Duration::from_secs(30)), "alice API never opened");
     let peer_id   = read_peer_id(&alice_log, Duration::from_secs(20));
-    let bootstrap = format!("/ip4/127.0.0.1/tcp/{}/p2p/{peer_id}", P2P_PORTS[0]);
+    let bootstrap = format!("/ip4/127.0.0.1/tcp/{}/p2p/{peer_id}", CJ2_P2P[0]);
 
     let bob   = spawn_node_with_genesis(&bin, &genesis, "qcb1bob",
-        API_PORTS[1], P2P_PORTS[1], &dat_dir.join("bob"),
+        CJ2_API[1], CJ2_P2P[1], &dat_dir.join("bob"),
         &log_dir.join("qcb1bob.log"), Some(&bootstrap), false);
     let carol = spawn_node_with_genesis(&bin, &genesis, "qcb1carol",
-        API_PORTS[2], P2P_PORTS[2], &dat_dir.join("carol"),
+        CJ2_API[2], CJ2_P2P[2], &dat_dir.join("carol"),
         &log_dir.join("qcb1carol.log"), Some(&bootstrap), false);
     let dave  = spawn_node_with_genesis(&bin, &genesis, "qcb1dave",
-        API_PORTS[3], P2P_PORTS[3], &dat_dir.join("dave"),
+        CJ2_API[3], CJ2_P2P[3], &dat_dir.join("dave"),
         &log_dir.join("qcb1dave.log"), Some(&bootstrap), false);
-    for (port, name) in [(API_PORTS[1], "bob"), (API_PORTS[2], "carol"), (API_PORTS[3], "dave")] {
+    for (port, name) in [(CJ2_API[1], "bob"), (CJ2_API[2], "carol"), (CJ2_API[3], "dave")] {
         assert!(wait_port(port, Duration::from_secs(30)), "{name} API never opened");
     }
 
@@ -579,7 +589,7 @@ fn crash_voter_after_prevote() {
     // Kill carol (index 2), a voter that has already signed at heights 1-5.
     let kill_idx  = 2; // carol
     let kill_name = VALIDATORS[kill_idx];
-    let kill_port = API_PORTS[kill_idx];
+    let kill_port = CJ2_API[kill_idx];
 
     println!("\n── Phase 2: kill voter {kill_name} ──");
     all[kill_idx].kill_and_wait();
@@ -604,11 +614,11 @@ fn crash_voter_after_prevote() {
     println!("\n── Phase 4: restart {kill_name} ──");
     let restarted = spawn_node_with_genesis(
         &bin, &genesis, VALIDATORS[kill_idx],
-        API_PORTS[kill_idx], P2P_PORTS[kill_idx],
+        CJ2_API[kill_idx], CJ2_P2P[kill_idx],
         &dat_dir.join("carol"), &log_dir.join("qcb1carol.log"),
         Some(&bootstrap), true,
     );
-    assert!(wait_port(API_PORTS[kill_idx], Duration::from_secs(30)),
+    assert!(wait_port(CJ2_API[kill_idx], Duration::from_secs(30)),
         "{kill_name} API did not reopen");
     all[kill_idx] = restarted;
 
@@ -676,23 +686,23 @@ fn crash_during_pruning() {
     let alice_data = dat_dir.join("alice");
     let alice = spawn_node_with_genesis(
         &bin, &genesis, "qcb1alice",
-        API_PORTS[0], P2P_PORTS[0],
+        CJ3_API[0], CJ3_P2P[0],
         &alice_data, &alice_log, None, false,
     );
-    assert!(wait_port(API_PORTS[0], Duration::from_secs(30)), "alice API never opened");
+    assert!(wait_port(CJ3_API[0], Duration::from_secs(30)), "alice API never opened");
     let peer_id   = read_peer_id(&alice_log, Duration::from_secs(20));
-    let bootstrap = format!("/ip4/127.0.0.1/tcp/{}/p2p/{peer_id}", P2P_PORTS[0]);
+    let bootstrap = format!("/ip4/127.0.0.1/tcp/{}/p2p/{peer_id}", CJ3_P2P[0]);
 
     let bob   = spawn_node_with_genesis(&bin, &genesis, "qcb1bob",
-        API_PORTS[1], P2P_PORTS[1], &dat_dir.join("bob"),
+        CJ3_API[1], CJ3_P2P[1], &dat_dir.join("bob"),
         &log_dir.join("qcb1bob.log"), Some(&bootstrap), false);
     let carol = spawn_node_with_genesis(&bin, &genesis, "qcb1carol",
-        API_PORTS[2], P2P_PORTS[2], &dat_dir.join("carol"),
+        CJ3_API[2], CJ3_P2P[2], &dat_dir.join("carol"),
         &log_dir.join("qcb1carol.log"), Some(&bootstrap), false);
     let dave  = spawn_node_with_genesis(&bin, &genesis, "qcb1dave",
-        API_PORTS[3], P2P_PORTS[3], &dat_dir.join("dave"),
+        CJ3_API[3], CJ3_P2P[3], &dat_dir.join("dave"),
         &log_dir.join("qcb1dave.log"), Some(&bootstrap), false);
-    for (port, name) in [(API_PORTS[1], "bob"), (API_PORTS[2], "carol"), (API_PORTS[3], "dave")] {
+    for (port, name) in [(CJ3_API[1], "bob"), (CJ3_API[2], "carol"), (CJ3_API[3], "dave")] {
         assert!(wait_port(port, Duration::from_secs(30)), "{name} API never opened");
     }
 
@@ -715,7 +725,7 @@ fn crash_during_pruning() {
 
     let kill_idx  = 3; // dave
     let kill_name = VALIDATORS[kill_idx];
-    let kill_port = API_PORTS[kill_idx];
+    let kill_port = CJ3_API[kill_idx];
 
     println!("\n── Phase 3: kill {kill_name} at height {past_prune} ──");
     all[kill_idx].kill_and_wait();
@@ -739,11 +749,11 @@ fn crash_during_pruning() {
     println!("\n── Phase 5: restart {kill_name} from pruned data dir ──");
     let restarted = spawn_node_with_genesis(
         &bin, &genesis, VALIDATORS[kill_idx],
-        API_PORTS[kill_idx], P2P_PORTS[kill_idx],
+        CJ3_API[kill_idx], CJ3_P2P[kill_idx],
         &dat_dir.join("dave"), &log_dir.join("qcb1dave.log"),
         Some(&bootstrap), true,
     );
-    assert!(wait_port(API_PORTS[kill_idx], Duration::from_secs(30)),
+    assert!(wait_port(CJ3_API[kill_idx], Duration::from_secs(30)),
         "{kill_name} API did not reopen");
     all[kill_idx] = restarted;
 
@@ -758,7 +768,7 @@ fn crash_during_pruning() {
     println!("\n── Phase 7: verification ──");
 
     // Restarted node must have watermark ≥ PRUNE_THRESHOLD (it picked it up from peers).
-    let dave_wm = watermark_of(API_PORTS[kill_idx]);
+    let dave_wm = watermark_of(CJ3_API[kill_idx]);
     println!("   {kill_name} watermark: {dave_wm:?}");
     assert!(
         dave_wm.map_or(false, |v| v >= PRUNE_THRESHOLD),
