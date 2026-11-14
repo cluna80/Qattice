@@ -459,18 +459,25 @@ fn assert_cert_epoch(
 /// `last_commit` for block H is the CommitCertificate for block H itself
 /// (the QC passed to commit_block by the two-chain rule).
 ///
-/// Two-chain commit semantics: block H is committed when QC(H+1) with the
-/// consecutive round exists. QC(H) is assembled at the time QC(H+1) triggers
-/// the commit. CommitCertificate.epoch is derived from the constituent votes'
-/// epoch field (which is set at vote-signing time, before on_commit fires).
+/// Two-chain commit semantics: block H is committed when two consecutive-round
+/// QCs exist AT HEIGHT H (locked_qc.round + 1 == new_qc.round, both at height H).
+/// CommitCertificate.epoch is derived from the constituent votes' epoch field
+/// (set at signing time).
 ///
-///   Block h2: QC votes cast at epoch 0 → cert.epoch = 0
-///   Block h3: QC votes cast at epoch 0 (before on_commit(h2) advances epoch)
-///             → cert.epoch = 0
-///   Block h4: QC votes cast at epoch 1 (after the transition) → cert.epoch = 1
+/// Timeline with epoch-change at h=2:
+///   Round 1 at h=2: QC(h=2, r=1) forms under epoch 0
+///   Round 2 at h=2: QC(h=2, r=2) forms under epoch 0 → triggers commit of h=2
+///                   → on_commit(h=2) fires → epoch advances 0→1
+///   Round 1 at h=3: QC(h=3, r=1) forms under epoch 1
+///   Round 2 at h=3: QC(h=3, r=2) forms under epoch 1 → triggers commit of h=3
 ///
-/// This confirms ML-DSA-65 signatures are bound to the vote-signing epoch and
-/// the boundary (epoch flip from 0 to 1 in cert.epoch) is between h3 and h4.
+///   Block h2: votes cast at epoch 0 → cert.epoch = 0
+///   Block h3: votes cast at epoch 1 (after on_commit(h2) advanced epoch) → cert.epoch = 1
+///   Block h4: votes cast at epoch 1 → cert.epoch = 1
+///
+/// The epoch flip in cert.epoch is between h2 and h3. This confirms the
+/// outgoing validator set (epoch 0) certified h2, and the incoming set (epoch 1)
+/// certified h3 onward.
 #[test]
 fn pqhs2_4node_qc_cert_epoch_boundary() {
     let bin = node_binary();
@@ -515,13 +522,14 @@ fn pqhs2_4node_qc_cert_epoch_boundary() {
 
     // QC cert-epoch boundary assertions.
     // CommitCertificate.epoch = epoch of the precommit votes (set at signing time).
+    // Block H commits when two consecutive-round QCs form at height H.
     //
-    //   h2: votes cast before on_commit(h2) → cert.epoch = 0
+    //   h2: QCs form at epoch 0 (before on_commit(h2) transitions epoch) → cert.epoch = 0
     assert_cert_epoch(&nodes, 2, 2, 0);
-    //   h3: votes cast before on_commit(h2) (h3's QC triggers h2's commit)
-    //       → cert.epoch = 0  (the epoch flip is here, between h3 and h4)
-    assert_cert_epoch(&nodes, 3, 3, 0);
-    //   h4: votes cast after the epoch transition → cert.epoch = 1
+    //   h3: QCs form at epoch 1 (after on_commit(h2) advanced the epoch) → cert.epoch = 1
+    //       epoch flip from 0→1 happens between h2 and h3 cert.epoch
+    assert_cert_epoch(&nodes, 3, 3, 1);
+    //   h4: continued epoch 1 → cert.epoch = 1
     assert_cert_epoch(&nodes, 4, 4, 1);
 
     println!("\n[pqhs2_4node_qc_cert_epoch_boundary] PASS");

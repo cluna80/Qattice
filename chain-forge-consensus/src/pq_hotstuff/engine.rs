@@ -252,8 +252,9 @@ impl PqHotStuffEngine {
     /// never trigger a commit in the current height.
     fn try_two_chain_commit(&self, to_commit: &Qc) -> Option<CommitCertificate> {
         if to_commit.height == self.height && self.locked_qc.round == to_commit.round + 1 {
-            // cert.epoch = epoch under which the votes were cast, not the current engine
-            // epoch (which may have already advanced past on_commit for a later block).
+            // cert.epoch = epoch under which the votes were cast, derived from the
+            // constituent votes. self.epoch can differ: on_commit for a prior block at
+            // a later round may have already advanced it before this commit fires.
             let vote_epoch = to_commit.precommits.first().map(|v| v.epoch).unwrap_or(0);
             return Some(CommitCertificate {
                 height: to_commit.height,
