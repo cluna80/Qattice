@@ -238,14 +238,20 @@ fn wait_port(port: u16, timeout: Duration) -> bool {
 }
 
 fn wait_tx_result(port: u16, tx_id: &str, timeout: Duration) -> Option<serde_json::Value> {
+    // After commit GET /api/tx/{id} returns the TxSummary directly:
+    //   {"success":bool, "height":N, "gas_used":N, "events":[...], "error":..., ...}
+    // No "status" wrapper. While pending it returns 404 (None from api_get).
+    // A refusal returns {"code":..., "state":..., "status":"rejected", ...}.
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(v) = api_get(port, &format!("/api/tx/{tx_id}")) {
-            if v["status"].as_str().map_or(false, |s| s == "committed" || s == "executed") {
-                return Some(v["result"].clone().into());
+            // Committed: has "success" key (true or false)
+            if v.get("success").is_some() {
+                return Some(v);
             }
-            if v["status"].as_str().map_or(false, |s| s == "failed" || s == "rejected") {
-                return Some(v.clone());
+            // Refusal: has "code" key
+            if v.get("code").is_some() {
+                return Some(v);
             }
         }
         if Instant::now() >= deadline { return None; }
@@ -507,9 +513,10 @@ fn pqhs2_4node_dis_tx_and_pruned_restart() {
     println!("   execution result: {result}");
     assert!(
         result["success"].as_bool() == Some(true),
-        "P0-3: valid ML-DSA-65 tx must succeed; error: {:?}", result["error"]
+        "P0-3: valid ML-DSA-65 tx must succeed; got: {result}"
     );
-    println!("   ✓ P0-3: tx committed successfully");
+    println!("   ✓ P0-3: tx committed successfully (height={}, gas_used={})",
+        result["height"], result["gas_used"]);
 
     // State transition: receiver balance must have increased on ≥ 3 nodes.
     let h_after = height_of(API_PORTS[0]);
