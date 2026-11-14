@@ -334,18 +334,27 @@ fn pqhs2_4node_fixed_set_pruning() {
     // every commit_block call.
 
     println!("\n── Phase 3: verifying height 1 is absent from alice's chain_store.json ──");
-    // Give alice's process a moment to finish writing the file after height 21.
+    // Give alice's process a moment to finish writing the snapshot after height 21.
     std::thread::sleep(Duration::from_millis(500));
-    let alice_cs_path = dat_dir.join("alice").join("chain_store.json");
+    // State is persisted under data_dir/snapshots/gen-NNNNNN/ (generation-based
+    // snapshot layout).  Read CURRENT to find the active generation directory.
+    let alice_dir  = dat_dir.join("alice");
+    let current    = std::fs::read_to_string(alice_dir.join("CURRENT"))
+        .unwrap_or_else(|e| panic!("cannot read alice/CURRENT: {e}"));
+    let gen        = current.trim();
+    let alice_cs_path = alice_dir.join("snapshots").join(gen).join("chain_store.json");
+    println!("   reading {alice_cs_path:?}");
     let cs_text = std::fs::read_to_string(&alice_cs_path)
         .unwrap_or_else(|e| panic!("cannot read {alice_cs_path:?}: {e}"));
     let cs: serde_json::Value = serde_json::from_str(&cs_text)
         .unwrap_or_else(|e| panic!("chain_store.json is not valid JSON: {e}"));
-    println!("   chain_store.json keys present: {:?}",
-        cs.as_object().map(|m| m.keys().take(5).collect::<Vec<_>>()));
-    assert!(cs.get("1").is_none(),
+    let keys: Vec<&str> = cs.as_object()
+        .map(|m| { let mut v: Vec<&str> = m.keys().map(|s| s.as_str()).collect(); v.sort(); v })
+        .unwrap_or_default();
+    println!("   chain_store.json height keys: {:?}", &keys[..keys.len().min(6)]);
+    assert!(!keys.contains(&"1"),
         "chain_store.json still contains height 1 after pruning (watermark=2);\
-         \n  keys: {:?}", cs.as_object().map(|m| m.keys().collect::<Vec<_>>()));
+         \n  all keys: {keys:?}");
     println!("   ✓ height 1 is absent from chain_store.json (pruned)");
 
     // ── Phase 4: Agreement at current tip ────────────────────────────────────
