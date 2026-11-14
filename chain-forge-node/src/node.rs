@@ -64,6 +64,10 @@ pub struct NodeStatus {
     /// The node's libp2p peer ID as a base58-encoded string.
     /// Set once the P2P network starts; None before startup.
     pub local_peer_id: Option<String>,
+    /// The pruning watermark: all `chain_store` entries below this height have
+    /// been removed.  Zero until the first prune fires.  Exposed for tests and
+    /// observability; the actual pruning window is `CHAIN_STORE_KEEP` entries.
+    pub chain_store_watermark: u64,
 }
 
 pub type SharedStatus = Arc<Mutex<NodeStatus>>;
@@ -491,6 +495,16 @@ pub const MAX_GC_RECEIPTS: usize = 500;
 
 pub const MAX_RECENT_BLOCKS: usize = 100;
 
+/// Number of committed block payloads to retain in `chain_store` after each
+/// commit.  Entries older than `committed_height - CHAIN_STORE_KEEP` are
+/// removed from the in-memory map (and therefore from `chain_store.json` on
+/// the next persist).  Peers that need older history must catch up from
+/// another node that still holds it, or via a future snapshot-sync mechanism.
+///
+/// 64 is enough to cover a node that is a full gossip-round behind and needs
+/// to request the most recent N blocks.  The explorer already caps at 100.
+pub const CHAIN_STORE_KEEP: u64 = 64;
+
 pub type SharedExplorer = Arc<Mutex<ExplorerState>>;
 
 // -- QRC metrics (shared with the API, Section 9.1 / 5.4) -------------------
@@ -693,13 +707,11 @@ pub struct Node {
     /// moved past a round before its peers had even finished connecting.
     round_watch: Option<(u64, u32)>,
     round_watch_started: Option<std::time::Instant>,
-    /// Every committed block this node has ever seen, kept for the life of
-    /// the process so a peer that falls behind (misses the moment quorum
-    /// happened, was disconnected, or just started) can request and replay
-    /// history it missed. Without this, a node that misses even one commit
-    /// is permanently stuck outside the network -- there is no other way
-    /// for it to ever learn what it missed, since gossipsub delivers each
-    /// message once and never replays it.
+    /// Recent committed blocks, kept so a peer that falls slightly behind can
+    /// request and replay blocks it missed.  Bounded to the last
+    /// `CHAIN_STORE_KEEP` entries: older entries are pruned on each commit.
+    /// Peers that need deeper history must catch up from a node that still
+    /// holds it, or via a future snapshot-sync mechanism.
     chain_store: std::collections::BTreeMap<u64, (chain_forge_consensus::CommitCertificate, BlockProposal)>,
     /// Identity registry (Whitepaper Section 4 / Identity Pilot Design) --
     /// backs RegisterIdentity and Attest transactions, and the
@@ -1346,6 +1358,7 @@ impl Node {
             attestation_cap_per_window,
             insecure_dev_identity_overrides: insecure_identity,
             local_peer_id:  None,
+            chain_store_watermark: 0,
         }));
 
         let validator_id = validator_address.map(ValidatorId);
@@ -5581,10 +5594,20 @@ impl Node {
         self.pending_proposals.retain(|(h, _), _| *h > committed_height);
         self.pending_certs.retain(|(h, _), _| *h > committed_height);
 
-        // Unlike pending_proposals (a short-lived voting cache), chain_store
-        // keeps every committed block permanently, so a peer that falls
-        // behind has something to actually request and replay.
+        // chain_store serves catch-up requests from peers that missed a commit.
+        // Insert first, then prune: a peer requesting the block we just committed
+        // will always find it here even if it falls exactly at the watermark.
         self.chain_store.insert(committed_height, (cert.clone(), proposal.clone()));
+        if committed_height >= CHAIN_STORE_KEEP {
+            let new_watermark = committed_height - CHAIN_STORE_KEEP + 1;
+            let prev = self.status.lock().map(|s| s.chain_store_watermark).unwrap_or(0);
+            if new_watermark > prev {
+                self.chain_store.retain(|&h, _| h >= new_watermark);
+                if let Ok(mut s) = self.status.lock() {
+                    s.chain_store_watermark = new_watermark;
+                }
+            }
+        }
 
         // H0-2: the evidence the next proposer publishes starts from this
         // node's own certificate and grows with late precommits.

@@ -189,3 +189,8 @@ required-features = ["pq-hotstuff"]
 name = "pqhs2_4node_epoch_live"
 path = "tests/pqhs2_4node_epoch_live.rs"
 required-features = ["pq-hotstuff"]
+
+[[test]]
+name = "pqhs2_4node_pruning_live"
+path = "tests/pqhs2_4node_pruning_live.rs"
+required-features = ["pq-hotstuff"]
