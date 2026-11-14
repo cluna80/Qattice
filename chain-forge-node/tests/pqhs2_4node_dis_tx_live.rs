@@ -51,7 +51,7 @@ const KEY_DIR:           &str = "keys/fips204";
 const CHAIN_ID:    &str = "qcb-devnet-4node-pqhs2-tx";
 const SENDER_ADDR: &str = "qcb1sender";
 const SENDER_SEED: &str = "pqhs2-dis-tx-sender-seed-000000000000000000000001";
-const RECV_ADDR:   &str = "qcb1alice";
+const RECV_ADDR:   &str = "qcb1recv";
 const TX_AMOUNT:   u128 = 100_000;
 
 /// Must match CHAIN_STORE_KEEP in node.rs; prune fires at height > this.
@@ -199,10 +199,13 @@ fn state_root_of(port: u16) -> String {
 }
 
 fn balance_of(port: u16, addr: &str) -> u128 {
+    // The API returns balance as either a JSON string or a JSON number depending on the account.
     api_get(port, &format!("/api/accounts/{addr}"))
         .and_then(|v| {
             v["balance"].as_str().and_then(|s| s.parse().ok())
+                .or_else(|| v["balance"].as_u64().map(|n| n as u128))
                 .or_else(|| v["balances"]["uqcb"].as_str().and_then(|s| s.parse().ok()))
+                .or_else(|| v["balances"]["uqcb"].as_u64().map(|n| n as u128))
         })
         .unwrap_or(0)
 }
