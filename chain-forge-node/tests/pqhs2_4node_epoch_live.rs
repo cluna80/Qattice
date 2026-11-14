@@ -29,6 +29,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+// serde_json is a workspace dev-dependency used for structured block JSON parsing
+// in `fetch_last_commit`.
+use serde_json;
+
 const VALIDATORS: &[&str] = &["qcb1alice", "qcb1bob", "qcb1carol", "qcb1dave"];
 
 // Each test gets its own port range so they can run in parallel without conflicts.
@@ -122,28 +126,30 @@ fn fetch_block_epoch(api_port: u16, height: u64) -> Option<u64> {
         .and_then(|s| s.trim().parse().ok())
 }
 
-/// Extract `last_commit.epoch` from a block's API JSON.
-///
-/// The block JSON contains the block's own `"epoch":` first, then inside
-/// `"last_commit":{...}` there is a second `"epoch":`. We skip the first
-/// occurrence and take the second.
-fn fetch_last_commit_cert_epoch(api_port: u16, height: u64) -> Option<u64> {
-    let body = http_get_body(api_port, &format!("/api/blocks/{height}"))?;
-    body.split("\"epoch\":")
-        .nth(2)   // 0=before first, 1=block epoch, 2=last_commit epoch
-        .and_then(|s| s.split([',', '}']).next())
-        .and_then(|s| s.trim().parse().ok())
+struct LastCommitInfo {
+    height: u64,
+    epoch:  u64,
+    /// Epochs from the constituent precommit votes.
+    vote_epochs: Vec<u64>,
 }
 
-/// Extract `last_commit.height` from a block's API JSON.
-fn fetch_last_commit_cert_height(api_port: u16, height: u64) -> Option<u64> {
+/// Fetch and parse `last_commit` from `/api/blocks/{height}` using structured
+/// JSON decoding. Returns `None` if the block is unavailable or has no
+/// `last_commit` field.
+fn fetch_last_commit(api_port: u16, height: u64) -> Option<LastCommitInfo> {
     let body = http_get_body(api_port, &format!("/api/blocks/{height}"))?;
-    // last_commit appears as `"last_commit":{"height":<n>,...}`
-    let after_lc = body.split("\"last_commit\":").nth(1)?;
-    after_lc.split("\"height\":")
-        .nth(1)
-        .and_then(|s| s.split([',', '}']).next())
-        .and_then(|s| s.trim().parse().ok())
+    let v: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let lc = v.get("last_commit")?;
+    let cert_height = lc.get("height")?.as_u64()?;
+    let cert_epoch  = lc.get("epoch")?.as_u64()?;
+    let vote_epochs: Vec<u64> = lc
+        .get("precommits")
+        .and_then(|a| a.as_array())
+        .map(|votes| votes.iter()
+            .filter_map(|vote| vote.get("epoch")?.as_u64())
+            .collect())
+        .unwrap_or_default();
+    Some(LastCommitInfo { height: cert_height, epoch: cert_epoch, vote_epochs })
 }
 
 // ── RAII process guard ────────────────────────────────────────────────────────
@@ -398,8 +404,10 @@ fn pqhs2_4node_epoch_change_reaches_new_epoch() {
 
 // ── QC cert-epoch boundary assertion ─────────────────────────────────────────
 
-/// Check that every node's `last_commit` certificate at `block_height` carries
-/// `expected_cert_epoch` and certifies `expected_cert_height`.
+/// Check that every node's `last_commit` certificate at `block_height`:
+///   - certifies `expected_cert_height`
+///   - carries `expected_cert_epoch` on the CommitCertificate.epoch field
+///   - has all constituent precommit votes carrying the same epoch
 fn assert_cert_epoch(
     nodes: &[NodeProcess],
     block_height: u64,
@@ -411,28 +419,31 @@ fn assert_cert_epoch(
          (expected cert epoch {expected_cert_epoch}) ──"
     );
     for node in nodes {
-        let cert_epoch = fetch_last_commit_cert_epoch(node.api_port, block_height)
+        let lc = fetch_last_commit(node.api_port, block_height)
             .unwrap_or_else(|| panic!(
-                "{} block {block_height} last_commit.epoch unavailable", node.validator
-            ));
-        let cert_height = fetch_last_commit_cert_height(node.api_port, block_height)
-            .unwrap_or_else(|| panic!(
-                "{} block {block_height} last_commit.height unavailable", node.validator
+                "{} block {block_height} last_commit unavailable", node.validator
             ));
         println!(
-            "   {}  last_commit.height={}  last_commit.epoch={}",
-            node.validator, cert_height, cert_epoch
+            "   {}  last_commit.height={}  cert.epoch={}  vote_epochs={:?}",
+            node.validator, lc.height, lc.epoch, lc.vote_epochs
         );
         assert_eq!(
-            cert_height, expected_cert_height,
-            "{} block {block_height}: last_commit.height={cert_height}, expected {expected_cert_height}",
-            node.validator
+            lc.height, expected_cert_height,
+            "{} block {block_height}: last_commit.height={}, expected {expected_cert_height}",
+            node.validator, lc.height
         );
         assert_eq!(
-            cert_epoch, expected_cert_epoch,
-            "{} block {block_height}: last_commit.epoch={cert_epoch}, expected {expected_cert_epoch}",
-            node.validator
+            lc.epoch, expected_cert_epoch,
+            "{} block {block_height}: CommitCertificate.epoch={}, expected {expected_cert_epoch}",
+            node.validator, lc.epoch
         );
+        for (i, &ve) in lc.vote_epochs.iter().enumerate() {
+            assert_eq!(
+                ve, expected_cert_epoch,
+                "{} block {block_height}: precommits[{i}].epoch={ve}, expected {expected_cert_epoch}",
+                node.validator
+            );
+        }
     }
     println!(
         "   ✓ block {block_height}: last_commit certifies h{expected_cert_height} epoch={expected_cert_epoch}"
@@ -448,12 +459,18 @@ fn assert_cert_epoch(
 /// `last_commit` for block H is the CommitCertificate for block H itself
 /// (the QC passed to commit_block by the two-chain rule).
 ///
-///   Block h2: epoch-change block committed under epoch 0 → cert.epoch = 0
-///   Block h3: first block after the transition → cert.epoch = 1
-///   Block h4: continued finalization in epoch 1 → cert.epoch = 1
+/// Two-chain commit semantics: block H is committed when QC(H+1) with the
+/// consecutive round exists. QC(H) is assembled at the time QC(H+1) triggers
+/// the commit. CommitCertificate.epoch is derived from the constituent votes'
+/// epoch field (which is set at vote-signing time, before on_commit fires).
 ///
-/// This confirms ML-DSA-65 signatures are bound to the correct epoch in v2
-/// signing bytes and that the boundary is at the right height.
+///   Block h2: QC votes cast at epoch 0 → cert.epoch = 0
+///   Block h3: QC votes cast at epoch 0 (before on_commit(h2) advances epoch)
+///             → cert.epoch = 0
+///   Block h4: QC votes cast at epoch 1 (after the transition) → cert.epoch = 1
+///
+/// This confirms ML-DSA-65 signatures are bound to the vote-signing epoch and
+/// the boundary (epoch flip from 0 to 1 in cert.epoch) is between h3 and h4.
 #[test]
 fn pqhs2_4node_qc_cert_epoch_boundary() {
     let bin = node_binary();
@@ -497,14 +514,14 @@ fn pqhs2_4node_qc_cert_epoch_boundary() {
     assert_agreement_and_epoch(&nodes, 5, 1);
 
     // QC cert-epoch boundary assertions.
-    // `last_commit` for block H is the CommitCertificate for block H itself
-    // (the QC that the two-chain rule passed to commit_block).
+    // CommitCertificate.epoch = epoch of the precommit votes (set at signing time).
     //
-    //   h2: epoch-change block committed under epoch 0 → cert.epoch = 0
+    //   h2: votes cast before on_commit(h2) → cert.epoch = 0
     assert_cert_epoch(&nodes, 2, 2, 0);
-    //   h3: first block committed after the transition → cert.epoch = 1
-    assert_cert_epoch(&nodes, 3, 3, 1);
-    //   h4: continued finalization in epoch 1 → cert.epoch = 1
+    //   h3: votes cast before on_commit(h2) (h3's QC triggers h2's commit)
+    //       → cert.epoch = 0  (the epoch flip is here, between h3 and h4)
+    assert_cert_epoch(&nodes, 3, 3, 0);
+    //   h4: votes cast after the epoch transition → cert.epoch = 1
     assert_cert_epoch(&nodes, 4, 4, 1);
 
     println!("\n[pqhs2_4node_qc_cert_epoch_boundary] PASS");
