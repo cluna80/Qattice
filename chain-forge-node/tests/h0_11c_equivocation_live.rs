@@ -258,42 +258,93 @@ impl Drop for NodeHandle {
     }
 }
 
-fn spawn_node(
-    name:     &'static str,
-    api_port: u16,
-    p2p_port: u16,
-    log_path: &std::path::Path,
-    peers:    &[u16],
+/// Read Alice's libp2p peer ID from her log (looks for "P2P listening … peer=12D3…").
+fn read_peer_id(log_path: &std::path::Path, timeout: Duration) -> String {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let text = std::fs::read_to_string(log_path).unwrap_or_default();
+        let clean = strip_ansi_early(&text);
+        if let Some(id) = clean.lines()
+            .filter(|l| l.contains("P2P listening"))
+            .find_map(|l| l.split("peer=").nth(1))
+            .map(|rest| rest.split_whitespace().next().unwrap_or("").to_string())
+            .filter(|id| id.starts_with("12D3"))
+        {
+            return id;
+        }
+        assert!(Instant::now() < deadline, "no libp2p peer id in {log_path:?} after 15s");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn strip_ansi_early(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            for c in chars.by_ref() { if c.is_ascii_alphabetic() { break; } }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn spawn_node_inner(
+    name:      &'static str,
+    api_port:  u16,
+    p2p_port:  u16,
+    data_dir:  &std::path::Path,
+    log_path:  &std::path::Path,
+    bootstrap: Option<&str>,
 ) -> NodeHandle {
     let log_file = std::fs::File::create(log_path)
-        .expect("create log file");
-    let bootstrap: Vec<String> = peers.iter()
-        .map(|&p| format!("/ip4/127.0.0.1/tcp/{p}"))
-        .collect();
+        .unwrap_or_else(|e| panic!("create log {log_path:?}: {e}"));
+    std::fs::create_dir_all(data_dir)
+        .unwrap_or_else(|e| panic!("create data dir {data_dir:?}: {e}"));
+    let short = name.trim_start_matches("qcb1");
     let mut cmd = Command::new(node_binary());
-    cmd.arg("--genesis").arg(genesis_path())
-       .arg("--validator").arg(name)
-       .arg("--api-port").arg(api_port.to_string())
-       .arg("--p2p-port").arg(p2p_port.to_string())
-       .arg("--key-file").arg(key_file(&name.trim_start_matches("qcb1")));
-    for addr in &bootstrap { cmd.arg("--bootstrap").arg(addr); }
+    cmd.args([
+        "--genesis",   genesis_path().to_str().unwrap(),
+        "--validator", name,
+        "--key-file",  key_file(short).to_str().unwrap(),
+        "--api-port",  &api_port.to_string(),
+        "--p2p-port",  &p2p_port.to_string(),
+        "--data-dir",  data_dir.to_str().unwrap(),
+    ]);
+    if let Some(b) = bootstrap { cmd.args(["--bootstrap", b]); }
     cmd.stdout(log_file.try_clone().unwrap()).stderr(log_file).stdin(Stdio::null());
     let process = cmd.spawn()
         .unwrap_or_else(|e| panic!("failed to spawn {name}: {e}"));
     NodeHandle { _name: name, process }
 }
 
+/// Spawn all four nodes. Alice starts first; her peer ID is read from her log
+/// before the other three are started with a full `/ip4/.../tcp/.../p2p/{id}`
+/// bootstrap address. This matches the pattern used by pqhs2_4node_live.
 fn spawn_devnet(api_ports: &[u16; 4], p2p_ports: &[u16; 4], log_dir: &std::path::Path)
     -> Vec<NodeHandle>
 {
-    let [aa, ba, ca, da] = *api_ports;
-    let [ap, bp, cp, dp] = *p2p_ports;
-    vec![
-        spawn_node("qcb1alice", aa, ap, &log_dir.join("qcb1alice.log"), &[bp, cp, dp]),
-        spawn_node("qcb1bob",   ba, bp, &log_dir.join("qcb1bob.log"),   &[ap, cp, dp]),
-        spawn_node("qcb1carol", ca, cp, &log_dir.join("qcb1carol.log"), &[ap, bp, dp]),
-        spawn_node("qcb1dave",  da, dp, &log_dir.join("qcb1dave.log"),  &[ap, bp, cp]),
-    ]
+    let alice_log  = log_dir.join("qcb1alice.log");
+    let alice_data = log_dir.join("qcb1alice-data");
+    let alice = spawn_node_inner(
+        "qcb1alice", api_ports[0], p2p_ports[0], &alice_data, &alice_log, None,
+    );
+    // Wait for Alice's peer ID before connecting the other nodes.
+    let peer_id  = read_peer_id(&alice_log, Duration::from_secs(15));
+    let bootstrap = format!("/ip4/127.0.0.1/tcp/{}/p2p/{peer_id}", p2p_ports[0]);
+    eprintln!("   bootstrap: {bootstrap}");
+
+    let mut nodes = vec![alice];
+    for (i, &name) in ["qcb1bob", "qcb1carol", "qcb1dave"].iter().enumerate() {
+        let idx  = i + 1;
+        let log  = log_dir.join(format!("{name}.log"));
+        let data = log_dir.join(format!("{name}-data"));
+        nodes.push(spawn_node_inner(
+            name, api_ports[idx], p2p_ports[idx], &data, &log, Some(&bootstrap),
+        ));
+    }
+    nodes
 }
 
 fn tempdir(tag: &str) -> PathBuf {
