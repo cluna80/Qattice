@@ -368,7 +368,8 @@ impl ConsensusEngine for PqHotStuffEngine {
         // is monotonically increasing across heights.  Using raw `round` caused
         // RoundBelowSigned failures at every new height because round resets to 1
         // while the slot still held the previous height's higher round number.
-        let proposal_view = crate::QuorumCertificate::view(height, round);
+        let proposal_view = crate::QuorumCertificate::checked_view(height, round)
+            .map_err(|e| ConsensusError::Internal(e.to_string()))?;
         let signature = if let Some(ctx) = self.signing_ctx.as_mut() {
             ctx.sign_proposal(self.epoch, proposal_view, block_id_bytes)
                 .map(|s| s.signature)
@@ -488,7 +489,26 @@ impl ConsensusEngine for PqHotStuffEngine {
         // safety-store round so this internal signing is consistent with the
         // external sign_local_timeout call in node.rs, which uses the same scheme
         // to prevent floor pollution across heights.
-        let view = crate::QuorumCertificate::view(height, old_round);
+        let view = match crate::QuorumCertificate::checked_view(height, old_round) {
+            Ok(v) => v,
+            Err(e) => {
+                // Round out of range: impossible in practice (would require > 10,000 rounds at a
+                // height), but we must not pass garbage to the signer.  Advance the round as normal
+                // (already done above) and return an unsigned Nil vote so the caller can still
+                // broadcast it and trigger the next round on peers.
+                tracing::error!(height, round = old_round, error = e, "on_timeout: view out of range, skipping sign");
+                return Ok(Vote {
+                    vote_type: VoteType::Nil,
+                    height,
+                    round: old_round,
+                    validator,
+                    block_hash: None,
+                    signature: vec![],
+                    scheme: Vote::default_scheme(),
+                    epoch: 0,
+                });
+            }
+        };
         let signature = if let Some(ctx) = self.signing_ctx.as_mut() {
             ctx.sign_timeout(&self.config.chain_id, self.epoch, view, self.high_qc.round as u64)
                 .map(|s| s.signature)
@@ -658,6 +678,12 @@ impl ConsensusEngine for PqHotStuffEngine {
         parent_round: u64,
         qc_round: u64,
     ) -> Result<Vec<u8>, String> {
+        // `round` is a global view number already computed by the caller (node.rs uses
+        // QuorumCertificate::checked_view).  We re-validate the upper bound here so that
+        // a misconfigured caller cannot silently pass u64::MAX or a wrapped value to the signer.
+        if round > (u64::MAX - crate::MAX_ROUNDS_PER_HEIGHT as u64) {
+            return Err(format!("sign_local_vote: view {round} is implausibly large (overflow guard)"));
+        }
         if let Some(ctx) = self.signing_ctx.as_mut() {
             let result = ctx.sign_vote(chain_id, epoch, round, block_id, parent_id, parent_round, qc_round)
                 .map(|s| s.signature);
@@ -678,6 +704,9 @@ impl ConsensusEngine for PqHotStuffEngine {
         round: u64,
         high_qc_round: u64,
     ) -> Result<Vec<u8>, String> {
+        if round > (u64::MAX - crate::MAX_ROUNDS_PER_HEIGHT as u64) {
+            return Err(format!("sign_local_timeout: view {round} is implausibly large (overflow guard)"));
+        }
         if let Some(ctx) = self.signing_ctx.as_mut() {
             let result = ctx.sign_timeout(chain_id, epoch, round, high_qc_round)
                 .map(|s| s.signature);
@@ -1068,6 +1097,43 @@ mod tests {
             "propose(h=2, r=1) must succeed after propose(h=1, r=5): \
              global view 20001 > 10005. \
              RoundBelowSigned here means the fix regressed (raw round used instead of view): {result:?}"
+        );
+    }
+
+    // R-PV-3: checked_view rejects round == MAX_ROUNDS_PER_HEIGHT (the collision boundary)
+    // in release builds (not just debug_assert!).
+    #[test]
+    fn checked_view_rejects_at_boundary() {
+        let boundary = 10_000u32; // = MAX_ROUNDS_PER_HEIGHT
+        assert!(
+            crate::QuorumCertificate::checked_view(1, boundary).is_err(),
+            "round == MAX_ROUNDS_PER_HEIGHT must be rejected"
+        );
+        assert!(
+            crate::QuorumCertificate::checked_view(1, boundary + 1).is_err(),
+            "round > MAX_ROUNDS_PER_HEIGHT must be rejected"
+        );
+        // One below the boundary must succeed.
+        assert!(
+            crate::QuorumCertificate::checked_view(1, boundary - 1).is_ok(),
+            "round == MAX_ROUNDS_PER_HEIGHT - 1 must be accepted"
+        );
+    }
+
+    // R-PV-4: checked_view rejects height values that would overflow u64.
+    // BlockHeight = u64; height * 10_000 overflows when height > u64::MAX / 10_000.
+    #[test]
+    fn checked_view_rejects_overflow() {
+        // Smallest height where height * MAX_ROUNDS_PER_HEIGHT overflows u64.
+        let overflow_height: BlockHeight = u64::MAX / 10_000 + 1;
+        let result = crate::QuorumCertificate::checked_view(overflow_height, 1);
+        assert!(result.is_err(), "overflowing height must be rejected: {result:?}");
+
+        // The height just below the overflow boundary must succeed.
+        let safe_height: BlockHeight = u64::MAX / 10_000;
+        assert!(
+            crate::QuorumCertificate::checked_view(safe_height, 1).is_ok(),
+            "height just below overflow boundary must be accepted"
         );
     }
 

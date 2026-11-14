@@ -1641,23 +1641,41 @@ pub struct QuorumCertificate {
     pub votes:      Vec<Vote>,
 }
 
-/// Maximum rounds per height before the global view formula `height × MAX_ROUNDS_PER_HEIGHT + round`
-/// would produce a collision between height H round R and height H+1 round R-MAX_ROUNDS_PER_HEIGHT.
-/// A round this high is impossible in practice (even one round per millisecond for 10 seconds
-/// gives only 10 000 rounds), but `view()` asserts this in debug builds so the invariant is
-/// machine-checked in tests.
+/// Maximum rounds per height for the global view formula `height × MAX_ROUNDS_PER_HEIGHT + round`.
+///
+/// At `round == MAX_ROUNDS_PER_HEIGHT`, `view(H, R)` would equal `view(H+1, 0)` — an exact
+/// collision.  The bound is enforced at runtime in both debug and release builds by
+/// `QuorumCertificate::checked_view`, which all signing paths call before reaching the signer.
 pub const MAX_ROUNDS_PER_HEIGHT: u32 = 10_000;
 
 impl QuorumCertificate {
+    /// Fallible view calculation — enforced in release builds.
+    ///
+    /// Returns `Err` when:
+    /// - `round >= MAX_ROUNDS_PER_HEIGHT` (view collision boundary), or
+    /// - the multiplication `height * MAX_ROUNDS_PER_HEIGHT` overflows `u64`.
+    ///
+    /// All signing call sites (`propose`, `sign_local_vote`, `sign_local_timeout`) must call
+    /// this and propagate the error before passing the view number to the signer.
+    pub fn checked_view(height: BlockHeight, round: Round) -> Result<u64, &'static str> {
+        if round >= MAX_ROUNDS_PER_HEIGHT {
+            return Err("round >= MAX_ROUNDS_PER_HEIGHT: view collision boundary exceeded");
+        }
+        let base = (height as u64)
+            .checked_mul(MAX_ROUNDS_PER_HEIGHT as u64)
+            .ok_or("height * MAX_ROUNDS_PER_HEIGHT overflows u64")?;
+        base.checked_add(round as u64)
+            .ok_or("view addition overflows u64")
+    }
+
     /// Canonical view number: used for ordering QCs across heights and rounds.
-    /// `round` must be < MAX_ROUNDS_PER_HEIGHT (asserted in debug builds).
+    ///
+    /// Panics in debug builds if `round >= MAX_ROUNDS_PER_HEIGHT` or overflow occurs.
+    /// Production signing paths must use `checked_view` instead.
+    #[cfg(any(test, debug_assertions))]
     pub fn view(height: BlockHeight, round: Round) -> u64 {
-        debug_assert!(
-            round < MAX_ROUNDS_PER_HEIGHT,
-            "round {round} >= MAX_ROUNDS_PER_HEIGHT ({MAX_ROUNDS_PER_HEIGHT}): \
-             view(H, R) would collide with view(H+1, R - MAX_ROUNDS_PER_HEIGHT)"
-        );
-        (height as u64) * (MAX_ROUNDS_PER_HEIGHT as u64) + (round as u64)
+        Self::checked_view(height, round)
+            .unwrap_or_else(|e| panic!("QuorumCertificate::view({height}, {round}): {e}"))
     }
 
     /// Total voting power represented in this QC.
@@ -4524,7 +4542,7 @@ mod tests {
 // Re-export the BFT engine types at crate root so callers can import them
 // without knowing which sub-module they live in.
 pub use tendermint::{TendermintEngine, EquivocationDetected};
-pub use tendermint::{HotStuffEngine, HotStuffPhase, QuorumCertificate, HotStuffNewView};
+pub use tendermint::{HotStuffEngine, HotStuffPhase, QuorumCertificate, HotStuffNewView, MAX_ROUNDS_PER_HEIGHT};
 pub use tendermint::new_hotstuff;
 
 /// Compile-time assertion that `chain_forge_consensus::ValidatorId` and

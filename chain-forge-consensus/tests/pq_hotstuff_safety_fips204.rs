@@ -63,6 +63,51 @@ fn prior(signer: &mut Fips204Signer) -> Store {
     s
 }
 
+// ── R-SS-1: cross-height reopen ───────────────────────────────────────────────
+//
+// A SafetyStore that signed a proposal at view V = height×10_000+round must
+// accept a proposal at view V' = (height+1)×10_000+1 after reopen, because
+// V' > V.  This exercises the durable-store path that R-PV-1 (engine mock) does
+// not cover.
+//
+// Before the global-view fix, the store held the raw round number.  After
+// signing at round=5 (height=1), the slot contained round=5.  Reopening and
+// signing at round=1 (height=2) → raw round=1 < 5 → RoundBelowSigned.
+//
+// With the global-view fix: view(1,5)=10005; view(2,1)=20001 > 10005 → OK.
+#[test]
+fn reopen_accepts_round1_proposal_at_next_height_after_higher_round() {
+    let mut s0 = signer(42);
+    let pk = s0.public_key().to_vec();
+
+    // Sign a proposal at height=1, round=5 → global view = 1*10_000+5 = 10005.
+    let view_h1_r5 = 1u64 * 10_000 + 5;
+    let mut s = init(&s0);
+    s.sign_proposal(1, view_h1_r5, &proposal(0xAA), &mut s0).unwrap();
+
+    // Persist and reopen.
+    let (st, ctr) = s.into_parts();
+    let mut s2 = open(&st, &ctr, &pk).expect("store must reopen cleanly");
+
+    // Sign a proposal at height=2, round=1 → global view = 2*10_000+1 = 20001.
+    // Must succeed because 20001 > 10005.
+    let view_h2_r1 = 2u64 * 10_000 + 1;
+    let result = s2.sign_proposal(1, view_h2_r1, &proposal(0xBB), &mut s0);
+    assert!(
+        result.is_ok(),
+        "RoundBelowSigned after cross-height reopen: view(2,1)=20001 must exceed \
+         prior slot view(1,5)=10005.  Got: {:?}",
+        result.unwrap_err()
+    );
+
+    // Sanity: going back to any view ≤ 10005 must be rejected.
+    let back = s2.sign_proposal(1, view_h1_r5, &proposal(0xCC), &mut s0);
+    assert!(
+        matches!(back, Err(SignError::RoundBelowSigned { .. })),
+        "proposal at view(1,5)=10005 must be rejected after slot advanced to 20001: {back:?}"
+    );
+}
+
 #[test]
 fn the_crate_contexts_are_exactly_the_approved_strings() {
     assert_eq!(CTX_VOTE, CTXS[0].1);
