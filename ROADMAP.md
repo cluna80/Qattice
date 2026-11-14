@@ -74,6 +74,38 @@ No FATAL, panic, equivocation, or double-execution on either run. Dave's pruned 
 
 ---
 
+## Phase 0.5 crash injection — `pqhs2_4node_crash_live` — sandbox compile-verified 2026-11-14
+
+**Branch:** `feat/pqhs2-fips204-signing` — head `71cf56f`
+
+**Purpose:** Prove that PQ-HotStuff-2 ML-DSA-65 signing safety is maintained under node kill and restart in a four-node live environment. Specifically: SafetyStore floors are honoured on every restart path; the surviving quorum makes forward progress; and state roots agree after the killed node catches up.
+
+**What is in `chain-forge-node/tests/pqhs2_4node_crash_live.rs`:**
+
+- **CJ-1 `crash_proposer_before_commit`** — Kill the proposer for height 5 (bob, index 1) before its proposal forms a QC. Three surviving nodes time out, elect a new proposer at round 2, and commit. Restart bob from the same data dir; bob reopens its SafetyStore and must honour the persisted floor. Verified: no `FloorViolation` / "violates the persisted floor" log line; all 4 nodes agree on `state_root` at the final height.
+- **CJ-2 `crash_voter_after_prevote`** — Kill carol (a non-proposer, index 2) after it has signed multiple votes across heights 1–5. Three-node quorum commits to height 10. Restart carol; floors prevent double-signing. Verified: no FloorViolation; all 4 agree.
+- **CJ-3 `crash_during_pruning`** — Run all 4 nodes past `PRUNE_THRESHOLD` (height > 20), then kill dave. Three survivors commit 3 more blocks. Restart dave from pruned data dir; it must catch up and its prune watermark must be ≥ `PRUNE_THRESHOLD`. Verified: watermark consistent; no FloorViolation; all 4 agree on `state_root`.
+
+**Port assignment:** API 19210–19213 / P2P 29210–29213 (distinct from Phase 0 DIS-TX suite 19200–19203).
+
+**Status:** Sandbox compile-verified (`cargo test --no-run`). Per CLAUDE.md ✅ only after confirmed passing on Windows (MINGW64).
+
+**Run (BossKing):**
+
+```
+cargo build -p chain-forge-node --features pq-hotstuff
+cargo test -p chain-forge-node --features pq-hotstuff \
+  --test pqhs2_4node_crash_live -- --nocapture
+```
+
+| Test | Criterion | Windows result |
+|---|---|---|
+| CJ-1 crash_proposer_before_commit | Proposer killed; 3 survivors commit; restart; no FloorViolation; 4-node state_root agree | ⬜ pending |
+| CJ-2 crash_voter_after_prevote | Voter killed post-sign; 3-node quorum; restart; no FloorViolation; 4-node agree | ⬜ pending |
+| CJ-3 crash_during_pruning | Kill past prune threshold; restart; watermark ≥ 20; no FloorViolation; 4-node agree | ⬜ pending |
+
+---
+
 ## FIPS 204 ML-DSA-65 durable signing — `pqhs2_4node_live` Windows-confirmed — 2026-11-14
 
 **Branch:** `feat/pqhs2-fips204-signing` — cleanup head `5234a5e` (binary tested at `62e6ef7`)
