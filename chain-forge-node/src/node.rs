@@ -4416,6 +4416,13 @@ impl Node {
                     prevote.scheme = "ml-dsa-65-fips204".to_string();
                 }
                 Ok(_) => {} // no signing context (test mode)
+                Err(ref e) if e.contains("FloorViolation") || e.contains("RoundBelowSigned") => {
+                    // Safety store floor is above the current view: this validator already signed
+                    // at a higher round (e.g. a timeout for this view fired first).  Act as an
+                    // observer for this round — do NOT latch, the store is healthy.
+                    warn!(error = %e, "PQ prevote safety floor — skipping vote for this round (observer mode)");
+                    return Ok(None);
+                }
                 Err(e) => {
                     error!(error = %e, "PQ prevote signing failed — halting signing");
                     self.latch_persistence_failure(&format!("PQ prevote sign failed: {e}"));
@@ -4464,6 +4471,10 @@ impl Node {
                     precommit.scheme = "ml-dsa-65-fips204".to_string();
                 }
                 Ok(_) => {}
+                Err(ref e) if e.contains("FloorViolation") || e.contains("RoundBelowSigned") => {
+                    warn!(error = %e, "PQ precommit safety floor — skipping vote for this round (observer mode)");
+                    return Ok(None);
+                }
                 Err(e) => {
                     error!(error = %e, "PQ precommit signing failed — halting signing");
                     self.latch_persistence_failure(&format!("PQ precommit sign failed: {e}"));
