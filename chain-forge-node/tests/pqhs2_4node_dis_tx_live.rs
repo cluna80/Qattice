@@ -45,7 +45,7 @@ const VALIDATORS:  &[&str] = &["qcb1alice", "qcb1bob", "qcb1carol", "qcb1dave"];
 const API_PORTS:   &[u16]  = &[19200, 19201, 19202, 19203];
 const P2P_PORTS:   &[u16]  = &[29200, 29201, 29202, 29203];
 
-const GENESIS_TEMPLATE: &str = "genesis-4node-pqhs2.json";
+const GENESIS_TEMPLATE: &str = "genesis-4node-pqhs2-fips204.json";
 const KEY_DIR:           &str = "keys/fips204";
 
 const CHAIN_ID:    &str = "qcb-devnet-4node-pqhs2-tx";
