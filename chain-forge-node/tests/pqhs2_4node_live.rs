@@ -315,7 +315,7 @@ fn poll_until_height(
 /// signed vote with the FIPS 204 backend.
 ///
 /// The node must have been started with `--data-dir`; the safety store is at
-/// `<data_dir>/pq-safety/<validator>/safety_state.cbor`.
+/// `<data_dir>/pq-safety/<validator>/pq_hotstuff_safety.state`.
 ///
 /// Returns `Some(description)` on success, `None` if the record path does not
 /// exist or no vote has been signed yet (record is in `Fresh` state).
@@ -327,22 +327,6 @@ fn verify_fips204_last_vote(validator: &str, data_dir: &PathBuf) -> Option<Strin
 
     let safety_dir = data_dir.join("pq-safety").join(validator);
     let record_path = safety_dir.join(STATE_FILE);
-
-    // Diagnostic: list what files exist under data_dir so we can confirm the path.
-    println!("   [diag] {validator}: checking {record_path:?}");
-    if safety_dir.exists() {
-        let entries: Vec<_> = std::fs::read_dir(&safety_dir)
-            .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.file_name()).collect())
-            .unwrap_or_default();
-        println!("   [diag] {validator}: safety_dir exists, files={entries:?}");
-    } else if data_dir.join("pq-safety").exists() {
-        let entries: Vec<_> = std::fs::read_dir(data_dir.join("pq-safety"))
-            .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.file_name()).collect())
-            .unwrap_or_default();
-        println!("   [diag] {validator}: pq-safety/ exists but no subdir for this validator, subdirs={entries:?}");
-    } else {
-        println!("   [diag] {validator}: pq-safety/ does NOT exist under data_dir={data_dir:?}");
-    }
 
     if !record_path.exists() {
         return None;
@@ -444,18 +428,6 @@ fn pqhs2_4node_reaches_target_height() {
         .map(|n| (n.validator, n.data_dir.clone()))
         .collect();
     drop(nodes); // kills and waits for all four node processes
-
-    // Diagnostic: grep node logs for signing_ctx=None to understand attach failures.
-    for name in &["qcb1alice", "qcb1bob", "qcb1carol", "qcb1dave"] {
-        let log = log_dir.join(format!("{name}.log"));
-        if let Ok(content) = std::fs::read_to_string(&log) {
-            let ctx_none = content.lines().filter(|l| l.contains("signing_ctx is None")).count();
-            let attach_ok = content.lines().filter(|l| l.contains("attach_signing_context called")).count();
-            let safety_fail = content.lines().filter(|l| l.contains("SafetyStore") && l.contains("FAILED")).count();
-            let load_key = content.lines().filter(|l| l.contains("load_signing_key")).count();
-            println!("   [diag-log] {name}: attach_ok={attach_ok} ctx_none_votes={ctx_none} safety_fail={safety_fail} load_key_lines={load_key}");
-        }
-    }
 
     let mut verified = 0usize;
     for (validator, data_dir) in &data_dirs {

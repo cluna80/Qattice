@@ -202,7 +202,6 @@ impl PqHotStuffEngine {
     /// any `propose` / `receive_vote` / `on_timeout`. After attaching, call
     /// `restore_floors` to reload hvr/hqr from the durable record.
     pub fn attach_signing_context(&mut self, ctx: Box<dyn EngineSigningContext>) {
-        tracing::info!("PqHotStuffEngine: attach_signing_context called (ptr={:p})", &*ctx);
         self.signing_ctx = Some(ctx);
     }
 
@@ -628,11 +627,7 @@ impl ConsensusEngine for PqHotStuffEngine {
         let genesis_qc = Qc::genesis();
         self.locked_qc = genesis_qc.clone();
         self.high_qc = genesis_qc;
-        tracing::warn!(
-            new_height = self.height,
-            signing_ctx_is_some = self.signing_ctx.is_some(),
-            "on_commit complete"
-        );
+        tracing::debug!(new_height = self.height, "on_commit complete");
         Ok(())
     }
 
@@ -703,7 +698,6 @@ impl ConsensusEngine for PqHotStuffEngine {
             }
             result
         } else {
-            tracing::warn!(chain_id, epoch, round, height = self.height, "sign_local_vote: signing_ctx is None — returning empty sig");
             Ok(vec![])
         }
     }
@@ -718,13 +712,11 @@ impl ConsensusEngine for PqHotStuffEngine {
         if let Some(ctx) = self.signing_ctx.as_mut() {
             let result = ctx.sign_timeout(chain_id, epoch, round, high_qc_round)
                 .map(|s| s.signature);
-            match &result {
-                Ok(sig) => tracing::debug!(chain_id, epoch, round, sig_len = sig.len(), "sign_local_timeout: signed"),
-                Err(e) => tracing::warn!(chain_id, epoch, round, error = %e, "sign_local_timeout: signing error"),
+            if let Err(ref e) = result {
+                tracing::warn!(chain_id, epoch, round, error = %e, "sign_local_timeout: signing error");
             }
             result
         } else {
-            tracing::warn!(chain_id, epoch, round, height = self.height, "sign_local_timeout: signing_ctx is None — returning empty sig");
             Ok(vec![])
         }
     }
