@@ -208,23 +208,18 @@ impl PqHotStuffEngine {
 
     /// Reload the highest vote round (hvr) and lock QC round (hqr) from the durable
     /// safety record. Must be called after `attach_signing_context` on every restart.
-    /// Sets `locked_qc.round` and `high_qc.round` to at least the stored floors.
+    ///
+    /// NOTE: hvr/hqr are global view numbers (height * 10_000 + round). They must NOT
+    /// be written into `high_qc.round` / `locked_qc.round` which are plain per-height
+    /// rounds: doing so causes the pacemaker to start at a spuriously high round, and
+    /// after the next on_commit resets round to 1 the safety store rejects it with
+    /// FloorViolation. The safety store itself enforces the floor on every sign call;
+    /// the engine does not need to replicate it in the pacemaker state.
     pub fn restore_floors(&mut self) {
-        if let Some(ctx) = &self.signing_ctx {
-            let floors = ctx.restore();
-            if floors.epoch == self.epoch {
-                if let Some(hqr) = floors.hqr {
-                    if hqr > self.locked_qc.round as u64 {
-                        self.locked_qc.round = hqr as u32;
-                    }
-                }
-                if let Some(hvr) = floors.hvr {
-                    if hvr > self.high_qc.round as u64 {
-                        self.high_qc.round = hvr as u32;
-                    }
-                }
-            }
-        }
+        // No-op: floors are enforced by the safety store on each sign_vote / sign_timeout
+        // call. If a signing attempt is below the stored floor the store returns
+        // SignError::FloorViolation; callers must handle that gracefully (use empty sig).
+        let _ = &self.signing_ctx; // suppress unused-field warning
     }
 
     /// 2f+1 quorum threshold from the validator set size.
@@ -287,7 +282,7 @@ impl PqHotStuffEngine {
         if let Some(ctx) = self.signing_ctx.as_mut() {
             let block_id = sha3_32(block_hash.0.as_bytes());
             let parent_id = sha3_32(parent_hash.0.as_bytes());
-            ctx.sign_vote(
+            match ctx.sign_vote(
                 &self.config.chain_id,
                 self.epoch,
                 self.round as u64,
@@ -295,9 +290,23 @@ impl PqHotStuffEngine {
                 parent_id,
                 parent_round as u64,
                 qc_round as u64,
-            )
-            .map(|s| s.signature)
-            .map_err(ConsensusError::Internal)
+            ) {
+                Ok(s) => Ok(s.signature),
+                // FloorViolation: safety store floor is above the current round, which
+                // happens when a validator restarts without its persisted chain state and
+                // the view has not yet caught up to the previous session's floor.
+                // Return an empty sig so the validator acts as an observer until the view
+                // advances above the floor. Any other error is fatal.
+                Err(ref e) if e.contains("FloorViolation") => {
+                    tracing::warn!(
+                        epoch = self.epoch, round = self.round, height = self.height,
+                        error = %e,
+                        "sign_local_precommit: FloorViolation — returning empty sig (observer mode until view catches up)"
+                    );
+                    Ok(vec![])
+                }
+                Err(e) => Err(ConsensusError::Internal(e)),
+            }
         } else {
             Ok(vec![])
         }

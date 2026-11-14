@@ -413,6 +413,12 @@ fn pqhs2_4node_reaches_target_height() {
     let timeout = Duration::from_secs(timeout_secs);
 
     let log_dir = std::env::temp_dir().join("pqhs2_4node_live");
+    // Always start from a clean state: stale safety-store floors from a previous
+    // run cause FloorViolation on the second height when restore_floors restores
+    // global view numbers into the pacemaker's plain-round fields.
+    if log_dir.exists() {
+        std::fs::remove_dir_all(&log_dir).expect("remove stale log dir");
+    }
     std::fs::create_dir_all(&log_dir).expect("create log dir");
 
     println!("\n╔══════════════════════════════════════════════════════╗");
