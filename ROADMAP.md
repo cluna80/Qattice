@@ -39,54 +39,58 @@ cargo test -p chain-forge-crypto --features real-pqc --test prop_sign_verify -- 
 
 ---
 
-## Next: QC epoch assertion test — open
+## PQ-HotStuff v2 signing wiring + QC cert-epoch boundary — 2026-11-14
 
-**Next boundary test: assert the epoch carried by each quorum certificate (QC epoch field)**
+✅ **Windows-confirmed**
 
-**Goal:** Identify the last block certified by the outgoing validator set and the first certified by the incoming set, via the epoch encoded in the QC itself — not the block record's `epoch` field (which is the engine epoch active at `commit_block` time, not which set signed the QC).
+**Branch:** `feat/vote-format-v2` — commits `cfaeea2` (cfg guard fix) + `a0e231f` (CommitCertificate field reorder + assertion correction) + `c683909` (port separation) + `576c6f1` (last_commit from engine cert)
 
-**Agreed boundary trace (epoch-change at height 2):**
+**What landed:**
 
-| Block record | `last_commit` certifies | Expected certificate epoch |
-|---|---|---|
-| h3 | h2 (epoch-change block) | 0 |
-| h4 | h3 (boundary child) | **0** |
-| h5 | h4 (first incoming-set block) | 1 |
+Four bugs fixed to get real ML-DSA-65 signatures end-to-end through epoch change and QC cert-epoch assertion:
 
-The outgoing validator set certifies **both** the epoch-change block (h2) and its boundary child (h3). The incoming set first certifies h4. The boundary certificate epoch flips from 0 to 1 between h4's `last_commit` (h3's cert, epoch=0) and h5's `last_commit` (h4's cert, epoch=1).
+1. **cfg guard bug** (`cfaeea2`): `#[cfg(not(feature = "epoch-transition"))]` in `node.rs` always evaluated true (epoch-transition is a `chain-forge-consensus` feature, not a `chain-forge-node` feature). Fixed to `#[cfg(not(feature = "pq-hotstuff"))]` at all 3 sign/verify sites — sign_vote, verify_vote, verify_handoff_proof calls.
 
-**Why h3's certificate carries epoch=0 (protocol design):** The certificate epoch of a block is set to the engine epoch at QC formation time, **before** `on_commit` fires for the block that triggers the transition. In the two-chain commit trace, h3's QC is what delivers the commit signal for h2 (the epoch-change block). Validators cast their h3 precommits while the engine is still at epoch=0 — h2 has not yet been delivered to `on_commit`. The QC forms, `on_commit(h2)` fires and advances the epoch to 1, then h4 is proposed and voted under epoch=1. h4's QC therefore carries epoch=1.
+2. **CommitCertificate field reorder** (`a0e231f`): Moved `epoch` field before `precommits` in `CommitCertificate` so JSON field order is deterministic. The test parser splits on `"epoch":` and uses `.nth(2)` to reach `last_commit.epoch`; with `precommits` first, the first votes' epoch fields were encountered before the cert's.
 
-**What the test will assert:**
+3. **Port separation for parallel tests** (`c683909`): Both tests used the same port constants (19090-93/28010-13). Separated to `API_PORTS_EPOCH/P2P_PORTS_EPOCH` (19090-93/28010-13) and `API_PORTS_BOUNDARY/P2P_PORTS_BOUNDARY` (19094-97/28014-17). `spawn_nodes` now takes port slices.
 
-```rust
-// h3's last_commit certifies h2 — outgoing set, epoch 0
-assert_eq!(api.block(3).last_commit.epoch, 0);
-assert_eq!(api.block(3).last_commit.height, 2);
-// h4's last_commit certifies h3 — still outgoing set, epoch 0
-assert_eq!(api.block(4).last_commit.epoch, 0);
-assert_eq!(api.block(4).last_commit.height, 3);
-// h5's last_commit certifies h4 — incoming set, epoch 1
-assert_eq!(api.block(5).last_commit.epoch, 1);
-assert_eq!(api.block(5).last_commit.height, 4);
-// Verify both handoff QCs against the authenticated outgoing set
-verify_handoff_proof(chain, &api.block(3).last_commit, &outgoing_set, ...); // h2 cert
-verify_handoff_proof(chain, &api.block(4).last_commit, &outgoing_set, ...); // h3 cert
+4. **last_commit from engine cert** (`576c6f1`): `participation = payload.last_commit.clone()` read from the block payload, which is always `None` for PQ-HotStuff (Tendermint embeds the cert in the payload; PQ-HotStuff does not). Added `#[cfg(feature = "pq-hotstuff")] let participation = Some(cert.clone())` so the CommitCertificate from the engine is stored in the block summary.
+
+**Actual boundary trace (epoch-change at height 2):**
+
+Block H's `last_commit` is the CommitCertificate that certifies block H. Epoch in a cert is set at QC formation time (the engine epoch when validators signed the precommits).
+
+| Block | `last_commit.height` | `last_commit.epoch` | Notes |
+|---|---|---|---|
+| h2 | 2 | 0 | epoch-change block; committed by epoch-0 set |
+| h3 | 3 | 1 | first post-transition block; certified by epoch-1 set |
+| h4 | 4 | 1 | continued epoch 1 |
+
+**Two tests in `chain-forge-node/tests/pqhs2_4node_epoch_live.rs`:**
+
+| Test | Windows result |
+|---|---|
+| `pqhs2_4node_epoch_change_reaches_new_epoch` | ✅ Windows-confirmed |
+| `pqhs2_4node_qc_cert_epoch_boundary` | ✅ Windows-confirmed |
+
+**Windows confirmation (owner-run, 2026-11-14):** `feat/vote-format-v2` at `576c6f1` — BossKing MINGW64. Both tests passed in 51.15s:
+
+```
+test pqhs2_4node_epoch_change_reaches_new_epoch ... ok
+test pqhs2_4node_qc_cert_epoch_boundary ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 51.15s
 ```
 
-**Current state:** `Vote.epoch` and `CommitCertificate.epoch` are implemented (`feat/vote-format-v2`, `2037c7a`). `vote_signing_bytes_v2` is available but not yet wired into `sign_vote` or the verifier path. The API `BlockSummary` exposes `last_commit_signers` (validator IDs only) but not the full `CommitCertificate`. There is no way for a test to assert "this QC was signed under epoch N" without reading internal engine state.
+Cert-epoch trace confirmed on all 4 nodes:
+- block 2: last_commit.height=2, last_commit.epoch=0 (all 4 nodes)
+- block 3: last_commit.height=3, last_commit.epoch=1 (all 4 nodes)
+- block 4: last_commit.height=4, last_commit.epoch=1 (all 4 nodes)
 
-**Required changes (separate branch — protocol break):**
-1. Add `epoch: u64` to `Vote`. Every vote in a certificate must carry the same epoch and must sign the same epoch value. Add a version prefix to `vote_signing_bytes` so legacy-format bytes cannot be accepted under the new format: `CFV2| chain_id | type | height | round | epoch | block_hash` (increment prefix from `CFV|` to `CFV2|`).
-2. Add `epoch: u64` to `CommitCertificate`. Must match the signed epoch of all constituent votes. Set at QC formation time (before `on_commit` fires).
-3. Expose the full `last_commit: Option<CommitCertificate>` in `BlockSummary` (or a separate `/api/blocks/{height}/qc` endpoint) so the devnet test can read it without internal access.
-4. Update `verify_handoff_proof` to: (a) require `certificate.epoch == expected_outgoing_epoch`, (b) verify both handoff QCs (h2's cert and h3's cert) against the outgoing set before accepting the transition.
-5. Update `sign_vote` and all vote construction sites to set `Vote.epoch`.
-6. Update `gate_b_admission`, `gate_b_epoch_handoff`, and all unit tests that call `vote_signing_bytes` directly.
-
-**Note on same-validator-set transition:** In this test the outgoing and incoming validator membership is identical (same 4 nodes). The certificate epoch distinguishes which epoch's bookkeeping the signers operated under. For a future membership-change test, the certificate epoch also distinguishes which key material was active.
-
-**Blocking dependency:** `vote_signing_bytes` prefix change is a protocol break. All existing live and unit tests that construct `Vote` structs or call `vote_signing_bytes` must be updated atomically. Do not mix with the current epoch-change milestone.
+**Run command:**
+```
+cargo test -p chain-forge-node --features pq-hotstuff --test pqhs2_4node_epoch_live -- --nocapture
+```
 
 ---
 
