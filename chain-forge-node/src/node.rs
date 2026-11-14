@@ -501,9 +501,13 @@ pub const MAX_RECENT_BLOCKS: usize = 100;
 /// the next persist).  Peers that need older history must catch up from
 /// another node that still holds it, or via a future snapshot-sync mechanism.
 ///
-/// 64 is enough to cover a node that is a full gossip-round behind and needs
+/// 20 is enough to cover a node that is a full gossip-round behind and needs
 /// to request the most recent N blocks.  The explorer already caps at 100.
-pub const CHAIN_STORE_KEEP: u64 = 64;
+/// (The standalone devnet used 64; 20 is used here because the two-chain
+/// PQ-HotStuff commit rule produces one block every ~9 s on the Windows
+/// devnet, so a larger window would make the pruning integration test take
+/// much longer to run.)
+pub const CHAIN_STORE_KEEP: u64 = 20;
 
 pub type SharedExplorer = Arc<Mutex<ExplorerState>>;
 
