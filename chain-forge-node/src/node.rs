@@ -3489,7 +3489,7 @@ impl Node {
                                                     true
                                                 }
                                                 Ok(_) => true,
-                                                Err(ref e) if e.contains("FloorViolation") || e.contains("RoundBelowSigned") => {
+                                                Err(ref e) if e.contains("violates the persisted floor") || e.contains("was already signed, so round") => {
                                                     warn!(error = %e, "PQ timeout safety floor — broadcasting unsigned timeout");
                                                     true
                                                 }
@@ -4350,7 +4350,7 @@ impl Node {
                                 true
                             }
                             Ok(_) => true,
-                            Err(ref e) if e.contains("FloorViolation") || e.contains("RoundBelowSigned") => {
+                            Err(ref e) if e.contains("violates the persisted floor") || e.contains("was already signed, so round") => {
                                 warn!(error = %e, "PQ catch-up timeout safety floor — broadcasting unsigned");
                                 true
                             }
@@ -4439,7 +4439,7 @@ impl Node {
                     prevote.scheme = "ml-dsa-65-fips204".to_string();
                 }
                 Ok(_) => {} // no signing context (test mode)
-                Err(ref e) if e.contains("FloorViolation") || e.contains("RoundBelowSigned") => {
+                Err(ref e) if e.contains("violates the persisted floor") || e.contains("was already signed, so round") => {
                     // Safety store floor is above the current view: this validator already signed
                     // at a higher round (e.g. a timeout for this view fired first).  Act as an
                     // observer for this round — do NOT latch, the store is healthy.
@@ -4494,7 +4494,7 @@ impl Node {
                     precommit.scheme = "ml-dsa-65-fips204".to_string();
                 }
                 Ok(_) => {}
-                Err(ref e) if e.contains("FloorViolation") || e.contains("RoundBelowSigned") => {
+                Err(ref e) if e.contains("violates the persisted floor") || e.contains("was already signed, so round") => {
                     warn!(error = %e, "PQ precommit safety floor — skipping vote for this round (observer mode)");
                     return Ok(None);
                 }
