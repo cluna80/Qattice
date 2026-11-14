@@ -710,9 +710,11 @@ fn crash_during_pruning() {
 
     // ── Phase 2: Run past prune threshold ────────────────────────────────────
 
-    let past_prune = PRUNE_THRESHOLD + 5;
+    // +2 is enough to verify the watermark advanced; +5 risks a timeout when
+    // 12 node processes run in parallel in a debug build on Windows (~29s/block).
+    let past_prune = PRUNE_THRESHOLD + 2;
     println!("── Phase 2: run to height {past_prune} (past PRUNE_THRESHOLD={PRUNE_THRESHOLD}) ──");
-    wait_height(&mut all, past_prune, Duration::from_secs(600), "Phase2-prune");
+    wait_height(&mut all, past_prune, Duration::from_secs(900), "Phase2-prune");
 
     // Verify at least one node has a watermark ≥ PRUNE_THRESHOLD.
     let watermarks: Vec<Option<u64>> = all.iter()
