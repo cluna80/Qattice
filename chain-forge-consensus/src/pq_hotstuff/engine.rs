@@ -406,8 +406,13 @@ impl ConsensusEngine for PqHotStuffEngine {
         let block_id_bytes = sha3_32(block_hash.0.as_bytes());
 
         // Sign via SafetyStore when a context is attached (QAT-07); otherwise sign-later.
+        // Use the global view number (height * 10_000 + round) so the proposal slot
+        // is monotonically increasing across heights.  Using raw `round` caused
+        // RoundBelowSigned failures at every new height because round resets to 1
+        // while the slot still held the previous height's higher round number.
+        let proposal_view = crate::QuorumCertificate::view(height, round);
         let signature = if let Some(ctx) = self.signing_ctx.as_mut() {
-            ctx.sign_proposal(self.epoch, round as u64, block_id_bytes)
+            ctx.sign_proposal(self.epoch, proposal_view, block_id_bytes)
                 .map(|s| s.signature)
                 .map_err(ConsensusError::Internal)?
         } else {

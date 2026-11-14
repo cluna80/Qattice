@@ -110,11 +110,10 @@ fn genesis_path() -> PathBuf {
         // Patch chain_id so nodes don't collide with other live test networks.
         g["chain_id"] = serde_json::Value::String(CHAIN_ID.to_string());
 
-        // Use a longer round timeout so the pacemaker waits long enough for
-        // consecutive QCs to form (propose_timeout_ms = block_time_ms * 3).
-        // The shared genesis uses 2000ms (6s rounds) which causes escalating
-        // round drift across heights on Windows.  10000ms gives 30s rounds —
-        // well within the 1800s Phase-4 budget and fixes the consecutive-QC gap.
+        // 10 s heartbeat interval gives Windows devnet more timing margin for
+        // gossip propagation, vote accumulation, and QC formation between
+        // heartbeat ticks.  The default 2 s rounds work in CI but can produce
+        // spurious stalls on Windows where I/O latency is higher.
         g["consensus"]["block_time_ms"] = serde_json::Value::Number(10_000.into());
 
         // Enable signature enforcement for user transactions.
