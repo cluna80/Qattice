@@ -1840,6 +1840,13 @@ pub struct HotStuffEngine {
     /// Equivocation evidence pending draining by the node.
     pending_equivocations: Vec<crate::tendermint::EquivocationDetected>,
 
+    /// All-phases vote tracker: accepts every inbound vote regardless of the
+    /// current phase so conflicting votes can be detected even when the engine
+    /// is in WaitingForPrepare (e.g. externally-injected gossip votes that
+    /// arrive just after a commit). Cleared alongside the per-phase accumulators
+    /// in `reset_round_state`.
+    all_votes: HsVoteAccum,
+
     /// VCA-derived quorum threshold (replaces static 2n/3+1 when set).
     pub(crate) vca_quorum: Option<u64>,
 }
@@ -1869,6 +1876,7 @@ impl HotStuffEngine {
             locked_qc:             None,
             new_views:             BTreeMap::new(),
             pending_equivocations: Vec::new(),
+            all_votes:             HsVoteAccum::default(),
             vca_quorum:            None,
         }
     }
@@ -1908,6 +1916,7 @@ impl HotStuffEngine {
         self.prepare_votes.clear();
         self.precommit_votes.clear();
         self.commit_votes.clear();
+        self.all_votes.clear();
         self.new_views.clear();
         self.phase = HotStuffPhase::WaitingForPrepare;
     }
@@ -2132,6 +2141,10 @@ impl ConsensusEngine for HotStuffEngine {
 
         match self.phase {
             HotStuffPhase::CollectingPrepareVotes => {
+                // Track in all_votes for cross-phase equivocation detection.
+                if let Err(ev) = self.all_votes.accept(vote.clone(), power) {
+                    self.pending_equivocations.push(ev);
+                }
                 match self.prepare_votes.accept(vote.clone(), power) {
                     Err(ev) => { self.pending_equivocations.push(ev); }
                     Ok(_) => {}
@@ -2153,6 +2166,9 @@ impl ConsensusEngine for HotStuffEngine {
                 }
             }
             HotStuffPhase::CollectingPreCommitVotes => {
+                if let Err(ev) = self.all_votes.accept(vote.clone(), power) {
+                    self.pending_equivocations.push(ev);
+                }
                 match self.precommit_votes.accept(vote.clone(), power) {
                     Err(ev) => { self.pending_equivocations.push(ev); }
                     Ok(_) => {}
@@ -2174,6 +2190,9 @@ impl ConsensusEngine for HotStuffEngine {
                 }
             }
             HotStuffPhase::CollectingCommitVotes => {
+                if let Err(ev) = self.all_votes.accept(vote.clone(), power) {
+                    self.pending_equivocations.push(ev);
+                }
                 match self.commit_votes.accept(vote.clone(), power) {
                     Err(ev) => { self.pending_equivocations.push(ev); }
                     Ok(_) => {}
@@ -2191,10 +2210,17 @@ impl ConsensusEngine for HotStuffEngine {
                 }
             }
             HotStuffPhase::WaitingForPrepare | HotStuffPhase::Committed => {
+                // Cannot use the vote for consensus in this phase, but still
+                // track it in `all_votes` so that a conflicting vote for the
+                // same validator/height/round triggers equivocation detection
+                // even if both votes arrive while we are between phases.
+                if let Err(ev) = self.all_votes.accept(vote.clone(), power) {
+                    self.pending_equivocations.push(ev);
+                }
                 tracing::debug!(
                     phase = ?self.phase,
                     validator = %vote.validator,
-                    "HotStuff: vote in unexpected phase, ignoring"
+                    "HotStuff: vote in unexpected phase, tracking for equivocation detection only"
                 );
             }
         }
