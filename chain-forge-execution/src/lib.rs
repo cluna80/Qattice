@@ -3530,6 +3530,14 @@ impl Executor {
         // Nonce check runs before signature verification: it is a cheap state
         // lookup that catches replays and out-of-sequence txs before any crypto.
         {
+            // Executor-level guard independent of check_tx admission: a crafted
+            // block proposal could bypass the mempool's u64::MAX admission check.
+            if tx.nonce == u64::MAX {
+                return TransactionResult::err(
+                    tx.id.clone(), gas_required, tx.gas_limit,
+                    "nonce u64::MAX is reserved and not permitted".to_string(),
+                );
+            }
             let expected_nonce = state.get_account(&tx.sender)
                 .map(|a| a.nonce).unwrap_or(0);
             if tx.nonce != expected_nonce {
@@ -5091,6 +5099,16 @@ impl Executor {
         }
 
         // Nonce check
+        // Executor-level guard independent of check_tx admission: a crafted
+        // block proposal could bypass the mempool's u64::MAX admission check.
+        if tx.nonce == u64::MAX {
+            return TransactionResult::err(
+                tx.id.clone(),
+                gas_required,
+                tx.gas_limit,
+                "nonce u64::MAX is reserved and not permitted".to_string(),
+            );
+        }
         let expected_nonce = state.get_account(&tx.sender)
             .map(|a| a.nonce)
             .unwrap_or(0);
@@ -8434,6 +8452,59 @@ mod tests {
         let mut tx = minimal_tx("qcb1alice", 100_000);
         tx.nonce = u64::MAX;
         assert!(check_tx(&tx, 0, 0).is_err(), "nonce=u64::MAX must be rejected");
+    }
+
+    // NR-05 (H0-4): executor has an independent nonce=u64::MAX guard so a
+    // crafted block that bypasses check_tx admission cannot trigger overflow
+    // in increment_nonce().
+    #[test]
+    fn executor_rejects_nonce_u64_max_independent_of_check_tx() {
+        let (exec, mut state) = setup();
+        let alice0 = state.get_account("qcb1alice").unwrap().balance_of("uqcb");
+
+        // Advance Alice's account nonce to u64::MAX - 1 directly in state,
+        // simulating a long-lived account without going through the admission gate.
+        {
+            let acct = state.get_account_mut("qcb1alice").unwrap();
+            acct.nonce = u64::MAX - 1;
+        }
+        state.refresh_leaf("qcb1alice");
+
+        // A tx with nonce=u64::MAX-1 matches the expected nonce and should succeed.
+        let tx_ok = Transaction::transfer("nr05-ok", "qcb1alice", "qcb1bob", "uqcb", 1, u64::MAX - 1);
+        let fee_ok = gas_for(&exec, &tx_ok);
+        let r_ok = exec.execute_tx(&tx_ok, &mut state, 0);
+        assert!(r_ok.success, "nonce=u64::MAX-1 must succeed: {:?}", r_ok.error);
+        assert_eq!(
+            state.get_account("qcb1alice").unwrap().nonce, u64::MAX,
+            "nonce must have incremented to u64::MAX",
+        );
+        assert_eq!(
+            state.get_account("qcb1alice").unwrap().balance_of("uqcb"),
+            alice0 - 1 - fee_ok,
+            "transfer + fee deducted",
+        );
+
+        // A tx with nonce=u64::MAX must be rejected by the executor itself —
+        // even though check_tx would also block it, this proves the executor
+        // does not rely on admission as its only defense against overflow.
+        let tx_max = Transaction::transfer("nr05-max", "qcb1alice", "qcb1bob", "uqcb", 1, u64::MAX);
+        let r_max = exec.execute_tx(&tx_max, &mut state, 0);
+        assert!(!r_max.success, "nonce=u64::MAX must be rejected by the executor");
+        assert!(
+            r_max.error.as_deref().unwrap_or("").contains("u64::MAX"),
+            "error must mention u64::MAX, got: {:?}", r_max.error,
+        );
+        // Balance and nonce must be unchanged (fee_charged=0 on this rejection).
+        let alice_after = state.get_account("qcb1alice").unwrap();
+        assert_eq!(
+            alice_after.balance_of("uqcb"), alice0 - 1 - fee_ok,
+            "rejected u64::MAX tx must not charge a fee",
+        );
+        assert_eq!(
+            alice_after.nonce, u64::MAX,
+            "nonce must not advance past u64::MAX",
+        );
     }
 
     #[test]

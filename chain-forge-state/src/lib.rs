@@ -358,7 +358,12 @@ impl AccountState {
 
     /// Increment nonce after a transaction is accepted.
     pub fn increment_nonce(&mut self) {
-        self.nonce += 1;
+        // Admission (check_tx) blocks nonce=u64::MAX, and the executor has an
+        // independent guard, so this should never overflow. Use checked_add so
+        // any bypass that reaches here panics loudly rather than wrapping to 0.
+        self.nonce = self.nonce
+            .checked_add(1)
+            .expect("nonce overflow: u64::MAX must be blocked before increment_nonce");
     }
 
     /// Canonical byte serialisation for Merkle hashing.
