@@ -98,11 +98,22 @@ cargo test -p chain-forge-node --features pq-hotstuff \
   --test pqhs2_4node_crash_live -- --nocapture
 ```
 
-| Test | Criterion | Windows result |
+**Windows confirmation (owner-run, BossKing MINGW64, 2026-11-14):**
+
+```
+cargo test -p chain-forge-node --features pq-hotstuff \
+  --test pqhs2_4node_crash_live -- --nocapture
+```
+
+Commit `e5f566b`; total run time 1131.25s.
+
+| Test | Criterion | Result |
 |---|---|---|
-| CJ-1 crash_proposer_before_commit | Proposer killed; 3 survivors commit; restart; no FloorViolation; 4-node state_root agree | ⬜ pending |
-| CJ-2 crash_voter_after_prevote | Voter killed post-sign; 3-node quorum; restart; no FloorViolation; 4-node agree | ⬜ pending |
-| CJ-3 crash_during_pruning | Kill past prune threshold; restart; watermark ≥ 20; no FloorViolation; 4-node agree | ⬜ pending |
+| CJ-1 crash_proposer_before_commit | Proposer (bob) killed before QC; 3 survivors reach height 7; restart; no signing latch; 4-node state_root `c103cafdb5…` | ✅ |
+| CJ-2 crash_voter_after_prevote | Voter (carol) killed post-sign; 3-node quorum to height 10; restart; no signing latch; 4-node state_root `c103cafdb5…` | ✅ |
+| CJ-3 crash_during_pruning | All 4 to height 22; watermarks `[3,3,3,3]` (pruning fired); dave killed; 3 survivors to 25; dave restarts from pruned data; watermark 9; 4-node state_root `c103cafdb5…` | ✅ |
+
+**Signing-safety observation:** Observer-mode floor events appear in the logs of restarted nodes (SafetyStore correctly detects and refuses below-floor signing while the pacemaker catches up). This is expected correct behaviour. The safety check asserts no signing latch (`latch_persistence_failure`) fired — none did on any node.
 
 ---
 
