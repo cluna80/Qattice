@@ -3481,6 +3481,13 @@ impl Node {
                                                 true
                                             }
                                             Ok(_) => true, // no context (test mode)
+                                            Err(ref e) if e.contains("FloorViolation") || e.contains("RoundBelowSigned") => {
+                                                // Safety floor already above this view (e.g. a vote at this view
+                                                // was signed before the pacemaker fired).  Broadcast unsigned timeout
+                                                // so the round still advances on other nodes.
+                                                warn!(error = %e, "PQ timeout safety floor — broadcasting unsigned timeout (observer mode)");
+                                                true
+                                            }
                                             Err(e) => {
                                                 error!(error = %e, "PQ timeout signing failed");
                                                 self.latch_persistence_failure(&format!("PQ timeout sign failed: {e}"));
