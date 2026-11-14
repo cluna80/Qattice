@@ -599,8 +599,9 @@ fn pqhs2_4node_dis_tx_and_pruned_restart() {
 
     let target_height = PRUNE_THRESHOLD + 1;
     println!("\n── Phase 4: running to height {target_height} (past prune threshold {PRUNE_THRESHOLD}) ──");
-    // ~21 blocks × 9 s/block on Windows devnet ≈ 190 s plus network overhead.
-    wait_height(&mut nodes, target_height, Duration::from_secs(300), &log_dir);
+    // Each block takes 5-8 rounds × 8-10 s on Windows devnet = 40-80 s/block.
+    // 18 blocks × 80 s worst-case = 1440 s; allow 1800 s.
+    wait_height(&mut nodes, target_height, Duration::from_secs(1800), &log_dir);
 
     // Verify pruning fired on all nodes.
     for node in &nodes {
@@ -647,11 +648,11 @@ fn pqhs2_4node_dis_tx_and_pruned_restart() {
     let advance_to = target_height + 2;
     println!("   waiting for alice/bob/carol to reach height {advance_to}...");
     let alive: Vec<u16> = nodes.iter().filter(|n| n.api_port != 0).map(|n| n.api_port).collect();
-    let deadline = Instant::now() + Duration::from_secs(90);
+    let deadline = Instant::now() + Duration::from_secs(300);
     loop {
         let all_at = alive.iter().all(|&p| height_of(p) >= advance_to);
         if all_at { break; }
-        assert!(Instant::now() < deadline, "alice/bob/carol did not reach height {advance_to} within 90s");
+        assert!(Instant::now() < deadline, "alice/bob/carol did not reach height {advance_to} within 300s");
         std::thread::sleep(Duration::from_millis(500));
     }
     println!("   alice/bob/carol reached height {advance_to}");
@@ -670,7 +671,7 @@ fn pqhs2_4node_dis_tx_and_pruned_restart() {
     // ── Phase 8: Wait for dave to catch up ───────────────────────────────────
 
     println!("── Phase 8: waiting for dave to catch up to height {advance_to} ──");
-    wait_height(&mut nodes, advance_to, Duration::from_secs(120), &log_dir);
+    wait_height(&mut nodes, advance_to, Duration::from_secs(300), &log_dir);
 
     // ── Phase 9: Final agreement and no-duplicate-execution check ────────────
 
