@@ -619,6 +619,11 @@ impl ConsensusEngine for PqHotStuffEngine {
         let genesis_qc = Qc::genesis();
         self.locked_qc = genesis_qc.clone();
         self.high_qc = genesis_qc;
+        tracing::warn!(
+            new_height = self.height,
+            signing_ctx_is_some = self.signing_ctx.is_some(),
+            "on_commit complete"
+        );
         Ok(())
     }
 
