@@ -29,6 +29,44 @@ The stack is clean. #164 is ready to merge into #161 when #161 and #160 are appr
 
 ---
 
+## PQ-HotStuff-2 DIS TX + pruned restart — `pqhs2_4node_dis_tx_and_pruned_restart` Windows-confirmed — 2026-11-14
+
+**Branch:** `feat/pqhs2-fips204-signing` — head `606ee48`
+
+**What landed:**
+
+- `pqhs2_4node_dis_tx_live.rs` — 9-phase 4-node PQ-HotStuff-2 integration test: ML-DSA-65 DIS-signed transfer TX, 4-node state-root agreement, replay rejection, prune to watermark ≥ 1, kill + sync restart of pruned node, no-double-execution check.
+- **Root cause fixed (proposal signing floor):** `PqHotStuffEngine::propose` passed `round as u64` (raw per-height round, resets to 1 each height) to `sign_proposal` on the safety store. The safety store's `Proposal` slot persisted across heights within an epoch. After height H committed at round R, the slot held `round = R`. Signing a proposal for round 1 of height H+1 triggered `RoundBelowSigned` (1 < R), causing the proposer to silently fail (debug-logged), set `last_proposed`, and never retry — so every height required R rounds of stall timeouts before round R+1 could finally succeed. Fix: use `QuorumCertificate::view(height, round) = height * 10_000 + round` for proposal signing (the same global view number already used for vote and timeout signing), ensuring the proposal slot is monotonically increasing across height boundaries.
+
+**Acceptance gate:**
+
+| Phase | Criterion | Result |
+|---|---|---|
+| 1 | 4 nodes reach height 2 | ✅ 58.6s |
+| 2 | ML-DSA-65 DIS transfer TX committed (height 3) | ✅ |
+| 2 | 4-node state-root agreement at height 3 | ✅ |
+| 3 | Replay of same tx_id rejected (HTTP 400) | ✅ |
+| 4 | 4 nodes reach height 21 (past prune threshold) | ✅ 580.7s |
+| 4 | chain_store_watermark ≥ 1 on all nodes | ✅ |
+| 5 | 4-node block_hash + state_root agreement at height 21 | ✅ |
+| 6–8 | dave killed, restarted from pruned data, catches up to height 23 | ✅ 21.2s |
+| 9 | 4-node agreement at height 23 after restart | ✅ |
+| 9 | receiver balance = 100 000 uqcb (no double-execution) | ✅ |
+
+**Windows confirmation (owner-run, BossKing MINGW64, `606ee48`):**
+
+```
+cargo test -p chain-forge-node --test pqhs2_4node_dis_tx_live --features pq-hotstuff -- --nocapture
+```
+
+| Run | Result | Time |
+|---|---|---|
+| 1 | ✅ PASS | 785.13s |
+
+No FATAL, panic, equivocation, or double-execution. Dave's pruned restart synced cleanly in 21.2s. Final state root `d357d1a4…` agreed on all 4 nodes at height 23.
+
+---
+
 ## FIPS 204 ML-DSA-65 durable signing — `pqhs2_4node_live` Windows-confirmed — 2026-11-14
 
 **Branch:** `feat/pqhs2-fips204-signing` — cleanup head `5234a5e` (binary tested at `62e6ef7`)
