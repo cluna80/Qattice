@@ -104,7 +104,7 @@ fn genesis_path() -> PathBuf {
 }
 
 fn key_file(label: &str) -> PathBuf {
-    repo_root().join("tests").join("devnet").join("keys")
+    repo_root().join("tests").join("devnet").join("keys").join("mldsa")
         .join(format!("{label}.key.json"))
 }
 
@@ -122,11 +122,10 @@ impl Drop for NodeHandle {
 
 fn spawn_node(
     name: &str, api: u16, p2p: u16,
-    log_dir: &PathBuf, data_dir: &PathBuf, peers: &[u16],
+    log_dir: &PathBuf, data_dir: &PathBuf, bootstrap: &str,
 ) -> NodeHandle {
     std::fs::create_dir_all(data_dir).unwrap();
     let log = std::fs::File::create(log_dir.join(format!("{name}.log"))).unwrap();
-    let bootstrap: Vec<String> = peers.iter().map(|&p| format!("/ip4/127.0.0.1/tcp/{p}")).collect();
     let mut cmd = Command::new(node_bin());
     cmd.arg("--genesis").arg(genesis_path())
        .arg("--validator").arg(name)
@@ -134,27 +133,55 @@ fn spawn_node(
        .arg("--p2p-port").arg(p2p.to_string())
        .arg("--data-dir").arg(data_dir)
        .arg("--key-file").arg(key_file(name.strip_prefix("qcb1").unwrap_or(name)));
-    for addr in &bootstrap { cmd.arg("--bootstrap").arg(addr); }
+    if !bootstrap.is_empty() { cmd.arg("--bootstrap").arg(bootstrap); }
     // Storage format 2 test switch (default OFF): CF_TEST_STORAGE_V2=1 runs this test on the experimental v2 layout.
     if std::env::var_os("CF_TEST_STORAGE_V2").is_some() { cmd.arg("--storage-v2-experimental"); }
     cmd.stdout(log.try_clone().unwrap()).stderr(log).stdin(Stdio::null());
     NodeHandle { _proc: cmd.spawn().unwrap_or_else(|e| panic!("spawn {name}: {e}")) }
 }
 
+
+fn read_peer_id(log_path: &std::path::Path, timeout: std::time::Duration) -> String {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let text = std::fs::read_to_string(log_path).unwrap_or_default();
+        let mut clean = String::with_capacity(text.len());
+        let mut in_esc = false;
+        for c in text.chars() {
+            if c == '\x1b' { in_esc = true; continue; }
+            if in_esc { if c == 'm' { in_esc = false; } continue; }
+            clean.push(c);
+        }
+        if let Some(id) = clean.lines()
+            .filter(|l| l.contains("P2P listening"))
+            .find_map(|l| l.split("peer=").nth(1))
+            .map(|rest| rest.split_whitespace().next().unwrap_or("").to_string())
+            .filter(|id| id.starts_with("12D3"))
+        {
+            return id;
+        }
+        assert!(std::time::Instant::now() < deadline, "no libp2p peer id in {:?}", log_path);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
 fn spawn_devnet(ports: &Ports, log_dir: &PathBuf) -> Vec<NodeHandle> {
-    let names = ["qcb1alice", "qcb1bob", "qcb1carol", "qcb1dave"];
-    let peers_list = [
-        vec![ports.bob_p2p, ports.carol_p2p, ports.dave_p2p],
-        vec![ports.alice_p2p, ports.carol_p2p, ports.dave_p2p],
-        vec![ports.alice_p2p, ports.bob_p2p, ports.dave_p2p],
-        vec![ports.alice_p2p, ports.bob_p2p, ports.carol_p2p],
-    ];
-    let api_ports  = [ports.alice_api, ports.bob_api, ports.carol_api, ports.dave_api];
     let p2p_ports  = [ports.alice_p2p, ports.bob_p2p, ports.carol_p2p, ports.dave_p2p];
-    names.iter().enumerate().map(|(i, &name)| {
-        let data_dir = log_dir.join(format!("data-{}", name.strip_prefix("qcb1").unwrap_or(name)));
-        spawn_node(name, api_ports[i], p2p_ports[i], log_dir, &data_dir, &peers_list[i])
-    }).collect()
+    let api_ports  = [ports.alice_api, ports.bob_api, ports.carol_api, ports.dave_api];
+    let names = ["qcb1alice", "qcb1bob", "qcb1carol", "qcb1dave"];
+
+    let alice_data = log_dir.join("data-alice");
+    let alice_node = spawn_node(names[0], api_ports[0], p2p_ports[0], log_dir, &alice_data, "");
+    let alice_log  = log_dir.join("qcb1alice.log");
+    let alice_pid  = read_peer_id(&alice_log, std::time::Duration::from_secs(15));
+    let alice_bootstrap = format!("/ip4/127.0.0.1/tcp/{}/p2p/{alice_pid}", p2p_ports[0]);
+
+    let mut nodes = vec![alice_node];
+    for i in 1..4 {
+        let short = names[i].strip_prefix("qcb1").unwrap_or(names[i]);
+        let data_dir = log_dir.join(format!("data-{short}"));
+        nodes.push(spawn_node(names[i], api_ports[i], p2p_ports[i], log_dir, &data_dir, &alice_bootstrap));
+    }
+    nodes
 }
 
 /// Read the last `n` lines of a log file for diagnostic output.

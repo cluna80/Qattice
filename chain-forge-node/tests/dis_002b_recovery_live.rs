@@ -118,7 +118,7 @@ fn genesis_path() -> PathBuf {
 }
 
 fn key_file(label: &str) -> PathBuf {
-    manifest_dir().join("tests").join("devnet").join("keys")
+    manifest_dir().join("tests").join("devnet").join("keys").join("mldsa")
         .join(format!("{label}.key.json"))
 }
 
@@ -143,7 +143,7 @@ fn devnet_dirs() -> PathBuf {
 fn spawn_node(
     name: &str, api: u16, p2p: u16,
     log_dir: &PathBuf,
-    peers: &[u16],
+    bootstrap: &str,
     key_file_path: Option<PathBuf>,
     data_dir: Option<PathBuf>,
 ) -> NodeHandle {
@@ -155,9 +155,7 @@ fn spawn_node(
        .arg("--validator").arg(name)
        .arg("--api-port").arg(api.to_string())
        .arg("--p2p-port").arg(p2p.to_string());
-    for &p in peers {
-        cmd.arg("--bootstrap").arg(format!("/ip4/127.0.0.1/tcp/{p}"));
-    }
+    if !bootstrap.is_empty() { cmd.arg("--bootstrap").arg(bootstrap); }
     if let Some(kf) = key_file_path {
         cmd.arg("--key-file").arg(kf);
     }
@@ -174,6 +172,30 @@ fn spawn_node(
     NodeHandle { name: name.to_string(), process, log_path }
 }
 
+fn read_peer_id(log_path: &std::path::Path, timeout: std::time::Duration) -> String {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let text = std::fs::read_to_string(log_path).unwrap_or_default();
+        let mut clean = String::with_capacity(text.len());
+        let mut in_esc = false;
+        for c in text.chars() {
+            if c == '\x1b' { in_esc = true; continue; }
+            if in_esc { if c == 'm' { in_esc = false; } continue; }
+            clean.push(c);
+        }
+        if let Some(id) = clean.lines()
+            .filter(|l| l.contains("P2P listening"))
+            .find_map(|l| l.split("peer=").nth(1))
+            .map(|rest| rest.split_whitespace().next().unwrap_or("").to_string())
+            .filter(|id| id.starts_with("12D3"))
+        {
+            return id;
+        }
+        assert!(std::time::Instant::now() < deadline, "no libp2p peer id in {:?}", log_path);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
 fn spawn_devnet(ports: &DevnetPorts) -> [NodeHandle; 4] {
     let base  = devnet_dirs();
     let log_dir = base.join("logs");
@@ -185,15 +207,14 @@ fn spawn_devnet(ports: &DevnetPorts) -> [NodeHandle; 4] {
     };
     let dd = |name: &str| -> Option<PathBuf> { Some(base.join("data").join(name)) };
 
+    let alice = spawn_node("qcb1alice", ports.alice_api, ports.alice_p2p, &log_dir, "", kf("alice"), dd("qcb1alice"));
+    let alice_pid = read_peer_id(&log_dir.join("qcb1alice.log"), std::time::Duration::from_secs(15));
+    let ab = format!("/ip4/127.0.0.1/tcp/{}/p2p/{alice_pid}", ports.alice_p2p);
     [
-        spawn_node("qcb1alice", ports.alice_api, ports.alice_p2p, &log_dir,
-            &[ports.bob_p2p, ports.carol_p2p, ports.dave_p2p], kf("alice"), dd("qcb1alice")),
-        spawn_node("qcb1bob",   ports.bob_api,   ports.bob_p2p,   &log_dir,
-            &[ports.alice_p2p, ports.carol_p2p, ports.dave_p2p], kf("bob"), dd("qcb1bob")),
-        spawn_node("qcb1carol", ports.carol_api, ports.carol_p2p, &log_dir,
-            &[ports.alice_p2p, ports.bob_p2p, ports.dave_p2p], kf("carol"), dd("qcb1carol")),
-        spawn_node("qcb1dave",  ports.dave_api,  ports.dave_p2p,  &log_dir,
-            &[ports.alice_p2p, ports.bob_p2p, ports.carol_p2p], kf("dave"), dd("qcb1dave")),
+        alice,
+        spawn_node("qcb1bob",   ports.bob_api,   ports.bob_p2p,   &log_dir, &ab, kf("bob"),   dd("qcb1bob")),
+        spawn_node("qcb1carol", ports.carol_api, ports.carol_p2p, &log_dir, &ab, kf("carol"), dd("qcb1carol")),
+        spawn_node("qcb1dave",  ports.dave_api,  ports.dave_p2p,  &log_dir, &ab, kf("dave"),  dd("qcb1dave")),
     ]
 }
 
@@ -675,15 +696,14 @@ fn dis_002b_recovery() {
         if p.exists() { Some(p) } else { None }
     };
     let dd = |name: &str| -> Option<PathBuf> { Some(base.join("data").join(name)) };
+    let alice_r = spawn_node("qcb1alice", ports.alice_api, ports.alice_p2p, &log_dir, "", kf("alice"), dd("qcb1alice"));
+    let alice_pid_r = read_peer_id(&log_dir.join("qcb1alice.log"), std::time::Duration::from_secs(15));
+    let ab_r = format!("/ip4/127.0.0.1/tcp/{}/p2p/{alice_pid_r}", ports.alice_p2p);
     let nodes_restarted = [
-        spawn_node("qcb1alice", ports.alice_api, ports.alice_p2p, &log_dir,
-            &[ports.bob_p2p, ports.carol_p2p, ports.dave_p2p], kf("alice"), dd("qcb1alice")),
-        spawn_node("qcb1bob",   ports.bob_api,   ports.bob_p2p,   &log_dir,
-            &[ports.alice_p2p, ports.carol_p2p, ports.dave_p2p], kf("bob"), dd("qcb1bob")),
-        spawn_node("qcb1carol", ports.carol_api, ports.carol_p2p, &log_dir,
-            &[ports.alice_p2p, ports.bob_p2p, ports.dave_p2p], kf("carol"), dd("qcb1carol")),
-        spawn_node("qcb1dave",  ports.dave_api,  ports.dave_p2p,  &log_dir,
-            &[ports.alice_p2p, ports.bob_p2p, ports.carol_p2p], kf("dave"), dd("qcb1dave")),
+        alice_r,
+        spawn_node("qcb1bob",   ports.bob_api,   ports.bob_p2p,   &log_dir, &ab_r, kf("bob"),   dd("qcb1bob")),
+        spawn_node("qcb1carol", ports.carol_api, ports.carol_p2p, &log_dir, &ab_r, kf("carol"), dd("qcb1carol")),
+        spawn_node("qcb1dave",  ports.dave_api,  ports.dave_p2p,  &log_dir, &ab_r, kf("dave"),  dd("qcb1dave")),
     ];
 
     for (i, &p) in all_api.iter().enumerate() {

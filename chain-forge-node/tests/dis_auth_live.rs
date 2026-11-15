@@ -114,7 +114,8 @@ fn genesis_path() -> PathBuf {
 // ── Node spawn / teardown ─────────────────────────────────────────────────────
 
 struct NodeHandle {
-    _name:   &'static str,
+    _name:    &'static str,
+    bootstrap: String,
     process: Child,
 }
 
@@ -130,19 +131,14 @@ fn spawn_node(
     api_port: u16,
     p2p_port: u16,
     log_dir:  &std::path::Path,
-    peers:    &[u16],
+    bootstrap: &str,
 ) -> NodeHandle {
     let log_path = log_dir.join(format!("{name}.log"));
     let log_file = std::fs::File::create(&log_path).expect("create log file");
 
-    let bootstrap: Vec<String> = peers
-        .iter()
-        .map(|&p| format!("/ip4/127.0.0.1/tcp/{p}"))
-        .collect();
-
     let short_name = name.strip_prefix("qcb1").unwrap_or(name);
     let key_file = repo_root()
-        .join("tests").join("devnet").join("keys")
+        .join("tests").join("devnet").join("keys").join("mldsa")
         .join(format!("{short_name}.key.json"));
 
     let mut cmd = Command::new(node_binary());
@@ -151,28 +147,49 @@ fn spawn_node(
        .arg("--key-file").arg(&key_file)
        .arg("--api-port").arg(api_port.to_string())
        .arg("--p2p-port").arg(p2p_port.to_string());
-    for addr in &bootstrap {
-        cmd.arg("--bootstrap").arg(addr);
-    }
+    if !bootstrap.is_empty() { cmd.arg("--bootstrap").arg(bootstrap); }
     cmd.stdout(log_file.try_clone().unwrap())
        .stderr(log_file)
        .stdin(Stdio::null());
 
     let process = cmd.spawn()
         .unwrap_or_else(|e| panic!("failed to spawn {name}: {e}"));
-    NodeHandle { _name: name, process }
+    NodeHandle { _name: name, bootstrap: bootstrap.to_string(), process }
+}
+
+fn read_peer_id(log_path: &std::path::Path, timeout: std::time::Duration) -> String {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let text = std::fs::read_to_string(log_path).unwrap_or_default();
+        let mut clean = String::with_capacity(text.len());
+        let mut in_esc = false;
+        for c in text.chars() {
+            if c == '\x1b' { in_esc = true; continue; }
+            if in_esc { if c == 'm' { in_esc = false; } continue; }
+            clean.push(c);
+        }
+        if let Some(id) = clean.lines()
+            .filter(|l| l.contains("P2P listening"))
+            .find_map(|l| l.split("peer=").nth(1))
+            .map(|rest| rest.split_whitespace().next().unwrap_or("").to_string())
+            .filter(|id| id.starts_with("12D3"))
+        {
+            return id;
+        }
+        assert!(std::time::Instant::now() < deadline, "no libp2p peer id in {:?}", log_path);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 fn spawn_devnet(ports: &DevnetPorts, log_dir: &std::path::Path) -> Vec<NodeHandle> {
+    let alice = spawn_node("qcb1alice", ports.alice_api, ports.alice_p2p, log_dir, "");
+    let alice_pid = read_peer_id(&log_dir.join("qcb1alice.log"), std::time::Duration::from_secs(15));
+    let ab = format!("/ip4/127.0.0.1/tcp/{}/p2p/{alice_pid}", ports.alice_p2p);
     vec![
-        spawn_node("qcb1alice", ports.alice_api, ports.alice_p2p, log_dir,
-                   &[ports.bob_p2p, ports.carol_p2p, ports.dave_p2p]),
-        spawn_node("qcb1bob",   ports.bob_api,   ports.bob_p2p,   log_dir,
-                   &[ports.alice_p2p, ports.carol_p2p, ports.dave_p2p]),
-        spawn_node("qcb1carol", ports.carol_api, ports.carol_p2p, log_dir,
-                   &[ports.alice_p2p, ports.bob_p2p, ports.dave_p2p]),
-        spawn_node("qcb1dave",  ports.dave_api,  ports.dave_p2p,  log_dir,
-                   &[ports.alice_p2p, ports.bob_p2p, ports.carol_p2p]),
+        alice,
+        spawn_node("qcb1bob",   ports.bob_api,   ports.bob_p2p,   log_dir, &ab),
+        spawn_node("qcb1carol", ports.carol_api, ports.carol_p2p, log_dir, &ab),
+        spawn_node("qcb1dave",  ports.dave_api,  ports.dave_p2p,  log_dir, &ab),
     ]
 }
 
@@ -773,12 +790,15 @@ async fn dis_auth_live() {
     drop(nodes.remove(0)); // index 0 = alice
     std::thread::sleep(Duration::from_millis(500)); // brief pause for port release
 
+    // Alice restarts; use Bob's bootstrap addr (which points back to Alice's peer address
+    // recorded from the initial run) so Alice re-joins the authenticated mesh.
+    let alice_reboot_bootstrap = nodes[0].bootstrap.clone(); // nodes[0] is now Bob (after remove)
     nodes.insert(0, spawn_node(
         "qcb1alice",
         ports.alice_api,
         ports.alice_p2p,
         &log_dir,
-        &[ports.bob_p2p, ports.carol_p2p, ports.dave_p2p],
+        &alice_reboot_bootstrap,
     ));
 
     assert!(

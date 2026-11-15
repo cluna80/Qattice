@@ -34,7 +34,7 @@ fn node_bin() -> PathBuf {
     target.join("debug").join(format!("chain-forge-node{}", std::env::consts::EXE_SUFFIX))
 }
 fn genesis() -> PathBuf { repo_root().join("tests/devnet/genesis-val-evict.json") }
-fn key(name: &str) -> PathBuf { repo_root().join("tests/devnet/keys").join(format!("{name}.key.json")) }
+fn key(name: &str) -> PathBuf { repo_root().join("tests/devnet/keys/mldsa").join(format!("{name}.key.json")) }
 
 /// Ports below the OS ephemeral range (see validator_jail_live).
 fn free_port() -> u16 {
@@ -118,7 +118,7 @@ fn strip_ansi(t: &str) -> String {
 }
 fn read_log(p: &PathBuf) -> String { strip_ansi(&std::fs::read_to_string(p).unwrap_or_default()) }
 
-struct Node { name: &'static str, child: Option<Child>, api: u16, p2p: u16, data: PathBuf, log: PathBuf, peers: Vec<u16> }
+struct Node { name: &'static str, child: Option<Child>, api: u16, p2p: u16, data: PathBuf, log: PathBuf, bootstrap: String }
 impl Drop for Node { fn drop(&mut self) { if let Some(c) = self.child.as_mut() { let _ = c.kill(); let _ = c.wait(); } } }
 impl Node {
     fn kill9(&mut self) { if let Some(mut c) = self.child.take() { let _ = c.kill(); let _ = c.wait(); } }
@@ -128,7 +128,31 @@ thread_local! { static V2: std::cell::Cell<bool> = const { std::cell::Cell::new(
 fn is_v2() -> bool { V2.with(|v| v.get()) }
 fn fmt_line() -> &'static str { if is_v2() { "storage format: v2" } else { "storage format: v1 (default)" } }
 
-fn spawn(name: &'static str, data: &PathBuf, log: &PathBuf, p2p: u16, peers: &[u16], envs: &[(&str, &str)]) -> Node {
+fn read_peer_id(log_path: &std::path::Path, timeout: std::time::Duration) -> String {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let text = std::fs::read_to_string(log_path).unwrap_or_default();
+        let mut clean = String::with_capacity(text.len());
+        let mut in_esc = false;
+        for c in text.chars() {
+            if c == '\x1b' { in_esc = true; continue; }
+            if in_esc { if c == 'm' { in_esc = false; } continue; }
+            clean.push(c);
+        }
+        if let Some(id) = clean.lines()
+            .filter(|l| l.contains("P2P listening"))
+            .find_map(|l| l.split("peer=").nth(1))
+            .map(|rest| rest.split_whitespace().next().unwrap_or("").to_string())
+            .filter(|id| id.starts_with("12D3"))
+        {
+            return id;
+        }
+        assert!(std::time::Instant::now() < deadline, "no libp2p peer id in {:?}", log_path);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+fn spawn(name: &'static str, data: &PathBuf, log: &PathBuf, p2p: u16, bootstrap: &str, envs: &[(&str, &str)]) -> Node {
     std::fs::create_dir_all(data).unwrap();
     let api = free_port();
     let f = std::fs::File::create(log).unwrap();
@@ -137,10 +161,10 @@ fn spawn(name: &'static str, data: &PathBuf, log: &PathBuf, p2p: u16, peers: &[u
               "--key-file", key(name).to_str().unwrap(), "--data-dir", data.to_str().unwrap(),
               "--api-port", &api.to_string(), "--p2p-port", &p2p.to_string()]);
     if is_v2() { cmd.arg("--storage-v2-experimental"); }
-    for q in peers { cmd.args(["--bootstrap", &format!("/ip4/127.0.0.1/tcp/{q}")]); }
+    if !bootstrap.is_empty() { cmd.args(["--bootstrap", bootstrap]); }
     for (k, v) in envs { cmd.env(k, v); }
     let child = cmd.stdout(f.try_clone().unwrap()).stderr(f).stdin(Stdio::null()).spawn().unwrap_or_else(|e| panic!("spawn {name}: {e}"));
-    Node { name, child: Some(child), api, p2p, data: data.clone(), log: log.clone(), peers: peers.to_vec() }
+    Node { name, child: Some(child), api, p2p, data: data.clone(), log: log.clone(), bootstrap: bootstrap.to_string() }
 }
 
 fn dump(n: &Node) { let t = read_log(&n.log); let l: Vec<&str> = t.lines().collect(); eprintln!("── {} log (last 40) ──", n.name); for x in &l[l.len().saturating_sub(40)..] { eprintln!("{x}"); } }
@@ -151,11 +175,14 @@ fn start_cluster(base: &PathBuf, dave_env: &[(&str, &str)]) -> (Vec<Node>, Vec<u
     let logs = base.join("logs"); std::fs::create_dir_all(&logs).unwrap();
     let p2p: Vec<u16> = (0..4).map(|_| free_port()).collect();
     let names = ["alice", "bob", "carol", "dave"];
-    let mut nodes = vec![];
-    for i in 0..4 {
-        let peers: Vec<u16> = (0..4).filter(|&j| j != i).map(|j| p2p[j]).collect();
+    let alice_log = logs.join("alice.log");
+    let alice = spawn("alice", &base.join("alice"), &alice_log, p2p[0], "", &[]);
+    let alice_pid = read_peer_id(&alice_log, Duration::from_secs(15));
+    let ab = format!("/ip4/127.0.0.1/tcp/{}/p2p/{alice_pid}", p2p[0]);
+    let mut nodes = vec![alice];
+    for i in 1..4 {
         let env: &[(&str, &str)] = if i == 3 { dave_env } else { &[] };
-        nodes.push(spawn(names[i], &base.join(names[i]), &logs.join(format!("{}.log", names[i])), p2p[i], &peers, env));
+        nodes.push(spawn(names[i], &base.join(names[i]), &logs.join(format!("{}.log", names[i])), p2p[i], &ab, env));
     }
     for n in &nodes { assert!(wait_port(n.api, Duration::from_secs(30)), "{} API never opened", n.name); }
     (nodes, p2p)
@@ -221,7 +248,7 @@ fn boundary_crashes(v2: bool) {
         let surv: Vec<u16> = nodes[..3].iter().map(|n| n.api).collect();
         assert!(wait_heights(&surv, CRASH_AT + 4, Duration::from_secs(90)), "{point}: survivors did not advance without Dave");
         // restart Dave on the SAME data directory, no crash env
-        let mut dave = spawn("dave", &nodes[3].data.clone(), &nodes[3].log.with_file_name("dave2.log"), nodes[3].p2p, &nodes[3].peers.clone(), &[]);
+        let mut dave = spawn("dave", &nodes[3].data.clone(), &nodes[3].log.with_file_name("dave2.log"), nodes[3].p2p, &nodes[0].bootstrap.clone(), &[]);
         let _ = &p2p;
         assert!(wait_port(dave.api, Duration::from_secs(30)), "{point}: restarted Dave's API never opened (lock or recovery failure)");
         std::thread::sleep(Duration::from_secs(1));
@@ -276,8 +303,8 @@ fn sigkill_rounds(v2: bool) {
         let surv: Vec<u16> = nodes.iter().enumerate().filter(|(i, n)| *i != victim && n.child.is_some()).map(|(_, n)| n.api).collect();
         assert!(wait_heights(&surv, at_kill + 3, Duration::from_secs(90)), "round {round}: survivors did not advance without {name}");
         let (data, log) = (nodes[victim].data.clone(), nodes[victim].log.with_file_name(format!("{name}-r{round}.log")));
-        let (own_p2p, peers) = (nodes[victim].p2p, nodes[victim].peers.clone());
-        let mut back = spawn(name, &data, &log, own_p2p, &peers, &[]);
+        let (own_p2p, bootstrap) = (nodes[victim].p2p, nodes[victim].bootstrap.clone());
+        let mut back = spawn(name, &data, &log, own_p2p, &bootstrap, &[]);
         assert!(wait_port(back.api, Duration::from_secs(30)), "round {round}: restarted {name} API never opened");
         std::thread::sleep(Duration::from_secs(1));
         let text = read_log(&back.log);
@@ -288,7 +315,7 @@ fn sigkill_rounds(v2: bool) {
         assert!(wait_heights(&[back.api], target_h, Duration::from_secs(120)), "round {round}: {name} did not catch up");
         // the OS lock: a SECOND process on this running node's directory is refused
         if v2 {
-            let mut second = spawn(name, &data, &log.with_file_name(format!("{name}-r{round}-dup.log")), free_port(), &peers, &[]);
+            let mut second = spawn(name, &data, &log.with_file_name(format!("{name}-r{round}-dup.log")), free_port(), &bootstrap, &[]);
             let d = Instant::now() + Duration::from_secs(30);
             let code = loop { if let Some(s) = second.child.as_mut().unwrap().try_wait().unwrap() { break s; } assert!(Instant::now() < d, "round {round}: a second process on a locked directory kept running"); std::thread::sleep(Duration::from_millis(200)); };
             second.child = None;
@@ -349,7 +376,7 @@ fn guard_window_crashes(v2: bool) {
         }
         let surv: Vec<u16> = nodes[..3].iter().map(|n| n.api).collect();
         assert!(wait_heights(&surv, at_h + 3, Duration::from_secs(120)), "{point}: survivors did not advance without Dave");
-        let mut dave = spawn("dave", &nodes[3].data.clone(), &nodes[3].log.with_file_name("dave2.log"), nodes[3].p2p, &nodes[3].peers.clone(), &[]);
+        let mut dave = spawn("dave", &nodes[3].data.clone(), &nodes[3].log.with_file_name("dave2.log"), nodes[3].p2p, &nodes[0].bootstrap.clone(), &[]);
         assert!(wait_port(dave.api, Duration::from_secs(30)), "{point}: restarted Dave's API never opened");
         std::thread::sleep(Duration::from_secs(1));
         let log = read_log(&dave.log);

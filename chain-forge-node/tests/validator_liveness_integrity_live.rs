@@ -65,7 +65,7 @@ fn devnet(file: &str) -> PathBuf { repo_root().join("tests").join("devnet").join
 struct NodeHandle(Child);
 impl Drop for NodeHandle { fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); } }
 
-fn spawn(name: &str, api: u16, p2p: u16, peers: &[u16], dir: &PathBuf) -> NodeHandle {
+fn spawn(name: &str, api: u16, p2p: u16, dir: &PathBuf, bootstrap: &str) -> NodeHandle {
     let data = dir.join(format!("data-{}", name.trim_start_matches("qcb1")));
     std::fs::create_dir_all(&data).unwrap();
     let log = std::fs::File::create(dir.join(format!("{name}.log"))).unwrap();
@@ -75,8 +75,8 @@ fn spawn(name: &str, api: u16, p2p: u16, peers: &[u16], dir: &PathBuf) -> NodeHa
        .arg("--api-port").arg(api.to_string())
        .arg("--p2p-port").arg(p2p.to_string())
        .arg("--data-dir").arg(&data)
-       .arg("--key-file").arg(devnet("keys").join(format!("{}.key.json", name.trim_start_matches("qcb1"))));
-    for p in peers { cmd.arg("--bootstrap").arg(format!("/ip4/127.0.0.1/tcp/{p}")); }
+       .arg("--key-file").arg(devnet("keys").join("mldsa").join(format!("{}.key.json", name.trim_start_matches("qcb1"))));
+    if !bootstrap.is_empty() { cmd.arg("--bootstrap").arg(bootstrap); }
     // Storage format 2 test switch (default OFF): CF_TEST_STORAGE_V2=1 runs this test on the experimental v2 layout.
     if std::env::var_os("CF_TEST_STORAGE_V2").is_some() { cmd.arg("--storage-v2-experimental"); }
     cmd.stdout(log.try_clone().unwrap()).stderr(log).stdin(Stdio::null());
@@ -173,10 +173,37 @@ fn validator_liveness_integrity_live() {
     println!("\n── Liveness evidence integrity (H0-11B FP-01 / FP-06) ──────────────");
     println!("   logs: {tmp:?}");
 
-    let _nodes: Vec<NodeHandle> = (0..4).map(|i| {
-        let peers: Vec<u16> = (0..4).filter(|&j| j != i).map(|j| ports[j].1).collect();
-        spawn(NAMES[i], ports[i].0, ports[i].1, &peers, &tmp)
-    }).collect();
+
+fn read_peer_id(log_path: &std::path::Path, timeout: std::time::Duration) -> String {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let text = std::fs::read_to_string(log_path).unwrap_or_default();
+        let mut clean = String::with_capacity(text.len());
+        let mut in_esc = false;
+        for c in text.chars() {
+            if c == '\x1b' { in_esc = true; continue; }
+            if in_esc { if c == 'm' { in_esc = false; } continue; }
+            clean.push(c);
+        }
+        if let Some(id) = clean.lines()
+            .filter(|l| l.contains("P2P listening"))
+            .find_map(|l| l.split("peer=").nth(1))
+            .map(|rest| rest.split_whitespace().next().unwrap_or("").to_string())
+            .filter(|id| id.starts_with("12D3"))
+        {
+            return id;
+        }
+        assert!(std::time::Instant::now() < deadline, "no libp2p peer id in {:?}", log_path);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+    let alice_log = tmp.join("qcb1alice.log");
+    let alice_node = spawn(NAMES[0], ports[0].0, ports[0].1, &tmp, "");
+    let alice_pid  = read_peer_id(&alice_log, std::time::Duration::from_secs(15));
+    let alice_bootstrap = format!("/ip4/127.0.0.1/tcp/{}/p2p/{alice_pid}", ports[0].1);
+    let _nodes: Vec<NodeHandle> = std::iter::once(alice_node)
+        .chain((1..4).map(|i| spawn(NAMES[i], ports[i].0, ports[i].1, &tmp, &alice_bootstrap)))
+        .collect();
     assert!(wait_until(Duration::from_secs(90), || api.iter().all(|&p| height(p) >= 3)), "devnet did not start");
 
     for (i, who) in NAMES.iter().enumerate() {

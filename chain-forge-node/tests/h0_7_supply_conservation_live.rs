@@ -120,7 +120,7 @@ fn genesis_path() -> PathBuf {
 
 fn key_path(short_name: &str) -> PathBuf {
     consensus_keys::validator_key(short_name, PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests").join("devnet").join("keys")
+        .join("tests").join("devnet").join("keys").join("mldsa")
         .join(format!("{short_name}.key.json")))
 }
 
