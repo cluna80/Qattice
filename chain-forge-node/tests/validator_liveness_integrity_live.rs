@@ -36,7 +36,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chain_forge_crypto::{ClassicalScheme, SignatureScheme};
+use chain_forge_crypto::{MlDsaScheme, SignatureScheme};
 use chain_forge_execution::{Transaction, TxBody};
 
 const CHAIN_ID:     &str = "qcb-devnet-val-jail";
@@ -104,7 +104,7 @@ fn wait_until(timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
 }
 
 fn signed_tx(mut tx: Transaction, who: &str) -> Transaction {
-    tx.sign(&ClassicalScheme.generate_keypair(who).unwrap(), CHAIN_ID).unwrap();
+    tx.sign(&MlDsaScheme.generate_keypair(who).unwrap(), CHAIN_ID).unwrap();
     tx
 }
 

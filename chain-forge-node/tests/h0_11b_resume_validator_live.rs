@@ -46,7 +46,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chain_forge_crypto::{ClassicalScheme, SignatureScheme};
+use chain_forge_crypto::{MlDsaScheme, SignatureScheme};
 use chain_forge_execution::{Transaction, TxBody};
 
 const CHAIN_ID:     &str = "qcb-devnet-val-jail";
@@ -243,7 +243,7 @@ fn committee(port: u16) -> Vec<String> {
 // ── Tx builders ───────────────────────────────────────────────────────────────
 
 fn bond_tx(sender: &str, nonce_val: u64, amount: u64) -> Transaction {
-    let kp = ClassicalScheme.generate_keypair(sender).unwrap();
+    let kp = MlDsaScheme.generate_keypair(sender).unwrap();
     let mut tx = Transaction::bond_validator(
         &format!("bond-{sender}-{nonce_val}"), sender, amount as u128, nonce_val);
     if let TxBody::BondValidator { ref mut owner_identity_id, .. } = tx.body {
@@ -256,7 +256,7 @@ fn bond_tx(sender: &str, nonce_val: u64, amount: u64) -> Transaction {
 /// ResumeValidator submitted by `sender` for `validator_id`.
 /// If sender != validator_id the tx will be rejected by the execution layer (RV-03).
 fn resume_tx(sender: &str, validator_id: &str, nonce_val: u64) -> Transaction {
-    let kp = ClassicalScheme.generate_keypair(sender).unwrap();
+    let kp = MlDsaScheme.generate_keypair(sender).unwrap();
     let mut tx = Transaction::resume_validator(
         &format!("resume-{sender}-{nonce_val}"), validator_id, nonce_val);
     // Override sender to `sender` (may differ from validator_id for the unauthorized test).

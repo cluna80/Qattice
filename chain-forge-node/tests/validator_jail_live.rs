@@ -44,7 +44,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chain_forge_crypto::{ClassicalScheme, SignatureScheme};
+use chain_forge_crypto::{MlDsaScheme, SignatureScheme};
 use chain_forge_execution::{Transaction, TxBody};
 
 const CHAIN_ID:      &str = "qcb-devnet-val-jail";
@@ -379,7 +379,7 @@ fn api_listening(log_dir: &PathBuf, name: &str, port: u16, timeout: Duration) ->
 // ── Tx builders ───────────────────────────────────────────────────────────────
 
 fn bond_tx(sender: &str, nonce_val: u64, amount: u64) -> Transaction {
-    let kp = ClassicalScheme.generate_keypair(sender).unwrap();
+    let kp = MlDsaScheme.generate_keypair(sender).unwrap();
     let mut tx = Transaction::bond_validator(
         &format!("bond-{sender}-{nonce_val}"), sender, amount as u128, nonce_val);
     if let TxBody::BondValidator { ref mut owner_identity_id, .. } = tx.body {
@@ -390,7 +390,7 @@ fn bond_tx(sender: &str, nonce_val: u64, amount: u64) -> Transaction {
 }
 
 fn transfer_tx(sender: &str, to: &str, nonce_val: u64) -> Transaction {
-    let kp = ClassicalScheme.generate_keypair(sender).unwrap();
+    let kp = MlDsaScheme.generate_keypair(sender).unwrap();
     let mut tx = Transaction::transfer(
         &format!("xfer-{sender}-{nonce_val}"), sender, to, "uqcb", 1_000, nonce_val);
     tx.sign(&kp, CHAIN_ID).unwrap();

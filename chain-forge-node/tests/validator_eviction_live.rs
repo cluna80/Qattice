@@ -37,7 +37,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chain_forge_crypto::{ClassicalScheme, SignatureScheme};
+use chain_forge_crypto::{MlDsaScheme, SignatureScheme};
 use chain_forge_execution::{Transaction, TxBody, validator_key_registration_signing_bytes};
 
 const CHAIN_ID:    &str = "qcb-devnet-val-evict";
@@ -301,7 +301,7 @@ fn voting_power(port: u16, addr: &str) -> u64 {
 // ── Tx builders ───────────────────────────────────────────────────────────────
 
 fn bond_tx(sender: &str, nonce_val: u64, amount: u64) -> Transaction {
-    let kp = ClassicalScheme.generate_keypair(sender).unwrap();
+    let kp = MlDsaScheme.generate_keypair(sender).unwrap();
     let mut tx = Transaction::bond_validator(
         &format!("bond-{sender}-{nonce_val}"), sender, amount as u128, nonce_val,
     );
@@ -313,7 +313,7 @@ fn bond_tx(sender: &str, nonce_val: u64, amount: u64) -> Transaction {
 }
 
 fn unbond_tx(sender: &str, nonce_val: u64) -> Transaction {
-    let kp = ClassicalScheme.generate_keypair(sender).unwrap();
+    let kp = MlDsaScheme.generate_keypair(sender).unwrap();
     let mut tx = Transaction::unbond_validator(
         &format!("unbond-{sender}-{nonce_val}"), sender, nonce_val,
     );
@@ -324,10 +324,10 @@ fn unbond_tx(sender: &str, nonce_val: u64) -> Transaction {
 /// RegisterValidatorKey: without a registered consensus key a bonded validator
 /// is admitted but stays at voting_power 0.
 fn register_key_tx(sender: &str, nonce_val: u64) -> Transaction {
-    let wallet_kp    = ClassicalScheme.generate_keypair(sender).unwrap();
-    let consensus_kp = ClassicalScheme.generate_keypair(&format!("{sender}-consensus")).unwrap();
+    let wallet_kp    = MlDsaScheme.generate_keypair(sender).unwrap();
+    let consensus_kp = MlDsaScheme.generate_keypair(&format!("{sender}-consensus")).unwrap();
     let pop_msg = validator_key_registration_signing_bytes(CHAIN_ID, sender);
-    let pop_sig = ClassicalScheme.sign(&pop_msg, &consensus_kp).unwrap();
+    let pop_sig = MlDsaScheme.sign(&pop_msg, &consensus_kp).unwrap();
     let mut tx = Transaction {
         id:          format!("regkey-{sender}-{nonce_val}"),
         sender:      sender.to_string(),
@@ -335,7 +335,7 @@ fn register_key_tx(sender: &str, nonce_val: u64) -> Transaction {
         body:        TxBody::RegisterValidatorKey {
             consensus_pubkey:    consensus_kp.public_key.clone(),
             proof_of_possession: pop_sig.bytes,
-            scheme:              String::new(),
+            scheme:              "ml-dsa-65".to_string(),
             pop_version:         1,
         },
         gas_limit:   10_000,
@@ -350,7 +350,7 @@ fn register_key_tx(sender: &str, nonce_val: u64) -> Transaction {
 }
 
 fn register_identity_tx(sender: &str, nonce_val: u64) -> Transaction {
-    let kp = ClassicalScheme.generate_keypair(sender).unwrap();
+    let kp = MlDsaScheme.generate_keypair(sender).unwrap();
     let mut tx = Transaction::register_identity(
         &format!("reg-{sender}-{nonce_val}"), sender, nonce_val,
     );
@@ -359,7 +359,7 @@ fn register_identity_tx(sender: &str, nonce_val: u64) -> Transaction {
 }
 
 fn attest_tx(attester: &str, attester_nonce: u64, claimant: &str) -> Transaction {
-    let kp = ClassicalScheme.generate_keypair(attester).unwrap();
+    let kp = MlDsaScheme.generate_keypair(attester).unwrap();
     let mut tx = Transaction::attest(
         &format!("attest-{attester}-for-{claimant}-{attester_nonce}"),
         attester, claimant, attester_nonce,
