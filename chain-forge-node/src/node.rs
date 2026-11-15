@@ -5719,16 +5719,38 @@ impl Node {
                                 );
                             }
                             LivenessAlert::SuspendEligible => {
-                                // Automatic suspension is intentionally disabled for
-                                // the production genesis. Log the eligibility and stop.
-                                // Enable by wiring jail_validator() here when the
-                                // suspension gate is lifted (ResumeValidator/probation
-                                // cycle Windows-confirmed).
-                                warn!(
-                                    validator = %status.validator_id,
-                                    miss_rate = %format!("{:.1}%", status.miss_rate * 100.0),
-                                    "H0-11B SuspendEligible (past grace window, >33% miss) — automatic suspension DISABLED"
-                                );
+                                let auto_suspend = self.genesis.liveness_params()
+                                    .map(|p| p.automatic_suspension_enabled)
+                                    .unwrap_or(false);
+                                if auto_suspend {
+                                    let epoch = self.identity.clock.current_epoch;
+                                    warn!(
+                                        validator = %status.validator_id,
+                                        miss_rate = %format!("{:.1}%", status.miss_rate * 100.0),
+                                        epoch,
+                                        "H0-11B SuspendEligible — automatic suspension ENABLED, jailing"
+                                    );
+                                    if let Err(e) = self.validator_registry.jail(
+                                        &status.validator_id,
+                                        "liveness: miss rate exceeded threshold past grace window",
+                                        epoch,
+                                    ) {
+                                        warn!(
+                                            validator = %status.validator_id,
+                                            error = %e,
+                                            "H0-11B jail failed"
+                                        );
+                                    } else {
+                                        self.suspension_tracker.remove(&status.validator_id);
+                                        any_changed = true;
+                                    }
+                                } else {
+                                    warn!(
+                                        validator = %status.validator_id,
+                                        miss_rate = %format!("{:.1}%", status.miss_rate * 100.0),
+                                        "H0-11B SuspendEligible (past grace window, >33% miss) — automatic suspension DISABLED"
+                                    );
+                                }
                             }
                         }
                     }
@@ -7511,10 +7533,12 @@ impl Node {
                                 );
                             }
                             LivenessAlert::SuspendEligible => {
+                                // Advisory path only — suspension_tracker mutations
+                                // and actual jailing happen exclusively in commit_block.
                                 warn!(
                                     validator = %status.validator_id,
                                     miss_rate = %format!("{:.1}%", status.miss_rate * 100.0),
-                                    "H0-11B SuspendEligible (past grace window, >33% miss) — automatic suspension DISABLED"
+                                    "H0-11B SuspendEligible (past grace window, >33% miss) — advisory log only (devnet auto-commit path)"
                                 );
                             }
                         }

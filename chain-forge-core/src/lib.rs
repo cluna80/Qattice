@@ -661,6 +661,12 @@ pub struct GenesisLiveness {
     /// No liveness enforcement before this height (lets the network form).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_height: Option<u64>,
+    /// When true, the node jails a validator automatically at the epoch
+    /// boundary after its grace window expires. Default false (disabled).
+    /// Enable only on private devnet fixtures with the full H0-11B cycle
+    /// confirmed on Windows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automatic_suspension_enabled: Option<bool>,
 }
 
 /// Resolved, validated liveness policy.
@@ -669,6 +675,9 @@ pub struct LivenessParams {
     pub window_blocks:  usize,
     pub max_missed_pct: u32,
     pub start_height:   u64,
+    /// Whether automatic suspension (jail at epoch boundary after grace
+    /// window) is active on this chain.
+    pub automatic_suspension_enabled: bool,
 }
 
 pub const DEFAULT_LIVENESS_WINDOW_BLOCKS: usize = 500;
@@ -1143,6 +1152,7 @@ impl GenesisConfig {
             window_blocks:  cfg.window_blocks.unwrap_or(DEFAULT_LIVENESS_WINDOW_BLOCKS),
             max_missed_pct: cfg.max_missed_pct.unwrap_or(DEFAULT_LIVENESS_MAX_MISSED_PCT),
             start_height:   cfg.start_height.unwrap_or(DEFAULT_LIVENESS_START_HEIGHT),
+            automatic_suspension_enabled: cfg.automatic_suspension_enabled.unwrap_or(false),
         };
         let (wmin, wmax) = LIVENESS_WINDOW_BLOCKS_RANGE;
         if !(wmin..=wmax).contains(&p.window_blocks) {
@@ -1375,6 +1385,7 @@ mod tests {
     fn liveness_params_default_to_the_conservative_policy() {
         assert_eq!(genesis_with_liveness(None).liveness_params(), Ok(LivenessParams {
             window_blocks: 500, max_missed_pct: 50, start_height: 20,
+            automatic_suspension_enabled: false,
         }));
     }
 
@@ -1384,6 +1395,7 @@ mod tests {
             "window_blocks": 1000, "max_missed_pct": 30, "start_height": 5 })));
         assert_eq!(g.liveness_params(), Ok(LivenessParams {
             window_blocks: 1000, max_missed_pct: 30, start_height: 5,
+            automatic_suspension_enabled: false,
         }));
     }
 
