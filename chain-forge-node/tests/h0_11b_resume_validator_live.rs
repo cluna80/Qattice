@@ -330,12 +330,15 @@ fn h0_11b_resume_validator_live() {
     std::thread::sleep(Duration::from_secs(2)); // let the OS reap the process
     say("Dave killed; waiting for liveness enforcement…".into());
 
-    // The genesis liveness window is 100 blocks at 2 s/block ≈ 200 s.
-    // Allow up to 5 min for jailing (window + epoch rollover).
-    assert!(wait_until(Duration::from_secs(300), || {
+    // The genesis liveness window is 100 blocks. On Windows/MINGW64 the devnet
+    // runs at ~9 s/block, so the window takes ~900 s to fill. After the full
+    // window has rolled past Dave's kill point and the miss rate reaches the
+    // 20% threshold, jailing fires at the next epoch boundary (every 5 blocks
+    // = ~45 s). Allow 1800 s (30 min) with margin.
+    assert!(wait_until(Duration::from_secs(1800), || {
         validator_status(alice, DAVE).as_deref() == Some("Jailed")
-    }), "RV-02: Dave was not jailed within 5 min\nlast status: {:?}", validator_status(alice, DAVE));
-    let (h_jailed, _) = agree(&live_api, Duration::from_secs(30));
+    }), "RV-02: Dave was not jailed within 30 min\nlast status: {:?}", validator_status(alice, DAVE));
+    let (h_jailed, _) = agree(&live_api, Duration::from_secs(90));
 
     let dave_rec = status_of(alice, DAVE).expect("Dave status record");
     let jailed_epoch = dave_rec["jailed_epoch"].as_u64().expect("jailed_epoch");
@@ -369,7 +372,9 @@ fn h0_11b_resume_validator_live() {
     // Jail expires at `unjail_after` epoch, i.e. height unjail_after * EPOCH_BLOCKS.
     let release_height = (unjail_after + 1) * EPOCH_BLOCKS;
     say(format!("  waiting for height {release_height} (jail release at epoch {unjail_after})…"));
-    assert!(wait_until(Duration::from_secs(400), || height(alice) >= release_height),
+    // Jail lasts 10 epochs × 5 blocks = 50 blocks. At ~9 s/block that is ~450 s.
+    // Add 300 s margin for epoch-boundary jitter.
+    assert!(wait_until(Duration::from_secs(750), || height(alice) >= release_height),
             "RV-04: jail-release epoch never passed (stuck at h={})", height(alice));
 
     // Restart Dave so he can submit the tx himself.
