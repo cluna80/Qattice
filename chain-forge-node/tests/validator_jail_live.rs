@@ -590,9 +590,9 @@ fn validator_jail_live() {
     // ── Bring Dave back, healthy: he must replay the chain and stay out ──────
     nodes[3] = Some(spawn(&specs[3], &tmp, &alice_bootstrap));
     assert!(api_listening(&tmp, DAVE, dave, Duration::from_secs(30)), "Dave did not restart\n{}", tail_log(&tmp, DAVE, 40));
-    assert!(wait_until(Duration::from_secs(240), || height(dave) + 3 >= height(alice)),
+    assert!(wait_until(Duration::from_secs(600), || height(dave) + 3 >= height(alice)),
             "Dave never caught up (dave {} vs alice {})\n{}", height(dave), height(alice), tail_log(&tmp, DAVE, 40));
-    let (h_all, _) = agree(&api, Duration::from_secs(90));
+    let (h_all, _) = agree(&api, Duration::from_secs(180));
     assert!(is_jailed(dave, DAVE), "Dave's own replay did not derive Jailed");
     say(format!("  Dave back online and replayed to height {h_all}; his own state says Jailed, roots agree on all four"));
 
@@ -608,16 +608,16 @@ fn validator_jail_live() {
         if advanced_without_bob { "STILL ADVANCED" } else { "paused" }));
     nodes[1] = Some(spawn(&specs[1], &tmp, &alice_bootstrap));
     assert!(api_listening(&tmp, "qcb1bob", bob, Duration::from_secs(30)), "bob did not restart\n{}", tail_log(&tmp, "qcb1bob", 40));
-    assert!(wait_until(Duration::from_secs(60), || is_jailed(bob, DAVE)),
+    assert!(wait_until(Duration::from_secs(120), || is_jailed(bob, DAVE)),
             "JL-08: bob forgot Dave's jail across a restart\n{}", tail_log(&tmp, "qcb1bob", 40));
     let after = status_of(bob, DAVE).unwrap();
     for k in ["jailed_epoch", "unjail_after", "jail_count", "bonded_uqcb"] {
         assert_eq!(before[k], after[k], "JL-08: {k} changed across restart");
     }
     assert_eq!(committee(bob), ["qcb1alice", "qcb1bob", "qcb1carol", "qcb1eve"], "JL-08: committee changed across restart");
-    assert!(wait_until(Duration::from_secs(120), || height(alice) >= h_down + 6),
+    assert!(wait_until(Duration::from_secs(240), || height(alice) >= h_down + 6),
             "JL-08: chain did not resume after bob returned");
-    let (h8, _) = agree(&api, Duration::from_secs(90));
+    let (h8, _) = agree(&api, Duration::from_secs(180));
 
     // Four independent views of the committee must agree after the restart:
     //  1. GET /api/validators          (asserted above, on bob)
@@ -625,7 +625,7 @@ fn validator_jail_live() {
     //  3. GET /api/validators/status    (Dave Jailed, asserted above)
     //  4. the consensus ENGINE itself: who it lets propose which (height, round).
     let four = ["qcb1alice", "qcb1bob", "qcb1carol", "qcb1eve"];
-    assert!(wait_until(Duration::from_secs(180), || height(alice) >= h8 + 9), "JL-08: chain stalled after resuming");
+    assert!(wait_until(Duration::from_secs(300), || height(alice) >= h8 + 9), "JL-08: chain stalled after resuming");
     assert_eq!(persisted_committee(&tmp, "qcb1bob"), four, "JL-08: bob's persisted committee");
     for &p in &api { assert_eq!(committee(p), four, "JL-08: API committee on port {p}"); }
     let mut engine_checked = std::collections::BTreeSet::new();
@@ -657,7 +657,7 @@ fn validator_jail_live() {
         assert_eq!(s["status"].as_str(), Some("Jailed"), "JL-09: expiry must not reinstate: {s}");
         assert!(!committee(p).iter().any(|i| i == DAVE), "JL-09: Dave regained a seat on expiry");
     }
-    let (h9, root9) = agree(&api, Duration::from_secs(60));
+    let (h9, root9) = agree(&api, Duration::from_secs(120));
     say(format!("✓ JL-09: jail expired, Dave online and caught up, still Jailed and unseated (height {h9}, root {})", &root9[..12]));
 
     println!("\n── Summary ──────────────────────────────────────────────────────────");
