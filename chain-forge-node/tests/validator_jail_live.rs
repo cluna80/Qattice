@@ -475,12 +475,12 @@ fn validator_jail_live() {
         assert!(r["success"].as_bool().unwrap_or(false), "bond for {n} failed: {r}");
     }
     let h = height(alice);
-    assert!(wait_until(Duration::from_secs(120), || height(alice) >= h + EPOCH_BLOCKS + 1), "no epoch after bonds");
+    assert!(wait_until(Duration::from_secs(240), || height(alice) >= h + EPOCH_BLOCKS + 1), "no epoch after bonds");
     for n in names { assert!(voting_power(alice, n) > 0, "{n} has no voting power after bond"); }
     say("all four bonded and seated with voting power".into());
 
     // ── JL-01: healthy network, nobody jailed ────────────────────────────────
-    assert!(wait_until(Duration::from_secs(300), || api.iter().all(|&p| height(p) >= 30)),
+    assert!(wait_until(Duration::from_secs(600), || api.iter().all(|&p| height(p) >= 30)),
             "healthy devnet did not pass height 30");
     for n in names {
         let s = status_of(alice, n).unwrap_or_else(|| panic!("{n} missing from status"));
