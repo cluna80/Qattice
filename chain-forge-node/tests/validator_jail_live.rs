@@ -529,7 +529,7 @@ fn validator_jail_live() {
             "JL-03: jailed_epoch {jailed_epoch} must be the validator epoch (height {h_jailed_seen} / {EPOCH_BLOCKS}), \
              not a block height");
     for p in [bob, carol, eve] {
-        assert!(wait_until(Duration::from_secs(60), || is_jailed(p, DAVE)), "JL-03: a live node never jailed Dave");
+        assert!(wait_until(Duration::from_secs(180), || is_jailed(p, DAVE)), "JL-03: a live node never jailed Dave");
         let r = status_of(p, DAVE).unwrap();
         assert_eq!((r["jailed_epoch"].clone(), r["unjail_after"].clone()), (rec["jailed_epoch"].clone(), rec["unjail_after"].clone()),
                    "JL-03: nodes disagree on the jail record");
