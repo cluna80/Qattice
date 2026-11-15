@@ -12,22 +12,22 @@
 //!        jail-release epoch is reached. The tx receipt shows success and the
 //!        event "resume_validator: validator_id=qcb1dave" is present.
 //! RV-05  Dave's registry status transitions Jailed → Candidate on every live
-//!        node (not Active — Dave must re-qualify at the next epoch boundary).
+//!        node immediately after the resume tx commits.
 //! RV-06  A second ResumeValidator from Dave succeeds at the execution layer
 //!        (authorization passes) but node.rs unjail() returns an error (no
 //!        longer Jailed) which is logged as a warning; Dave stays Candidate.
 //! RV-07  Dave re-enters the committee at the next epoch boundary after unjail:
 //!        his bond is still valid, so committee selection re-activates him.
-//! RV-08  State roots agree across all three live nodes after each transition.
-//! RV-09  After a node restart, the remaining live committee is preserved and
-//!        the state root matches the pre-restart value.
+//! RV-08  State roots agree across all four live nodes after each transition.
+//! RV-09  Carol restarts; the full four-node committee (including Dave) resumes
+//!        finality and all four nodes agree on the state root.
 //!
 //! ## Notes
 //!
 //! Uses the same genesis (`genesis-val-jail.json`) as the existing
 //! `validator_jail_live` test so we don't need a new genesis file.
-//! The liveness window is 100 blocks at 2 s/block; the jail period is
-//! 10 epochs × 5 blocks/epoch = 50 blocks (~100 s at 2 s/block).
+//! The liveness window is 100 blocks; at ~9 s/block on Windows the jail
+//! window takes ~15 min to fill. The jail period is 10 epochs × 5 blocks.
 //!
 //! The ResumeValidator tx builder is in `chain_forge_execution::Transaction`.
 //!
@@ -447,25 +447,25 @@ fn h0_11b_resume_validator_live() {
     let (h_agree, root_agree) = agree(&live_api, Duration::from_secs(60));
     say(format!("✓ RV-08: live nodes agree (h={h_agree}, root={}…)", &root_agree[..12]));
 
-    // ── RV-09: restart one live node; committee and state root preserved ───────
-    let _saved_root = root_agree.clone();
+    // ── RV-09: restart one live node; chain continues and state root is preserved
+    // Dave was re-activated in RV-07, so the full four-node committee is live.
+    // Kill Carol (one of four), which still leaves a 3-node supermajority.
     say("Restarting Carol to verify state preservation…".into());
-    nodes[2] = None; // kill Carol
-    // Three → two live nodes is below f=1 quorum for 3 seats; chain stalls briefly.
-    // Let it stall for up to 30 s, then restart Carol.
-    std::thread::sleep(Duration::from_secs(5));
+    nodes[2] = None; // Drop kills Carol via NodeHandle::drop.
+    std::thread::sleep(Duration::from_secs(3)); // let the OS reap
     nodes[2] = Some(spawn(&specs[2], &tmp));
     assert!(port_open(carol, Duration::from_secs(60)),
             "Carol did not restart\n{}", tail_log(&tmp, "qcb1carol", 30));
-    // After Carol rejoins, the three-node committee (alice, bob, carol) should resume finality.
-    let (h_final, root_final) = agree(&live_api, Duration::from_secs(120));
-    // State root must advance beyond saved_root (chain is live again), or at minimum match it.
+    // After Carol rejoins the four-node committee should continue making progress.
+    let (h_final, root_final) = agree(&all_api, Duration::from_secs(120));
     assert!(h_final >= h_agree,
             "RV-09: height regressed after Carol restart ({h_final} < {h_agree})");
-    // Committee is still alice, bob, carol (Dave is Candidate, not seated).
+    // All four validators must agree — Dave is Active and in the committee.
     let comm_after = committee(alice);
-    assert!(!comm_after.contains(&DAVE.to_string()),
-            "RV-09: Dave must not be seated after Carol restart; committee={comm_after:?}");
+    assert!(comm_after.contains(&DAVE.to_string()),
+            "RV-09: Dave must be in committee after re-activation; committee={comm_after:?}");
+    assert_eq!(comm_after.len(), 4,
+               "RV-09: full four-node committee must be restored; committee={comm_after:?}");
     say(format!("✓ RV-09: after Carol restart, h={h_final}, root={}…, committee={comm_after:?}",
                 &root_final[..12]));
 
