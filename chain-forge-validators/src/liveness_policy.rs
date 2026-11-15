@@ -53,7 +53,7 @@
 //! quorum-protection rule, `ResumeValidator`/probation, and deterministic
 //! requalification are implemented and Windows-confirmed.
 
-use crate::{ValidatorRecord, ValidatorRegistry, ValidatorStatus};
+// ValidatorRecord, ValidatorRegistry, ValidatorStatus used by node.rs callers.
 
 // ---------------------------------------------------------------------------
 // Devnet-derived constants

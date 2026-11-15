@@ -385,6 +385,7 @@ impl GasModel {
                     TxBody::ProposeChange { .. }  => op_multiplier * 8,
                     TxBody::VoteOnProposal { .. } => op_multiplier * 4,
                     TxBody::ActivateChange { .. } => op_multiplier * 6,
+                    TxBody::ResumeValidator { .. } => op_multiplier * 3,
                     // Resource Job Lifecycle: 4 state-machine tx types.
                 };
                 base_fee_per_byte * tx_bytes + op_cost
@@ -964,6 +965,29 @@ pub enum TxBody {
     ActivateChange {
         proposal_id: u64,
     },
+
+    // ── H0-11B: Liveness-suspension recovery ─────────────────────────────────
+
+    /// Unjail a validator that was suspended for liveness failures (H0-11B).
+    ///
+    /// Any funded sender may submit this on behalf of any jailed validator
+    /// (the validator operator is the natural submitter, but it is not enforced).
+    ///
+    /// Effects:
+    ///   - Calls `validator_registry.unjail(validator_id, epoch)`.
+    ///   - On success the validator status moves from `Jailed` → `Candidate`.
+    ///     The validator must re-verify (new `confirm_pop` / BondValidator cycle)
+    ///     before it can re-enter the active consensus set.
+    ///   - Fails if the validator is not jailed, or if the jail-release epoch
+    ///     has not yet been reached.
+    ///
+    /// Authorization: open — no minimum sender tier.  The validator's re-entry
+    /// into consensus still requires a full credential and bond check at the
+    /// next epoch boundary, so there is no security risk in allowing any sender.
+    ResumeValidator {
+        /// The validator identifier to unjail.
+        validator_id: String,
+    },
 }
 
 /// One guardian's authorization for a `RecoverAccountKey` transaction.
@@ -1033,6 +1057,7 @@ impl TxBody {
             TxBody::ProposeChange { .. }            => "ProposeChange",
             TxBody::VoteOnProposal { .. }           => "VoteOnProposal",
             TxBody::ActivateChange { .. }           => "ActivateChange",
+            TxBody::ResumeValidator { .. }          => "ResumeValidator",
         }
     }
 }
@@ -1342,6 +1367,7 @@ impl Transaction {
             TxBody::ProposeChange { kind_json } => kind_json.len() + 8,
             TxBody::VoteOnProposal { choice, .. } => choice.len() + 16,
             TxBody::ActivateChange { .. } => 8,
+            TxBody::ResumeValidator { validator_id } => validator_id.len() + 8,
         };
         self.sender.len() + 8 + body_size + self.signature.len()
     }
@@ -2461,6 +2487,7 @@ pub fn required_module(body: &TxBody) -> Option<&'static str> {
         TxBody::ProposeChange { .. }            => Some("identity"),
         TxBody::VoteOnProposal { .. }           => Some("identity"),
         TxBody::ActivateChange { .. }           => None, // any sender can tally
+        TxBody::ResumeValidator { .. }          => None, // open — re-entry gate is at next epoch boundary
     }
 }
 
@@ -5032,6 +5059,16 @@ impl Executor {
                 ));
                 Ok(())
             }
+
+            // ── H0-11B: ResumeValidator ───────────────────────────────────────
+            // The execution layer emits an event so node.rs post-processing can
+            // identify successful unjail requests and call validator_registry.unjail().
+            // No state mutation occurs here: the validator ledger (registry) lives
+            // in node.rs, not in StateStore.
+            TxBody::ResumeValidator { validator_id } => {
+                events.push(format!("resume_validator: validator_id={}", validator_id));
+                Ok(())
+            }
         };
 
         if result.is_ok() {
@@ -5298,6 +5335,11 @@ impl Executor {
             | TxBody::VoteOnProposal { .. }
             | TxBody::ActivateChange { .. } => {
                 Err("governance transaction requires identity-aware executor".to_string())
+            }
+            // H0-11B: ResumeValidator requires the identity-aware executor
+            // (node.rs post-processing calls validator_registry.unjail()).
+            TxBody::ResumeValidator { .. } => {
+                Err("ResumeValidator requires identity-aware executor".to_string())
             }
         };
 

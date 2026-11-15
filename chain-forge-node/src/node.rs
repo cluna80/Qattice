@@ -946,6 +946,19 @@ pub struct Node {
     /// Genesis validators (registered_epoch == 0 in ValidatorRegistry) are
     /// exempt: they check their own address in IdentityStore, as before.
     bond_owner_bindings: std::collections::HashMap<String, String>,
+
+    // ── H0-11B: Liveness-suspension tracker ──────────────────────────────────
+
+    /// Tracks the block height at which each validator's miss-rate first
+    /// exceeded `SUSPENSION_THRESHOLD_PCT`. Used to implement the grace window:
+    /// a validator whose threshold was first breached at height H is not
+    /// eligible for suspension until height H + GRACE_WINDOW_BLOCKS.
+    ///
+    /// Entry is removed when the miss-rate drops below the threshold.
+    /// Not persisted: reconstructed from the slashing module's ring buffers
+    /// on node restart (the validator remains in ThresholdBreached state until
+    /// the grace window clears, which is safe — it cannot be jailed before that).
+    suspension_tracker: std::collections::HashMap<String, u64>,
 }
 
 /// Default validator-set epoch length in blocks. Matches the scale PoCD's
@@ -1011,6 +1024,8 @@ pub(crate) fn tx_kind_label(body: &chain_forge_execution::TxBody) -> &'static st
         TxBody::ProposeChange { .. }             => "propose_change",
         TxBody::VoteOnProposal { .. }            => "vote_on_proposal",
         TxBody::ActivateChange { .. }            => "activate_change",
+        // H0-11B: liveness-suspension recovery
+        TxBody::ResumeValidator { .. }           => "resume_validator",
     }
 }
 
@@ -1807,6 +1822,7 @@ impl Node {
             historical_validator_sets: std::collections::BTreeMap::new(),
             personhood_power_cap,
             bond_owner_bindings: std::collections::HashMap::new(),
+            suspension_tracker: std::collections::HashMap::new(),
         })
     }
 
@@ -5109,6 +5125,19 @@ impl Node {
             })
             .collect();
 
+        // H0-11B: snapshot ResumeValidator txs before execution so we can
+        // process successful unjail operations after the block runs.
+        // Tuple: (tx_index, validator_id).
+        let resume_validator_attempts: Vec<(usize, String)> = txs.iter().enumerate()
+            .filter_map(|(i, t)| {
+                if let chain_forge_execution::TxBody::ResumeValidator { validator_id } = &t.body {
+                    Some((i, validator_id.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         // PQ-VAL-002 R4: capture indices of any EDA txs that target
         // ml-dsa-65 consensus signatures — if one succeeds we re-zero
         // all ML-DSA-only validators' voting power in this block.
@@ -5297,6 +5326,36 @@ impl Node {
                     epoch,
                     "QPC-CONS-001 Phase B: authenticated owner binding recorded"
                 );
+            }
+        }
+
+        // H0-11B: for each successful ResumeValidator tx, unjail the validator
+        // in the registry (Jailed → Candidate). The validator is NOT immediately
+        // re-seated; it must re-qualify at the next epoch boundary.
+        {
+            let epoch = self.identity.clock.current_epoch;
+            for (idx, validator_id) in &resume_validator_attempts {
+                let Some(result) = exec_result.tx_results.get(*idx) else { continue };
+                if !result.success { continue; }
+                match self.validator_registry.unjail(validator_id, epoch) {
+                    Ok(()) => {
+                        // Clear the suspension tracker entry so a fresh grace
+                        // window starts if the validator breaches the threshold again.
+                        self.suspension_tracker.remove(validator_id);
+                        info!(
+                            validator = %validator_id,
+                            epoch,
+                            "H0-11B: ResumeValidator unjailed validator (Jailed → Candidate)"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            validator = %validator_id,
+                            error = %e,
+                            "H0-11B: ResumeValidator unjail failed"
+                        );
+                    }
+                }
             }
         }
 
@@ -5545,6 +5604,103 @@ impl Node {
                             updated_vs.validators.retain(|v| &v.id.0 != addr);
                         }
                         any_changed = true;
+                    }
+                }
+            }
+
+            // Pass 5 (H0-11B): evaluate liveness policy and log alert tiers.
+            // Automatic suspension is disabled for the production genesis
+            // (`suspension_enabled = false`). Tier-W/Tier-O alerts are logged
+            // unconditionally; SuspendEligible results are logged only.
+            {
+                use chain_forge_validators::liveness_policy::{
+                    evaluate_liveness_policy, LivenessAlert, ValidatorLivenessRecord,
+                    LIVENESS_WINDOW_BLOCKS, GRACE_WINDOW_BLOCKS,
+                };
+                let committee_size = updated_vs.validators.len();
+                let current_height = cert.height;
+                let records: Vec<ValidatorLivenessRecord> = updated_vs.validators.iter()
+                    .filter_map(|v| {
+                        let id = &v.id.0;
+                        let (observed, missed_pct) = self.slasher.liveness_snapshot(id)?;
+                        let missed_abs = self.slasher.liveness_missed(id).unwrap_or(0) as u64;
+                        let blocks_in_window = observed as u64;
+                        let missed_in_window = missed_abs;
+                        // Approximate sub-window misses proportionally from the
+                        // main-window rate; exact sub-window tracking requires
+                        // dedicated ring buffers in SlashingModule (future work).
+                        let tier_w_missed = missed_in_window
+                            .saturating_mul(chain_forge_validators::liveness_policy::TIER_W_WINDOW_BLOCKS)
+                            .checked_div(LIVENESS_WINDOW_BLOCKS as u64)
+                            .unwrap_or(0);
+                        let tier_o_missed = missed_in_window
+                            .saturating_mul(chain_forge_validators::liveness_policy::TIER_O_WINDOW_BLOCKS)
+                            .checked_div(LIVENESS_WINDOW_BLOCKS as u64)
+                            .unwrap_or(0);
+                        // Update suspension tracker: record when threshold was first
+                        // breached; clear when miss-rate drops back below threshold.
+                        let threshold_breached = missed_pct >= chain_forge_validators::liveness_policy::SUSPENSION_THRESHOLD_PCT;
+                        let blocks_above = if threshold_breached {
+                            let entry = self.suspension_tracker
+                                .entry(id.clone())
+                                .or_insert(current_height);
+                            current_height.saturating_sub(*entry)
+                        } else {
+                            self.suspension_tracker.remove(id);
+                            0
+                        };
+                        Some(ValidatorLivenessRecord {
+                            validator_id:            id.clone(),
+                            missed_in_main_window:   missed_in_window,
+                            blocks_in_main_window:   blocks_in_window,
+                            missed_in_tier_w_window: tier_w_missed,
+                            missed_in_tier_o_window: tier_o_missed,
+                            blocks_above_threshold:  blocks_above,
+                        })
+                    })
+                    .collect();
+
+                if !records.is_empty() {
+                    let outcome = evaluate_liveness_policy(&records, committee_size);
+                    for status in &outcome.statuses {
+                        match status.alert {
+                            LivenessAlert::Ok => {}
+                            LivenessAlert::TierW => {
+                                warn!(
+                                    validator = %status.validator_id,
+                                    miss_rate = %format!("{:.1}%", status.miss_rate * 100.0),
+                                    "H0-11B Tier-W liveness alert (≥10% miss in last 100 blocks)"
+                                );
+                            }
+                            LivenessAlert::TierO => {
+                                warn!(
+                                    validator = %status.validator_id,
+                                    miss_rate = %format!("{:.1}%", status.miss_rate * 100.0),
+                                    "H0-11B Tier-O liveness alert (≥20% miss in last 200 blocks) — operator investigation required"
+                                );
+                            }
+                            LivenessAlert::ThresholdBreached => {
+                                warn!(
+                                    validator = %status.validator_id,
+                                    miss_rate = %format!("{:.1}%", status.miss_rate * 100.0),
+                                    blocks_above = status.blocks_above_threshold,
+                                    grace_window = GRACE_WINDOW_BLOCKS,
+                                    "H0-11B threshold breached (≥33% miss) — in grace window, no action"
+                                );
+                            }
+                            LivenessAlert::SuspendEligible => {
+                                // Automatic suspension is intentionally disabled for
+                                // the production genesis. Log the eligibility and stop.
+                                // Enable by wiring jail_validator() here when the
+                                // suspension gate is lifted (ResumeValidator/probation
+                                // cycle Windows-confirmed).
+                                warn!(
+                                    validator = %status.validator_id,
+                                    miss_rate = %format!("{:.1}%", status.miss_rate * 100.0),
+                                    "H0-11B SuspendEligible (past grace window, >33% miss) — automatic suspension DISABLED"
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -6954,6 +7110,17 @@ impl Node {
             })
             .collect();
 
+        // H0-11B: same ResumeValidator snapshot as the multi-node commit_block path.
+        let resume_validator_attempts_pb: Vec<(usize, String)> = txs.iter().enumerate()
+            .filter_map(|(i, t)| {
+                if let chain_forge_execution::TxBody::ResumeValidator { validator_id } = &t.body {
+                    Some((i, validator_id.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         // Snapshot the validator set that actually produced this cert
         // BEFORE any epoch-boundary mutation below -- same reasoning as the
         // multi-node commit_block path (see `historical_validator_sets`'s
@@ -7139,6 +7306,32 @@ impl Node {
             }
         }
 
+        // H0-11B: same ResumeValidator unjail processing as the multi-node commit_block path.
+        {
+            let epoch = self.identity.clock.current_epoch;
+            for (idx, validator_id) in &resume_validator_attempts_pb {
+                let Some(result) = exec_result.tx_results.get(*idx) else { continue };
+                if !result.success { continue; }
+                match self.validator_registry.unjail(validator_id, epoch) {
+                    Ok(()) => {
+                        self.suspension_tracker.remove(validator_id);
+                        info!(
+                            validator = %validator_id,
+                            epoch,
+                            "H0-11B (propose_block): ResumeValidator unjailed validator (Jailed → Candidate)"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            validator = %validator_id,
+                            error = %e,
+                            "H0-11B (propose_block): ResumeValidator unjail failed"
+                        );
+                    }
+                }
+            }
+        }
+
         // Integration Point 4 (Push) — same stake-bond admission as the
         // multi-node commit path (see the full design comment there). This
         // is the devnet/single-node auto-commit path, so it needs its own
@@ -7194,6 +7387,88 @@ impl Node {
             if admitted > 0 {
                 updated_vs.height = height;
                 let _ = self.consensus.update_validator_set(updated_vs);
+            }
+
+            // Pass 5 (H0-11B): liveness policy evaluation — same logic as the
+            // multi-node commit_block path; see that path's full comment.
+            {
+                use chain_forge_validators::liveness_policy::{
+                    evaluate_liveness_policy, LivenessAlert, ValidatorLivenessRecord,
+                    LIVENESS_WINDOW_BLOCKS, GRACE_WINDOW_BLOCKS,
+                };
+                let committee_size = self.consensus.validator_set().validators.len();
+                let records: Vec<ValidatorLivenessRecord> = self.consensus.validator_set()
+                    .validators.iter()
+                    .filter_map(|v| {
+                        let id = &v.id.0;
+                        let (observed, missed_pct) = self.slasher.liveness_snapshot(id)?;
+                        let missed_abs = self.slasher.liveness_missed(id).unwrap_or(0) as u64;
+                        let tier_w_missed = missed_abs
+                            .saturating_mul(chain_forge_validators::liveness_policy::TIER_W_WINDOW_BLOCKS)
+                            .checked_div(LIVENESS_WINDOW_BLOCKS as u64)
+                            .unwrap_or(0);
+                        let tier_o_missed = missed_abs
+                            .saturating_mul(chain_forge_validators::liveness_policy::TIER_O_WINDOW_BLOCKS)
+                            .checked_div(LIVENESS_WINDOW_BLOCKS as u64)
+                            .unwrap_or(0);
+                        let threshold_breached = missed_pct >= chain_forge_validators::liveness_policy::SUSPENSION_THRESHOLD_PCT;
+                        let blocks_above = if threshold_breached {
+                            let entry = self.suspension_tracker
+                                .entry(id.clone())
+                                .or_insert(height);
+                            height.saturating_sub(*entry)
+                        } else {
+                            self.suspension_tracker.remove(id);
+                            0
+                        };
+                        Some(ValidatorLivenessRecord {
+                            validator_id:            id.clone(),
+                            missed_in_main_window:   missed_abs,
+                            blocks_in_main_window:   observed as u64,
+                            missed_in_tier_w_window: tier_w_missed,
+                            missed_in_tier_o_window: tier_o_missed,
+                            blocks_above_threshold:  blocks_above,
+                        })
+                    })
+                    .collect();
+                if !records.is_empty() {
+                    let outcome = evaluate_liveness_policy(&records, committee_size);
+                    for status in &outcome.statuses {
+                        match status.alert {
+                            LivenessAlert::Ok => {}
+                            LivenessAlert::TierW => {
+                                warn!(
+                                    validator = %status.validator_id,
+                                    miss_rate = %format!("{:.1}%", status.miss_rate * 100.0),
+                                    "H0-11B Tier-W liveness alert (≥10% miss in last 100 blocks)"
+                                );
+                            }
+                            LivenessAlert::TierO => {
+                                warn!(
+                                    validator = %status.validator_id,
+                                    miss_rate = %format!("{:.1}%", status.miss_rate * 100.0),
+                                    "H0-11B Tier-O liveness alert (≥20% miss in last 200 blocks) — operator investigation required"
+                                );
+                            }
+                            LivenessAlert::ThresholdBreached => {
+                                warn!(
+                                    validator = %status.validator_id,
+                                    miss_rate = %format!("{:.1}%", status.miss_rate * 100.0),
+                                    blocks_above = status.blocks_above_threshold,
+                                    grace_window = GRACE_WINDOW_BLOCKS,
+                                    "H0-11B threshold breached (≥33% miss) — in grace window, no action"
+                                );
+                            }
+                            LivenessAlert::SuspendEligible => {
+                                warn!(
+                                    validator = %status.validator_id,
+                                    miss_rate = %format!("{:.1}%", status.miss_rate * 100.0),
+                                    "H0-11B SuspendEligible (past grace window, >33% miss) — automatic suspension DISABLED"
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
 
