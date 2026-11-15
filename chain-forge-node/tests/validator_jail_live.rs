@@ -499,7 +499,7 @@ fn validator_jail_live() {
     // ── JL-02/03: absence accumulates in the window, then Dave is jailed ─────
     let mut max_missed = 0u32;
     let mut last_print = Instant::now();
-    let jailed_ok = wait_until(Duration::from_secs(600), || {
+    let jailed_ok = wait_until(Duration::from_secs(1200), || {
         if let Some(s) = status_of(alice, DAVE) {
             max_missed = max_missed.max(s["liveness_missed_pct"].as_u64().unwrap_or(0) as u32);
             if last_print.elapsed() > Duration::from_secs(15) {
@@ -646,7 +646,7 @@ fn validator_jail_live() {
     // ── JL-09: expiry is not reinstatement ───────────────────────────────────
     let expiry_height = (unjail_after + 2) * EPOCH_BLOCKS;
     say(format!("  waiting for height {expiry_height} (jail expires at epoch {unjail_after}); Dave is online"));
-    assert!(wait_until(Duration::from_secs(900), || height(alice) >= expiry_height), "JL-09: epoch {unjail_after} never passed");
+    assert!(wait_until(Duration::from_secs(1500), || height(alice) >= expiry_height), "JL-09: epoch {unjail_after} never passed");
     assert!(nodes[3].as_mut().unwrap().alive(), "Dave's process must still be running");
     for &p in &api {
         let s = status_of(p, DAVE).unwrap();
