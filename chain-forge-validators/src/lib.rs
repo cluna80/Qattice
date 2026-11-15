@@ -22,6 +22,8 @@
 ///
 /// Whitepaper refs: Sections 3, 3.3, 6.3, Q6 (slashing), Q14 (liveness).
 
+pub mod bootstrap_retirement;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use serde::{Deserialize, Serialize};
 use chain_forge_consensus::{ValidatorId, ValidatorInfo, ValidatorSet, PersonhoodConfig};
@@ -1343,6 +1345,13 @@ impl ValidatorRegistry {
     /// All registered validators regardless of status.
     pub fn all_validators(&self) -> Vec<&ValidatorRecord> {
         self.validators.values().collect()
+    }
+
+    /// Iterator over all registered validator records (any status).
+    /// Used by the bootstrap-retirement filter and other callers that
+    /// need to traverse the full set without allocating a Vec.
+    pub fn validators(&self) -> impl Iterator<Item = &ValidatorRecord> {
+        self.validators.values()
     }
 
     pub fn get(&self, validator_id: &str) -> ValResult<&ValidatorRecord> {
