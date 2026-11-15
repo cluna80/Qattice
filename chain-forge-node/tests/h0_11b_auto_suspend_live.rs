@@ -78,7 +78,7 @@ fn genesis_path() -> PathBuf {
 }
 
 fn key_file(label: &str) -> PathBuf {
-    repo_root().join("tests").join("devnet").join("keys").join(format!("{label}.key.json"))
+    repo_root().join("tests").join("devnet").join("keys").join("mldsa").join(format!("{label}.key.json"))
 }
 
 struct NodeHandle { proc: Child }
