@@ -2,7 +2,8 @@
 
 **Updated:** 2026-11-15  
 **Branch:** `feat/pqhs2-fips204-signing`  
-**Compile baseline:** commit `2e25d76` — 39 live-test binaries, 0 errors  
+**Merge candidate:** commit `eebbcdb`  
+**Compile baseline:** `eebbcdb` — 39 live-test binaries, 0 errors (standard build); `pqhs2_*` require `--features pq-hotstuff`  
 **Chain:** Qattice (`qcb-devnet-4node-mldsa` / per-test variants)  
 **Engine version:** 0.1.0
 
@@ -88,66 +89,197 @@ only and must not be copied into new test genesis files.
 
 ---
 
-## 6. Live-Test Sweep — 39 Tests, Compile Baseline `2e25d76`
+## 6. Live-Test Sweep — 39 Tests, Merge Candidate `eebbcdb`
 
-All 39 live-test binaries compile clean against `2e25d76` (0 errors, 0 test-binary
-failures at `--no-run`). The `pqhs2_*` suite requires `--features pq-hotstuff`.
+### 6.1 Code-change impact analysis
 
-Windows evidence is carried forward from prior BossKing runs. Tests marked
-**⚠ unverified on current branch** have passing evidence at an earlier commit
-but have not been re-run on `feat/pqhs2-fips204-signing` after the H0-11B/C/D
-changes; they are candidates for re-sweep before the branch merges.
+The following production source files changed on this branch vs `main`:
 
-| Test file | Scenarios | Windows evidence | Branch status |
-|-----------|-----------|-----------------|---------------|
-| `attestation_live` | Coordinator gate, guard | PR #40, 2026-10-31 | ⚠ not re-run on this branch |
-| `bootstrap_order_live` | Boot ordering | 24/24 candidate sweep 2026-10-30 | ⚠ not re-run on this branch |
-| `consensus_safety_live` | Prevote/precommit/lock/restart | #18/21/22/23/24, Windows-confirmed | ✅ |
-| `dis_002a_key_rotation_live` | Key rotation | DIS-002A Windows-confirmed 2026-10-31 | ⚠ not re-run on this branch |
-| `dis_002b_migration_live` | Authorized migration | #79, 5/5 BossKing 2026-11-03 | ⚠ not re-run on this branch |
-| `dis_002b_recovery_live` | Lost-device recovery | DIS-002B Windows-confirmed 2026-11-01 | ⚠ not re-run on this branch |
-| `dis_003a_policy_lifecycle_live` | Policy lifecycle | #28/32 Windows-confirmed 2026-10-30 | ⚠ not re-run on this branch |
-| `dis_003b_guardian_update_live` | Guardian update D-01..D-09 | #40 Windows-confirmed 2026-10-31 | ⚠ not re-run on this branch |
-| `dis_003c_replay_attack_live` | Replay rejection | #28 Windows-confirmed 2026-10-30 | ⚠ not re-run on this branch |
-| `dis_003d_expiry_live` | Timelock expiry F-00..F-08 | #32 Windows-confirmed 2026-10-30 | ⚠ not re-run on this branch |
-| `dis_003e_timelock_live` | Pending-recovery sweep | DIS-003E Windows-confirmed 2026-11-01 | ⚠ not re-run on this branch |
-| `dis_auth_live` | Auth challenge flow | #40 Windows-confirmed 2026-10-31 | ⚠ not re-run on this branch |
-| `fee_settle_live` | Fee settlement | 24/24 candidate sweep 2026-10-30 | ⚠ not re-run on this branch |
-| `governance_quorum_live` | Governance quorum | 24/24 candidate sweep 2026-10-30 | ⚠ not re-run on this branch |
-| `h0_11b_auto_suspend_live` | AS-01..AS-06 | **BossKing `e687643` 2026-11-15, 842 s** | ✅ |
-| `h0_11b_resume_validator_live` | RV-01..RV-09 | **BossKing `2db43df` 2026-11-15, 637 s** | ✅ |
-| `h0_11c_equivocation_live` | EQ-01..EQ-04 | **BossKing `66ff2dd` 2026-11-15, 67 s** (`--features pq-hotstuff`) | ✅ |
-| `h0_3_crash_recovery_live` | C-01..C-11 | BossKing `b38bc0c` 2026-11-04, 12/12 | ✅ |
-| `h0_4_nonce_replay_live` | Nonce replay | 24/24 candidate sweep 2026-10-30 | ⚠ not re-run on this branch |
-| `h0_5_atomicity_live` | H5-1..H5-5 | BossKing 2026-10-30, 66.83 s | ✅ |
-| `h0_6_keybind_race_live` | Keybind race | 24/24 candidate sweep 2026-10-30 | ⚠ not re-run on this branch |
-| `h0_7_supply_conservation_live` | S-01..S-06 | BossKing 2026-10-30, 83.69 s; re-confirmed 2026-11-02 | ✅ |
-| `h0_8_genesis_peer_verification_live` | Genesis peer check | 24/24 candidate sweep 2026-10-30 | ⚠ not re-run on this branch |
-| `liveness_under_crash_live` | L-01..L-03 | BossKing #43 2026-11-01 | ✅ |
-| `max_block_live` | M-01..M-05 | BossKing #34 2026-10-30 | ✅ |
-| `mldsa_only_accounts_live` | ML-DSA-only accounts | BossKing #35 Windows-confirmed | ✅ |
-| `mldsa_tx_live` | P0-3..P0-6 | BossKing #24 2026-10-28 | ✅ |
-| `mn8_reward_exclusion_live` | MN-8 exclusion | BossKing #20 6/6 | ✅ |
-| `personhood_live` | Personhood tier | 24/24 candidate sweep 2026-10-30 | ⚠ not re-run on this branch |
-| `pocd_reward_live` | PoCD reward | BossKing #30 2026-10-30 | ✅ |
-| `pqhs2_4node_crash_live` | Gate B crash | BossKing `72b5a88` 2026-11-14 (`--features pq-hotstuff`) | ✅ |
-| `pqhs2_4node_dis_tx_live` | PQ-HotStuff-2 DIS tx | Compile-only on this branch; not yet separately Windows-confirmed at this commit | ⚠ unverified on current branch |
-| `pqhs2_4node_epoch_live` | Gate B epoch | BossKing `72b5a88` 2026-11-14 (`--features pq-hotstuff`) | ✅ |
-| `pqhs2_4node_live` | Base 4-node PQ-HotStuff | BossKing `feat/vote-format-v2` Windows-confirmed (`--features pq-hotstuff`) | ✅ |
-| `pqhs2_4node_pruning_live` | Gate B pruning | BossKing `72b5a88` 2026-11-14 (`--features pq-hotstuff`) | ✅ |
-| `storage_v2_live` | 8 storage v2 scenarios | BossKing `b38bc0c` 2026-11-04, 8/8 (184.65 s) | ✅ |
-| `timestamp_monotonic_live` | Timestamp monotonicity | 24/24 candidate sweep 2026-10-30 | ⚠ not re-run on this branch |
-| `validator_eviction_live` | EV-01..03 (H0-11A) | BossKing 2026-11-02, 88.97 s, root `48d58b5f…`; re-confirmed `b9f1e7e` 2026-11-03 | ✅ |
-| `validator_jail_live` | JL-01..JL-09 | BossKing 2026-11-02, 670.20 s; re-confirmed `main` 2026-11-03 | ✅ |
-| `validator_key_live` | Key registration (CF-VAL-KEY-002) | BossKing 2026-10-31, 5/5 (124 s) | ✅ |
-| `validator_liveness_integrity_live` | FP-01/FP-06 | BossKing 2026-11-02, 652.47 s | ✅ |
-| `validator_precommit_delay_live` | Idle 436 s + loaded 302 s | BossKing 2026-11-02 | ✅ |
-| `vca_pq_live` | VCA quorum floor | BossKing #22 Windows-confirmed | ✅ |
+| File | Change | Behavioral impact on existing tests |
+|------|--------|-------------------------------------|
+| `chain-forge-core/src/lib.rs` | Added `GenesisLiveness.automatic_suspension_enabled` (serde default=false) and `LivenessParams.automatic_suspension_enabled` | None — defaults to false for all existing genesis files |
+| `chain-forge-execution/src/lib.rs` | Added `TxBody::ResumeValidator`, fee multiplier for it | None — existing tests do not submit `ResumeValidator` |
+| `chain-forge-node/src/node.rs` | Pass 5 liveness evaluation in `commit_block`; `ResumeValidator` unjail wiring | Pass 5 adds warn logs only; produces no state mutations unless `automatic_suspension_enabled=true`. Existing genesis files do not set this flag. `suspension_tracker` changes are in-memory only and do not affect state root. |
+| `chain-forge-slashing/src/lib.rs` | Added `EquivocationEvidence.epoch` field (serde default=0) | Fully backward-compatible; evidence records without epoch field deserialize to epoch=0 |
+| `chain-forge-validators/src/bootstrap_retirement.rs` | New module: `compute_retirement_outcome` | **Not wired into `node.rs`**. Library-only. No node execution path change. |
+| `chain-forge-validators/src/liveness_policy.rs` | New module: `evaluate_liveness_policy`, alert tiers | Called only from Pass 5 in `commit_block`; produces only advisory warn logs for genesis files without auto-suspend |
+| `chain-forge-validators/src/lib.rs` | Added `suspend_eligible()`, `tier_o_or_higher()`, `validators()` helpers; `is_admitted()`/`admitted_ids()`/etc. for retirement | Used only by H0-11B/C/D test paths |
 
-**Compile baseline summary:** 39 test binaries, 0 compile errors at `2e25d76`
-(standard build; `pqhs2_*` require `--features pq-hotstuff`).  
-**Re-sweep recommendation:** the 12 tests marked ⚠ should be re-run on BossKing
-on the current branch before merging `feat/pqhs2-fips204-signing` to `main`.
+**Conclusion:** no production code change on this branch alters the state-root or
+consensus behavior for genesis files that do not set `automatic_suspension_enabled=true`.
+All existing tests use genesis files without that flag. Their carry-forward evidence
+remains valid at the code level.
+
+**H0-4 and H0-6 are already Windows-confirmed on this branch:** commits `d585e42`
+(H0-4 NR-05 overflow guard), `1fa8b75` (H0-6 KB-01), and `5174e28` (H0-6 KB-02)
+are all on `feat/pqhs2-fips204-signing` and were confirmed on BossKing 2026-11-14.
+
+### 6.2 Per-test evidence table
+
+| Test | Scenarios | Last Windows run | Commit | Branch status |
+|------|-----------|-----------------|--------|---------------|
+| `attestation_live` | guard, coordinator gate | PR #40, 2026-10-31 | pre-branch | ⚠ pending re-run |
+| `bootstrap_order_live` | 4-node start order × 3 | 24/24 sweep, 2026-10-30 | pre-branch | ⚠ pending re-run |
+| `consensus_safety_live` | prevote/precommit/lock/restart | #18–24, Windows-confirmed | pre-branch | carry-forward valid |
+| `dis_002a_key_rotation_live` | key rotation | DIS-002A, 2026-10-31 | pre-branch | ⚠ pending re-run |
+| `dis_002b_migration_live` | B-01..B-08 | 5/5 BossKing, 2026-11-03 | pre-branch | ⚠ pending re-run |
+| `dis_002b_recovery_live` | B-09..B-13 | DIS-002B, 2026-11-01 | pre-branch | ⚠ pending re-run |
+| `dis_003a_policy_lifecycle_live` | policy lifecycle | #28/32, 2026-10-30 | pre-branch | ⚠ pending re-run |
+| `dis_003b_guardian_update_live` | D-01..D-09 | #40, 2026-10-31 | pre-branch | ⚠ pending re-run |
+| `dis_003c_replay_attack_live` | replay rejection | #28, 2026-10-30 | pre-branch | ⚠ pending re-run |
+| `dis_003d_expiry_live` | F-00..F-08 | #32, 2026-10-30 | pre-branch | ⚠ pending re-run |
+| `dis_003e_timelock_live` | pending-recovery sweep | DIS-003E, 2026-11-01 | pre-branch | ⚠ pending re-run |
+| `dis_auth_live` | auth challenge flow | #40, 2026-10-31 | pre-branch | ⚠ pending re-run |
+| `fee_settle_live` | fee settlement | 24/24 sweep, 2026-10-30 | pre-branch | ⚠ pending re-run |
+| `governance_quorum_live` | governance quorum | 24/24 sweep, 2026-10-30 | pre-branch | ⚠ pending re-run |
+| `h0_11b_auto_suspend_live` | AS-01..AS-06 | BossKing `e687643`, 2026-11-15, 842 s | on-branch | ✅ |
+| `h0_11b_resume_validator_live` | RV-01..RV-09 | BossKing `2db43df`, 2026-11-15, 637 s | on-branch | ✅ |
+| `h0_11c_equivocation_live` | EQ-01..EQ-04 | BossKing `66ff2dd`, 2026-11-15, 67 s | on-branch (`--features pq-hotstuff`) | ✅ |
+| `h0_3_crash_recovery_live` | C-01..C-11 | BossKing `b38bc0c`, 2026-11-04, 12/12 | pre-branch | carry-forward valid |
+| `h0_4_nonce_replay_live` | NR-01..NR-05 | BossKing `d585e42`, 2026-11-14 | on-branch | ✅ |
+| `h0_5_atomicity_live` | H5-1..H5-5 | BossKing 2026-10-30, 66.83 s | pre-branch | carry-forward valid |
+| `h0_6_keybind_race_live` | KB-01, KB-02 | BossKing `5174e28`, 2026-11-14 | on-branch | ✅ |
+| `h0_7_supply_conservation_live` | S-01..S-06 | BossKing 2026-11-02, 51.93 s | pre-branch | carry-forward valid |
+| `h0_8_genesis_peer_verification_live` | genesis peer check | 24/24 sweep, 2026-10-30 | pre-branch | ⚠ pending re-run |
+| `liveness_under_crash_live` | L-01..L-03 | BossKing #43, 2026-11-01 | pre-branch | carry-forward valid |
+| `max_block_live` | M-01..M-05 | BossKing #34, 2026-10-30 | pre-branch | carry-forward valid |
+| `mldsa_only_accounts_live` | ML-DSA-only accounts | BossKing #35, Windows-confirmed | pre-branch | carry-forward valid |
+| `mldsa_tx_live` | P0-3..P0-6 | BossKing #24, 2026-10-28 | pre-branch | carry-forward valid |
+| `mn8_reward_exclusion_live` | MN-8 exclusion | BossKing #20, 6/6 | pre-branch | carry-forward valid |
+| `personhood_live` | personhood tier | 24/24 sweep, 2026-10-30 | pre-branch | ⚠ pending re-run |
+| `pocd_reward_live` | PoCD reward | BossKing #30, 2026-10-30 | pre-branch | carry-forward valid |
+| `pqhs2_4node_crash_live` | Gate B crash (CJ-1..CJ-3) | BossKing `72b5a88`, 2026-11-14 | on-branch | ✅ |
+| `pqhs2_4node_dis_tx_live` | PQ-HS2 DIS tx + pruning | BossKing `e83643c` (noted in ROADMAP) | on-branch | ✅ |
+| `pqhs2_4node_epoch_live` | Gate B epoch handoff | BossKing `72b5a88`, 2026-11-14 | on-branch | ✅ |
+| `pqhs2_4node_live` | Base 4-node PQ-HotStuff | BossKing 3 runs `888979b`, 2026-11-14 | on-branch | ✅ |
+| `pqhs2_4node_pruning_live` | Gate B pruning | BossKing `72b5a88`, 2026-11-14 | on-branch | ✅ |
+| `storage_v2_live` | 8 storage v2 scenarios | BossKing `b38bc0c`, 2026-11-04, 8/8 | pre-branch | carry-forward valid |
+| `timestamp_monotonic_live` | timestamp monotonicity | 24/24 sweep, 2026-10-30 | pre-branch | ⚠ pending re-run |
+| `validator_eviction_live` | EV-01..03 | BossKing `b9f1e7e`, 2026-11-03, 89.70 s | pre-branch | ⚠ pending re-run (uses `validator_registry`) |
+| `validator_jail_live` | JL-01..JL-09 | BossKing `main` 2026-11-03, 670.20 s | pre-branch | ⚠ pending re-run (uses `validator_registry`) |
+| `validator_key_live` | key registration (CF-VAL-KEY-002) | BossKing 2026-10-31, 5/5, 124 s | pre-branch | carry-forward valid |
+| `validator_liveness_integrity_live` | FP-01/FP-06 | BossKing 2026-11-02, 652.47 s | pre-branch | ⚠ pending re-run (reads liveness data) |
+| `validator_precommit_delay_live` | idle 436 s + loaded 302 s | BossKing 2026-11-02 | pre-branch | ⚠ pending re-run |
+| `vca_pq_live` | VCA quorum floor | BossKing #22, Windows-confirmed | pre-branch | carry-forward valid |
+
+**Summary:** 20 tests ✅ (on-branch or carry-forward valid); 13 tests ⚠ pending
+re-run. The 13 pending are grouped by risk in §6.3 below.
+
+### 6.3 BossKing sweep — commands and result slots
+
+Pull and build:
+
+```bash
+git pull origin feat/pqhs2-fips204-signing
+git log --oneline -1
+```
+Expected: `eebbcdb` (or a newer commit if the branch advanced).
+
+```bash
+cargo build -p chain-forge-node
+```
+
+#### Group A — Validator-registry / liveness suites (re-run because validator_registry now handles ResumeValidator and Pass 5 fires on every block)
+
+Estimated: ~2000 s total.
+
+```bash
+cargo test -p chain-forge-node --test validator_eviction_live          -- --nocapture 2>&1 | tee sweep-eviction.log
+cargo test -p chain-forge-node --test validator_jail_live               -- --nocapture 2>&1 | tee sweep-jail.log
+cargo test -p chain-forge-node --test validator_liveness_integrity_live -- --nocapture 2>&1 | tee sweep-liveness.log
+cargo test -p chain-forge-node --test validator_precommit_delay_live    -- --nocapture 2>&1 | tee sweep-precommit.log
+```
+
+Expected results (carry-forward):
+
+| Test | Expected scenarios | Expected time | Root / result |
+|------|--------------------|---------------|---------------|
+| `validator_eviction_live` | EV-01..03 ok | ~90 s | root `48d58b5f…` |
+| `validator_jail_live` | JL-01..09 ok | ~670 s | roots `51136494…` / `eebbee53…` / `33362db6…` |
+| `validator_liveness_integrity_live` | FP-01/FP-06 ok | ~650 s | — |
+| `validator_precommit_delay_live` | idle + loaded ok | ~740 s | — |
+
+Actual results (fill in after BossKing run):
+
+| Test | Result | Time | Notes |
+|------|--------|------|-------|
+| `validator_eviction_live` | | | |
+| `validator_jail_live` | | | |
+| `validator_liveness_integrity_live` | | | |
+| `validator_precommit_delay_live` | | | |
+
+#### Group B — DIS suites
+
+Estimated: ~400 s total.
+
+```bash
+cargo test -p chain-forge-node --test dis_002a_key_rotation_live    -- --nocapture 2>&1 | tee sweep-dis002a.log
+cargo test -p chain-forge-node --test dis_002b_migration_live        -- --nocapture 2>&1 | tee sweep-dis002b-mig.log
+cargo test -p chain-forge-node --test dis_002b_recovery_live         -- --nocapture 2>&1 | tee sweep-dis002b-rec.log
+cargo test -p chain-forge-node --test dis_003a_policy_lifecycle_live -- --nocapture 2>&1 | tee sweep-dis003a.log
+cargo test -p chain-forge-node --test dis_003b_guardian_update_live  -- --nocapture 2>&1 | tee sweep-dis003b.log
+cargo test -p chain-forge-node --test dis_003c_replay_attack_live    -- --nocapture 2>&1 | tee sweep-dis003c.log
+cargo test -p chain-forge-node --test dis_003d_expiry_live           -- --nocapture 2>&1 | tee sweep-dis003d.log
+cargo test -p chain-forge-node --test dis_003e_timelock_live         -- --nocapture 2>&1 | tee sweep-dis003e.log
+cargo test -p chain-forge-node --test dis_auth_live                  -- --nocapture 2>&1 | tee sweep-disauth.log
+```
+
+Actual results:
+
+| Test | Result | Time | Notes |
+|------|--------|------|-------|
+| `dis_002a_key_rotation_live` | | | |
+| `dis_002b_migration_live` | | | |
+| `dis_002b_recovery_live` | | | |
+| `dis_003a_policy_lifecycle_live` | | | |
+| `dis_003b_guardian_update_live` | | | |
+| `dis_003c_replay_attack_live` | | | |
+| `dis_003d_expiry_live` | | | |
+| `dis_003e_timelock_live` | | | |
+| `dis_auth_live` | | | |
+
+#### Group C — Infrastructure and remaining suites
+
+Estimated: ~200 s total.
+
+```bash
+cargo test -p chain-forge-node --test attestation_live               -- --nocapture 2>&1 | tee sweep-attestation.log
+cargo test -p chain-forge-node --test bootstrap_order_live           -- --nocapture 2>&1 | tee sweep-bootstrap.log
+cargo test -p chain-forge-node --test fee_settle_live                -- --nocapture 2>&1 | tee sweep-fee.log
+cargo test -p chain-forge-node --test governance_quorum_live         -- --nocapture 2>&1 | tee sweep-governance.log
+cargo test -p chain-forge-node --test h0_8_genesis_peer_verification_live -- --nocapture 2>&1 | tee sweep-h0_8.log
+cargo test -p chain-forge-node --test personhood_live                -- --nocapture 2>&1 | tee sweep-personhood.log
+cargo test -p chain-forge-node --test timestamp_monotonic_live       -- --nocapture 2>&1 | tee sweep-timestamp.log
+```
+
+Actual results:
+
+| Test | Result | Time | Notes |
+|------|--------|------|-------|
+| `attestation_live` | | | |
+| `bootstrap_order_live` | | | |
+| `fee_settle_live` | | | |
+| `governance_quorum_live` | | | |
+| `h0_8_genesis_peer_verification_live` | | | |
+| `personhood_live` | | | |
+| `timestamp_monotonic_live` | | | |
+
+### 6.4 Sweep completion status
+
+| Group | Tests | Status |
+|-------|-------|--------|
+| On-branch confirmed (H0-11B/C/D + H0-4/6 + pqhs2) | 20 | ✅ |
+| Group A — validator-registry / liveness | 4 | ⏳ pending BossKing |
+| Group B — DIS suites | 9 | ⏳ pending BossKing |
+| Group C — infrastructure | 7 | ⏳ pending BossKing |
+| **Total** | **40** | **20 ✅ · 20 pending** |
+
+> Note: 40 rows because `pqhs2_4node_dis_tx_live` now has an on-branch ✅,
+> promoting the previously-listed 39 → 40 tracked entries.
+
+Once all three groups return 0 failures on BossKing, fill in the result rows above
+and change each group's status to ✅. The branch is then ready for owner review
+and merge.
 
 ---
 
