@@ -954,10 +954,19 @@ pub struct Node {
     /// a validator whose threshold was first breached at height H is not
     /// eligible for suspension until height H + GRACE_WINDOW_BLOCKS.
     ///
-    /// Entry is removed when the miss-rate drops below the threshold.
-    /// Not persisted: reconstructed from the slashing module's ring buffers
-    /// on node restart (the validator remains in ThresholdBreached state until
-    /// the grace window clears, which is safe — it cannot be jailed before that).
+    /// Entry is removed when the miss-rate drops below the threshold or when
+    /// a successful `ResumeValidator` tx unjails the validator.
+    ///
+    /// **Not persisted.** On restart every entry is absent, so a validator
+    /// whose threshold was first breached before the restart gets a fresh grace
+    /// window. This is conservative (safer than over-counting): a validator
+    /// cannot be jailed before the grace window clears, and automatic suspension
+    /// is disabled for the production genesis regardless. Persistence to
+    /// StateStore is deferred to the phase when enforcement is enabled.
+    ///
+    /// **Mutation policy:** only commit_block (the finality path) may insert
+    /// or remove entries. propose_block reads this map but does not write it,
+    /// preventing grace-window start heights from being recorded before finality.
     suspension_tracker: std::collections::HashMap<String, u64>,
 }
 
@@ -5609,9 +5618,19 @@ impl Node {
             }
 
             // Pass 5 (H0-11B): evaluate liveness policy and log alert tiers.
-            // Automatic suspension is disabled for the production genesis
-            // (`suspension_enabled = false`). Tier-W/Tier-O alerts are logged
-            // unconditionally; SuspendEligible results are logged only.
+            // This is the finality path (commit_block); it is the ONLY place
+            // that mutates suspension_tracker. The propose_block path (devnet
+            // auto-commit) runs a read-only advisory pass to avoid recording
+            // the grace-window start before finality.
+            //
+            // suspension_tracker is NOT persisted. On restart every entry is
+            // absent, so a validator whose threshold was first breached before
+            // the restart gets a fresh grace window. This is conservative and
+            // safe: a validator cannot be jailed before the grace window clears,
+            // and enforcement is disabled anyway for the production genesis.
+            // Exact persistence would require writing to StateStore on every
+            // epoch boundary; that is deferred to the phase when enforcement
+            // is enabled.
             {
                 use chain_forge_validators::liveness_policy::{
                     evaluate_liveness_policy, LivenessAlert, ValidatorLivenessRecord,
@@ -5626,9 +5645,15 @@ impl Node {
                         let missed_abs = self.slasher.liveness_missed(id).unwrap_or(0) as u64;
                         let blocks_in_window = observed as u64;
                         let missed_in_window = missed_abs;
-                        // Approximate sub-window misses proportionally from the
-                        // main-window rate; exact sub-window tracking requires
-                        // dedicated ring buffers in SlashingModule (future work).
+                        // Sub-window miss counts are proportional estimates from the
+                        // main-window miss count (missed * sub_window / main_window).
+                        // These are ADVISORY only: used for Tier-W/O alert logging,
+                        // not for enforcement decisions. A validator with a uniform
+                        // miss rate satisfies the estimate exactly; a validator with
+                        // a bursty miss pattern may show a Tier-W alert slightly
+                        // early or slightly late. Exact sub-window accounting requires
+                        // dedicated ring buffers in SlashingModule (future work, gated
+                        // on automatic suspension being enabled).
                         let tier_w_missed = missed_in_window
                             .saturating_mul(chain_forge_validators::liveness_policy::TIER_W_WINDOW_BLOCKS)
                             .checked_div(LIVENESS_WINDOW_BLOCKS as u64)
@@ -5639,6 +5664,11 @@ impl Node {
                             .unwrap_or(0);
                         // Update suspension tracker: record when threshold was first
                         // breached; clear when miss-rate drops back below threshold.
+                        // blocks_above is a height difference, not a block count of
+                        // consecutive above-threshold samples: the validator may have
+                        // dipped below the threshold and back up during this interval.
+                        // For enforcement, treat blocks_above as a lower bound on the
+                        // duration at which the validator was observable above 33%.
                         let threshold_breached = missed_pct >= chain_forge_validators::liveness_policy::SUSPENSION_THRESHOLD_PCT;
                         let blocks_above = if threshold_breached {
                             let entry = self.suspension_tracker
@@ -7389,8 +7419,24 @@ impl Node {
                 let _ = self.consensus.update_validator_set(updated_vs);
             }
 
-            // Pass 5 (H0-11B): liveness policy evaluation — same logic as the
-            // multi-node commit_block path; see that path's full comment.
+            // Pass 5 (H0-11B): liveness policy evaluation — READ-ONLY advisory
+            // logging only. This path (propose_block / devnet auto-commit) DOES
+            // NOT mutate suspension_tracker. Only commit_block (the finality path
+            // in multi-node Tendermint) mutates it.
+            //
+            // Rationale: in multi-node mode the proposer calls propose_block to
+            // build the block AND commit_block when 2f+1 precommits arrive. If
+            // propose_block mutated the tracker, the grace-window start height
+            // would be recorded before finality, and commit_block would then
+            // compute a shorter (or zero) grace window for the same epoch — the
+            // exact non-determinism the user flagged. Keeping propose_block
+            // read-only means the tracker is updated exactly once, at finality.
+            //
+            // For single-node devnet (the only mode where propose_block is both
+            // proposal and commit): the tracker is NOT updated here. The devnet
+            // is for liveness alerting, not enforcement, so this is acceptable.
+            // If single-node devnet tracking is needed later, check whether
+            // commit_block is reachable on this path before enabling the write.
             {
                 use chain_forge_validators::liveness_policy::{
                     evaluate_liveness_policy, LivenessAlert, ValidatorLivenessRecord,
@@ -7403,6 +7449,10 @@ impl Node {
                         let id = &v.id.0;
                         let (observed, missed_pct) = self.slasher.liveness_snapshot(id)?;
                         let missed_abs = self.slasher.liveness_missed(id).unwrap_or(0) as u64;
+                        // Sub-window miss counts are proportional estimates from the
+                        // main-window rate. They are ADVISORY only: used for Tier-W/O
+                        // alert logging, not for enforcement decisions. Exact sub-window
+                        // accounting requires dedicated ring buffers in SlashingModule.
                         let tier_w_missed = missed_abs
                             .saturating_mul(chain_forge_validators::liveness_policy::TIER_W_WINDOW_BLOCKS)
                             .checked_div(LIVENESS_WINDOW_BLOCKS as u64)
@@ -7412,13 +7462,14 @@ impl Node {
                             .checked_div(LIVENESS_WINDOW_BLOCKS as u64)
                             .unwrap_or(0);
                         let threshold_breached = missed_pct >= chain_forge_validators::liveness_policy::SUSPENSION_THRESHOLD_PCT;
+                        // Read-only: use the existing tracker entry if present, but
+                        // do NOT insert or remove. The commit_block path manages writes.
                         let blocks_above = if threshold_breached {
-                            let entry = self.suspension_tracker
-                                .entry(id.clone())
-                                .or_insert(height);
-                            height.saturating_sub(*entry)
+                            self.suspension_tracker
+                                .get(id)
+                                .map(|&start| height.saturating_sub(start))
+                                .unwrap_or(0)
                         } else {
-                            self.suspension_tracker.remove(id);
                             0
                         };
                         Some(ValidatorLivenessRecord {

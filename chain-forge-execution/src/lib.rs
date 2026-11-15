@@ -1424,6 +1424,23 @@ impl Transaction {
         }
     }
 
+    /// H0-11B: submit a ResumeValidator (unjail) request.
+    /// Sender must equal `validator_id` (self-only authorization).
+    pub fn resume_validator(id: &str, validator_id: &str, nonce: u64) -> Self {
+        Self {
+            id: id.to_string(),
+            sender: validator_id.to_string(),
+            nonce,
+            body: TxBody::ResumeValidator { validator_id: validator_id.to_string() },
+            gas_limit: 50_000,
+            signature: vec![],
+            public_key: vec![],
+            pq_signatures: vec![],
+            sig_scheme:    None,
+            pq_public_key: vec![],
+        }
+    }
+
     /// Validator Onboarding (ROADMAP.md): begin/complete unbonding.
     pub fn unbond_validator(id: &str, sender: &str, nonce: u64) -> Self {
         Self {
@@ -5061,11 +5078,33 @@ impl Executor {
             }
 
             // ── H0-11B: ResumeValidator ───────────────────────────────────────
-            // The execution layer emits an event so node.rs post-processing can
-            // identify successful unjail requests and call validator_registry.unjail().
-            // No state mutation occurs here: the validator ledger (registry) lives
-            // in node.rs, not in StateStore.
+            // Authorization: sender must equal validator_id (self-only resume).
+            //
+            // Rationale: allowing any sender would let an adversary repeatedly
+            // ping the unjail path for a validator still inside its jail-release
+            // delay, burning the operator's nonce budget and spamming logs.
+            // The validator operator controls their own account; they submit the
+            // resume themselves. Genesis validators (is_genesis=true) are their
+            // own account and satisfy this rule naturally.
+            //
+            // Note: whether the validator is actually jailed at execution time is
+            // NOT checked here — the registry lives in node.rs, not in StateStore.
+            // If the validator is not jailed, node.rs post-processing calls
+            // unjail(), which returns an error that is logged as a warning. The tx
+            // receipt shows success (authorization was valid, event emitted) but
+            // the registry transition does not occur. This is the same pattern
+            // as BondValidator registry sync and is acceptable for Phase 3.
             TxBody::ResumeValidator { validator_id } => {
+                if tx.sender != *validator_id {
+                    return TransactionResult::err(
+                        tx.id.clone(), gas_required, tx.gas_limit,
+                        format!(
+                            "ResumeValidator: sender {} is not the validator ({}); \
+                             only the validator's own account may submit a resume",
+                            tx.sender, validator_id
+                        ),
+                    );
+                }
                 events.push(format!("resume_validator: validator_id={}", validator_id));
                 Ok(())
             }
