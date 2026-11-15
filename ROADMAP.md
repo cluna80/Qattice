@@ -2627,6 +2627,8 @@ security-validation prerequisites, not completed findings.
 
 ## QAT-FNDSA-001 — Dual post-quantum consensus signatures (research proposal, 2026-11-06)
 
+**Owner direction (2026-11-15):** FN-DSA (FIPS 206 / Falcon) is a natural fit as a **selectable signing scheme in the Chain Forge app** — its smaller signatures (~1,280 bytes vs ~3,309 bytes for ML-DSA-65) reduce per-vote bandwidth for large validator sets. This is confirmed as a **post-Phase-1 Chain Forge feature goal**, not a devnet change. ML-DSA-65 remains the locked consensus key scheme for Phase 0/1 (CLAUDE.md). FN-DSA support will be added as an optional `chain-forge-consensus` engine feature (new profile, governed activation, independent security review) after Phase 0 gates clear. The milestones A–E below remain the research and review gate sequence.
+
 **Status:** 🔲 Proposed / research only. **No consensus implementation, activation, genesis change, or validator-key migration is authorized by this entry.** This work is independent of the ongoing integration/validation PR stack and must not interrupt it.
 
 **Goal:** Evaluate cryptographic agility for Qattice's personhood-weighted BFT by retaining **ML-DSA-65 (FIPS 204)** as the default baseline and researching **FN-DSA-1024 (proposed FIPS 206)** as a second, experimental consensus-signature option. FIPS 206 finalization, independent review, and measured performance are production gates, not assumed accomplishments. The supported devnet currently uses ML-DSA-65-format validator keys with a **legacy consensus signing backend**; the FIPS 204-based signing-v2 path for *user transactions* does not upgrade consensus votes or block signatures.
