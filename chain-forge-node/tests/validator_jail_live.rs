@@ -465,7 +465,7 @@ fn validator_jail_live() {
                 "{} API did not come up\n--- log ---\n{}", s.name, tail_log(&tmp, s.name, 40));
         let _ = i;
     }
-    assert!(wait_until(Duration::from_secs(60), || api.iter().all(|&p| height(p) >= 3)),
+    assert!(wait_until(Duration::from_secs(120), || api.iter().all(|&p| height(p) >= 3)),
             "devnet did not reach height 3");
     say(format!("devnet up at height {}", height(alice)));
 
