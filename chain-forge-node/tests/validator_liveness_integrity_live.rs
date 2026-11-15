@@ -36,6 +36,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chain_forge_crypto::{MlDsaScheme, SchemeId, SignatureScheme, mldsa_tx_prehash};
 use chain_forge_execution::{Transaction, TxBody};
 
 const CHAIN_ID:     &str = "qcb-devnet-val-jail";
@@ -102,10 +103,24 @@ fn wait_until(timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
     false
 }
 
+fn ml_dsa_sign(mut tx: Transaction, seed: &str) -> Transaction {
+    let kp = MlDsaScheme.generate_keypair(seed).unwrap();
+    let body_json = serde_json::to_string(&tx.body).unwrap();
+    let message = mldsa_tx_prehash(CHAIN_ID, body_json.as_bytes());
+    let sig = MlDsaScheme.sign(&message, &kp).unwrap();
+    let sig_hex: String = sig.bytes.iter().map(|b| format!("{b:02x}")).collect();
+    tx.pq_signatures = vec![format!("mldsa65:{sig_hex}")];
+    tx.sig_scheme    = Some(SchemeId::MlDsa);
+    tx.pq_public_key = kp.public_key;
+    tx.signature     = vec![];
+    tx.public_key    = vec![];
+    tx
+}
+
 fn bond_tx(who: &str, n: u64) -> Transaction {
     let mut tx = Transaction::bond_validator(&format!("bond-{who}-{n}"), who, GENESIS_BOND as u128, n);
     if let TxBody::BondValidator { ref mut owner_identity_id, .. } = tx.body { *owner_identity_id = Some(who.to_string()); }
-    tx
+    ml_dsa_sign(tx, who)
 }
 
 fn submit_and_wait(port: u16, tx: &Transaction) -> serde_json::Value {
@@ -254,7 +269,7 @@ fn read_peer_id(log_path: &std::path::Path, timeout: std::time::Duration) -> Str
             let mut n = sender_nonce;
             let mut sent = 0u64;
             while !stop.load(Ordering::Relaxed) {
-                let tx = Transaction::transfer(&format!("load-{n}"), "qcb1carol", "qcb1eve", "uqcb", 1, n);
+                let tx = ml_dsa_sign(Transaction::transfer(&format!("load-{n}"), "qcb1carol", "qcb1eve", "uqcb", 1, n), "qcb1carol");
                 if http("POST", port, "/api/tx", &serde_json::to_string(&tx).unwrap())
                     .map_or(false, |r| r["status"].as_str() == Some("queued")) { n += 1; sent += 1; }
                 std::thread::sleep(Duration::from_millis(350));

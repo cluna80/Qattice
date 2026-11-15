@@ -48,6 +48,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chain_forge_crypto::{MlDsaScheme, SchemeId, SignatureScheme, mldsa_tx_prehash};
 use chain_forge_execution::{Transaction, TxBody};
 
 const CHAIN_ID:     &str = "qcb-devnet-val-delay";
@@ -145,10 +146,24 @@ fn wait_until(timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
     false
 }
 
+fn ml_dsa_sign(mut tx: Transaction, seed: &str) -> Transaction {
+    let kp = MlDsaScheme.generate_keypair(seed).unwrap();
+    let body_json = serde_json::to_string(&tx.body).unwrap();
+    let message = mldsa_tx_prehash(CHAIN_ID, body_json.as_bytes());
+    let sig = MlDsaScheme.sign(&message, &kp).unwrap();
+    let sig_hex: String = sig.bytes.iter().map(|b| format!("{b:02x}")).collect();
+    tx.pq_signatures = vec![format!("mldsa65:{sig_hex}")];
+    tx.sig_scheme    = Some(SchemeId::MlDsa);
+    tx.pq_public_key = kp.public_key;
+    tx.signature     = vec![];
+    tx.public_key    = vec![];
+    tx
+}
+
 fn bond_tx(who: &str, n: u64) -> Transaction {
     let mut tx = Transaction::bond_validator(&format!("bond-{who}-{n}"), who, GENESIS_BOND as u128, n);
     if let TxBody::BondValidator { ref mut owner_identity_id, .. } = tx.body { *owner_identity_id = Some(who.to_string()); }
-    tx
+    ml_dsa_sign(tx, who)
 }
 
 fn submit_and_wait(port: u16, tx: &Transaction) -> serde_json::Value {
@@ -298,7 +313,7 @@ fn fund_load_accounts(api: &[u16]) {
         let mut ids = vec![];
         for (who, port) in funders.iter() {
             if k >= LOAD_ACCOUNTS { break; }
-            let tx = Transaction::transfer(&format!("fund-{k}"), who, &load_addr(k), "uqcb", 50_000_000, nonce(*port, who));
+            let tx = ml_dsa_sign(Transaction::transfer(&format!("fund-{k}"), who, &load_addr(k), "uqcb", 50_000_000, nonce(*port, who)), who);
             let r = http("POST", *port, "/api/tx", &serde_json::to_string(&tx).unwrap()).unwrap_or_default();
             assert_eq!(r["status"].as_str(), Some("queued"), "funding tx {k} not queued: {r}");
             ids.push((*port, tx.id.clone()));
@@ -339,7 +354,7 @@ fn start_load(api: Vec<u16>) -> (Arc<AtomicBool>, std::thread::JoinHandle<u64>) 
                     Some((n, at)) => (committed > n && at.elapsed() >= LOAD_MIN_SPACING) || at.elapsed() > Duration::from_secs(14),
                 };
                 if !due { continue; }
-                let tx = Transaction::transfer(&format!("ld-{addr}-{committed}"), &addr, "qcb1alice", "uqcb", 1, committed);
+                let tx = ml_dsa_sign(Transaction::transfer(&format!("ld-{addr}-{committed}"), &addr, "qcb1alice", "uqcb", 1, committed), &addr);
                 let ok = http("POST", port, "/api/tx", &serde_json::to_string(&tx).unwrap())
                     .map_or(false, |r| r["status"].as_str() == Some("queued"));
                 if ok { sent[k] = Some((committed, Instant::now())); queued += 1; }

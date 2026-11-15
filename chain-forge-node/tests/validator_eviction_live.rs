@@ -37,7 +37,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chain_forge_crypto::{MlDsaScheme, SignatureScheme};
+use chain_forge_crypto::{MlDsaScheme, SchemeId, SignatureScheme, mldsa_tx_prehash};
 use chain_forge_execution::{Transaction, TxBody, validator_key_registration_signing_bytes};
 
 const CHAIN_ID:    &str = "qcb-devnet-val-evict";
@@ -300,6 +300,22 @@ fn voting_power(port: u16, addr: &str) -> u64 {
 
 // ── Tx builders ───────────────────────────────────────────────────────────────
 
+/// Sign `tx` with an ML-DSA-65 keypair derived from `seed` (the sender address).
+/// Sets pq_signatures/sig_scheme/pq_public_key; clears classical fields.
+fn ml_dsa_sign(mut tx: Transaction, seed: &str) -> Transaction {
+    let kp = MlDsaScheme.generate_keypair(seed).unwrap();
+    let body_json = serde_json::to_string(&tx.body).unwrap();
+    let message = mldsa_tx_prehash(CHAIN_ID, body_json.as_bytes());
+    let sig = MlDsaScheme.sign(&message, &kp).unwrap();
+    let sig_hex: String = sig.bytes.iter().map(|b| format!("{b:02x}")).collect();
+    tx.pq_signatures = vec![format!("mldsa65:{sig_hex}")];
+    tx.sig_scheme    = Some(SchemeId::MlDsa);
+    tx.pq_public_key = kp.public_key;
+    tx.signature     = vec![];
+    tx.public_key    = vec![];
+    tx
+}
+
 fn bond_tx(sender: &str, nonce_val: u64, amount: u64) -> Transaction {
     let mut tx = Transaction::bond_validator(
         &format!("bond-{sender}-{nonce_val}"), sender, amount as u128, nonce_val,
@@ -307,24 +323,23 @@ fn bond_tx(sender: &str, nonce_val: u64, amount: u64) -> Transaction {
     if let TxBody::BondValidator { ref mut owner_identity_id, .. } = tx.body {
         *owner_identity_id = Some(sender.to_string());
     }
-    tx
+    ml_dsa_sign(tx, sender)
 }
 
 fn unbond_tx(sender: &str, nonce_val: u64) -> Transaction {
-    Transaction::unbond_validator(
+    let tx = Transaction::unbond_validator(
         &format!("unbond-{sender}-{nonce_val}"), sender, nonce_val,
-    )
+    );
+    ml_dsa_sign(tx, sender)
 }
 
 /// RegisterValidatorKey: without a registered consensus key a bonded validator
 /// is admitted but stays at voting_power 0.
-/// PoP signing uses MlDsaScheme directly (proves ownership of consensus key);
-/// TX wrapper is left unsigned since require_signatures=false in genesis.
 fn register_key_tx(sender: &str, nonce_val: u64) -> Transaction {
     let consensus_kp = MlDsaScheme.generate_keypair(&format!("{sender}-consensus")).unwrap();
     let pop_msg = validator_key_registration_signing_bytes(CHAIN_ID, sender);
     let pop_sig = MlDsaScheme.sign(&pop_msg, &consensus_kp).unwrap();
-    Transaction {
+    let tx = Transaction {
         id:          format!("regkey-{sender}-{nonce_val}"),
         sender:      sender.to_string(),
         nonce:       nonce_val,
@@ -340,20 +355,23 @@ fn register_key_tx(sender: &str, nonce_val: u64) -> Transaction {
         pq_signatures: vec![],
         sig_scheme:    None,
         pq_public_key: vec![],
-    }
+    };
+    ml_dsa_sign(tx, sender)
 }
 
 fn register_identity_tx(sender: &str, nonce_val: u64) -> Transaction {
-    Transaction::register_identity(
+    let tx = Transaction::register_identity(
         &format!("reg-{sender}-{nonce_val}"), sender, nonce_val,
-    )
+    );
+    ml_dsa_sign(tx, sender)
 }
 
 fn attest_tx(attester: &str, attester_nonce: u64, claimant: &str) -> Transaction {
-    Transaction::attest(
+    let tx = Transaction::attest(
         &format!("attest-{attester}-for-{claimant}-{attester_nonce}"),
         attester, claimant, attester_nonce,
-    )
+    );
+    ml_dsa_sign(tx, attester)
 }
 
 // ── Main test ─────────────────────────────────────────────────────────────────

@@ -18,6 +18,7 @@
 //! cargo test -p chain-forge-node --test storage_v2_live -- --nocapture --test-threads=1
 //! ```
 
+use chain_forge_crypto::{MlDsaScheme, SchemeId, SignatureScheme, mldsa_tx_prehash};
 use chain_forge_execution::Transaction;
 use std::{
     io::{BufRead, Write},
@@ -96,7 +97,18 @@ impl Feeder {
             let mut sent = 0u64;
             while !s2.load(std::sync::atomic::Ordering::Relaxed) {
                 let nonce = api_get(port, "/api/accounts/qcb1alice").and_then(|v| v["nonce"].as_u64()).unwrap_or(0);
-                let tx = Transaction::transfer(&format!("v2l-{nonce}-{sent}"), "qcb1alice", "qcb1bob", "uqcb", 1_000, nonce);
+                let raw = Transaction::transfer(&format!("v2l-{nonce}-{sent}"), "qcb1alice", "qcb1bob", "uqcb", 1_000, nonce);
+                let kp = MlDsaScheme.generate_keypair("qcb1alice").unwrap();
+                let body_json = serde_json::to_string(&raw.body).unwrap();
+                let message = mldsa_tx_prehash(CHAIN_ID, body_json.as_bytes());
+                let sig = MlDsaScheme.sign(&message, &kp).unwrap();
+                let sig_hex: String = sig.bytes.iter().map(|b| format!("{b:02x}")).collect();
+                let mut tx = raw;
+                tx.pq_signatures = vec![format!("mldsa65:{sig_hex}")];
+                tx.sig_scheme    = Some(SchemeId::MlDsa);
+                tx.pq_public_key = kp.public_key;
+                tx.signature     = vec![];
+                tx.public_key    = vec![];
                 if post_tx(port, &tx) { sent += 1; }
                 std::thread::sleep(Duration::from_millis(700));
             }

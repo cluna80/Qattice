@@ -46,6 +46,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chain_forge_crypto::{MlDsaScheme, SchemeId, SignatureScheme, mldsa_tx_prehash};
 use chain_forge_execution::{Transaction, TxBody};
 
 const CHAIN_ID:     &str = "qcb-devnet-val-jail";
@@ -241,13 +242,27 @@ fn committee(port: u16) -> Vec<String> {
 
 // ── Tx builders ───────────────────────────────────────────────────────────────
 
+fn ml_dsa_sign(mut tx: Transaction, seed: &str) -> Transaction {
+    let kp = MlDsaScheme.generate_keypair(seed).unwrap();
+    let body_json = serde_json::to_string(&tx.body).unwrap();
+    let message = mldsa_tx_prehash(CHAIN_ID, body_json.as_bytes());
+    let sig = MlDsaScheme.sign(&message, &kp).unwrap();
+    let sig_hex: String = sig.bytes.iter().map(|b| format!("{b:02x}")).collect();
+    tx.pq_signatures = vec![format!("mldsa65:{sig_hex}")];
+    tx.sig_scheme    = Some(SchemeId::MlDsa);
+    tx.pq_public_key = kp.public_key;
+    tx.signature     = vec![];
+    tx.public_key    = vec![];
+    tx
+}
+
 fn bond_tx(sender: &str, nonce_val: u64, amount: u64) -> Transaction {
     let mut tx = Transaction::bond_validator(
         &format!("bond-{sender}-{nonce_val}"), sender, amount as u128, nonce_val);
     if let TxBody::BondValidator { ref mut owner_identity_id, .. } = tx.body {
         *owner_identity_id = Some(sender.to_string());
     }
-    tx
+    ml_dsa_sign(tx, sender)
 }
 
 /// ResumeValidator submitted by `sender` for `validator_id`.
@@ -257,7 +272,7 @@ fn resume_tx(sender: &str, validator_id: &str, nonce_val: u64) -> Transaction {
         &format!("resume-{sender}-{nonce_val}"), validator_id, nonce_val);
     // Override sender to `sender` (may differ from validator_id for the unauthorized test).
     tx.sender = sender.to_string();
-    tx
+    ml_dsa_sign(tx, sender)
 }
 
 // ── The test ──────────────────────────────────────────────────────────────────
