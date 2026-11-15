@@ -16,6 +16,16 @@ Workflow:
 If a test passes in sandbox but fails locally, treat it as **not done** and investigate
 the discrepancy before closing the milestone.
 
+## Ed25519 is retired — never use it in new tests
+
+**Do not write new test genesis files, key references, or test helpers that
+use Ed25519 keys.** Ed25519 was retired from Qattice (owner, 2026-10-30).
+All new tests must use ML-DSA-65 keys (`keys/mldsa/`) and
+`"signature_scheme": "pqc-native"` / `"validator_scheme": "ml-dsa-65"`.
+The existing `genesis-val-jail.json` and `{alice,bob,carol,dave}.key.json`
+(root of `keys/`) survive only as classical-compatibility fixtures — do not
+copy their crypto scheme into new test genesis files.
+
 ## Cryptographic architecture (locked)
 
 See ROADMAP.md § "Cryptographic Architecture Decision". Do not re-litigate during Phase 0/1.
