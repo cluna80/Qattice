@@ -876,6 +876,14 @@ Protocol first; applications (PoCD, marketplace, research apps) come after the p
 
 
 
+### U.S. federal hiring credential pilot (planned)
+
+Prototype one citizenship verification step from a USAJOBS announcement with an explicit citizenship requirement. Record the announcement and its exact eligibility wording, including any applicable exceptions. Use synthetic applicants and a mock issuer for the demo.
+
+- An applicant scans an agency QR challenge and approves sharing the claim through DIS. The verifier checks the issuer signature and holder binding and displays **Requirement verified** or **Manual review needed**. Missing, expired, or unverifiable credentials go to manual review.
+- Keep source documents and personal records off-chain. The agency applies its program's eligibility rules and retains an alternative verification and correction path.
+- A live pilot requires approval from the participating agency and an authorized credential issuer. Start by selecting one announcement and capturing its requirements.
+
 ## Planned Feature — FeeSponsor (Native Transaction Fee Sponsorship)
 
 **Status:** 🔄 In progress on branch `fs-01-feesponsor` (FS-01 + FS-02 landed; not yet merged to `main`, not yet wired into live execution). **Placement:** After core deterministic transaction-fee accounting and before broad application onboarding.
