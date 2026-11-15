@@ -326,9 +326,8 @@ fn h0_11b_resume_validator_live() {
     say(format!("✓ RV-01: four validators Active (h={h_ok}, root={}…)", &root_ok[..12]));
 
     // ── Kill Dave ─────────────────────────────────────────────────────────────
-    nodes[3] = None;
-    assert!(wait_until(Duration::from_secs(10), || !nodes[3].as_ref().map_or(true, |_| true)),
-            "Dave handle should be None");
+    nodes[3] = None; // Drop kills the process via NodeHandle::drop.
+    std::thread::sleep(Duration::from_secs(2)); // let the OS reap the process
     say("Dave killed; waiting for liveness enforcement…".into());
 
     // The genesis liveness window is 100 blocks at 2 s/block ≈ 200 s.
