@@ -13,9 +13,11 @@ Workflow:
 3. Developer runs on their machine:
    ```
    git pull origin main
-   cargo build -p chain-forge-node --features pq-hotstuff
-   cargo test -p chain-forge-node --test <name> -- --nocapture
+   cargo test -p chain-forge-node --test <name> --features pq-hotstuff -- --nocapture
    ```
+   The `--features pq-hotstuff` flag must be on the `cargo test` command itself —
+   a separate `cargo build --features pq-hotstuff` followed by `cargo test` without
+   the flag will silently recompile the node binary without the feature before running.
 4. Only after the developer confirms it passes locally does the ROADMAP entry get ✅.
 
 If a test passes in sandbox but fails locally, treat it as **not done** and investigate
@@ -49,10 +51,12 @@ The node binary **must** be built with `--features pq-hotstuff` for any test tha
 spawns a node process. Without this flag the node will refuse to start with a
 pq-hotstuff genesis and tests will fail with "no libp2p peer id".
 
-Standard build command for all Qattice live tests:
+Standard command for all Qattice live tests:
 ```
-cargo build -p chain-forge-node --features pq-hotstuff
+cargo test -p chain-forge-node --test <name> --features pq-hotstuff -- --nocapture
 ```
+Do NOT run a separate `cargo build --features pq-hotstuff` then `cargo test` without
+the flag — `cargo test` recompiles the binary without the feature, overwriting it.
 
 Tendermint genesis files (`genesis-4node-mldsa.json`, `genesis-auto-suspend.json`)
 are retained as historical / compatibility references only. Do not write new test
