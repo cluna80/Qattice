@@ -20,7 +20,6 @@
     "validator_set_size": 4,
     "block_time_ms": 2000,
     "personhood_weighted": true,
-    "bft_variant": "pq-hotstuff",
     "liveness": {
       "window_blocks": 100,
       "max_missed_pct": 33,
