@@ -23,6 +23,7 @@
 /// Whitepaper refs: Sections 3, 3.3, 6.3, Q6 (slashing), Q14 (liveness).
 
 pub mod bootstrap_retirement;
+pub mod liveness_policy;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use serde::{Deserialize, Serialize};
