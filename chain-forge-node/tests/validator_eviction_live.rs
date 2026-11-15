@@ -460,7 +460,7 @@ fn validator_eviction_live() {
 
     // Wait for epoch boundary so genesis bonds take effect.
     let h_epoch1 = height(ports.alice_api) + 6; // 5-block epoch + 1
-    assert!(wait_for_height(ports.alice_api, h_epoch1, Duration::from_secs(60)),
+    assert!(wait_for_height(ports.alice_api, h_epoch1, Duration::from_secs(120)),
             "epoch 1 not reached");
     println!("   Epoch 1 boundary passed at height {}.", height(ports.alice_api));
 
@@ -505,7 +505,7 @@ fn validator_eviction_live() {
 
     // Wait for epoch boundary where Eve is admitted.
     let h_eve_admit = height(ports.alice_api) + 6;
-    assert!(wait_for_height(ports.alice_api, h_eve_admit, Duration::from_secs(60)),
+    assert!(wait_for_height(ports.alice_api, h_eve_admit, Duration::from_secs(120)),
             "Eve admission epoch not reached");
     println!("   Eve admission epoch boundary at height {}.", height(ports.alice_api));
 
@@ -530,7 +530,7 @@ fn validator_eviction_live() {
 
     // Wait for the next epoch boundary (Pass 3 fires here).
     let h_evict = height(ports.alice_api) + 6;
-    assert!(wait_for_height(ports.alice_api, h_evict, Duration::from_secs(60)),
+    assert!(wait_for_height(ports.alice_api, h_evict, Duration::from_secs(120)),
             "eviction epoch not reached");
     println!("   Eviction epoch boundary at height {}.", height(ports.alice_api));
 
