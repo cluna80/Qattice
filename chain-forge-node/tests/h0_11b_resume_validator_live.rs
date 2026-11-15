@@ -288,7 +288,12 @@ fn h0_11b_resume_validator_live() {
     let live_api  = [alice, bob, carol];
     let all_api   = [alice, bob, carol, dave];
 
-    let tmp = std::env::temp_dir().join(format!("qcb-rv-{alice}"));
+    // Include a unix-second timestamp so every test run gets fresh data directories.
+    // Reusing the same path loads stale chain state from a previous run, causing
+    // wrong starting heights and already-consumed nonces.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let tmp = std::env::temp_dir().join(format!("qcb-rv-{alice}-{stamp}"));
     std::fs::create_dir_all(&tmp).unwrap();
     println!("\n── H0-11B ResumeValidator (Phase 3) ───────────────────────────────────");
     println!("   chain_id={CHAIN_ID} logs={tmp:?}");
