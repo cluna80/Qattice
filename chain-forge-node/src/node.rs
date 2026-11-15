@@ -6261,9 +6261,14 @@ impl Node {
                 return None;
             }
             let (committed, _) = self.chain_store.get(&lc.height)?;
-            if committed.block_hash != lc.block_hash
-                || self.verify_certificate_against_history(lc).is_err()
-            {
+            if committed.block_hash != lc.block_hash {
+                return None;
+            }
+            // Quorum of distinct members of the set effective at lc.height.
+            // PQ-HotStuff vote signatures are not re-verified here, matching
+            // inbound votes (see verify_vote_signature, Phase 0 gap).
+            let vs = self.historical_validator_sets.get(&lc.height)?;
+            if self.consensus.verify_commit(lc, vs).is_err() {
                 return None;
             }
             return Some(lc.clone());
