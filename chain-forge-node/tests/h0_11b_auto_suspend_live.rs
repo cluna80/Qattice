@@ -90,9 +90,60 @@ impl Drop for NodeHandle {
 }
 
 #[derive(Clone)]
-struct Spec { name: &'static str, api: u16, p2p: u16, peers: Vec<u16> }
+struct Spec { name: &'static str, api: u16, p2p: u16 }
 
-fn spawn(spec: &Spec, log_dir: &PathBuf) -> NodeHandle {
+/// Read Alice's libp2p peer ID from her log (line contains "P2P listening").
+/// Required for ML-DSA nodes: the full /ip4/.../tcp/.../p2p/<peer_id> form
+/// must be passed as the bootstrap address so nodes can authenticate each other.
+fn read_peer_id(log_path: &PathBuf, timeout: Duration) -> String {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let text = std::fs::read_to_string(log_path).unwrap_or_default();
+        // Strip ANSI escape codes before scanning.
+        let mut clean = String::with_capacity(text.len());
+        let mut in_esc = false;
+        for c in text.chars() {
+            if c == '\x1b' { in_esc = true; continue; }
+            if in_esc { if c == 'm' { in_esc = false; } continue; }
+            clean.push(c);
+        }
+        if let Some(id) = clean.lines()
+            .filter(|l| l.contains("P2P listening"))
+            .find_map(|l| l.split("peer=").nth(1))
+            .map(|rest| rest.split_whitespace().next().unwrap_or("").to_string())
+            .filter(|id| id.starts_with("12D3"))
+        {
+            return id;
+        }
+        assert!(Instant::now() < deadline,
+                "no libp2p peer id found in {log_path:?} within {timeout:?}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn spawn_first(spec: &Spec, log_dir: &PathBuf) -> (NodeHandle, String) {
+    let short = spec.name.trim_start_matches("qcb1");
+    let data_dir = log_dir.join(format!("data-{short}"));
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let log_path = log_dir.join(format!("{}.log", spec.name));
+    let log = std::fs::File::create(&log_path).unwrap();
+    let mut cmd = Command::new(node_bin());
+    cmd.arg("--genesis").arg(genesis_path())
+       .arg("--validator").arg(spec.name)
+       .arg("--api-port").arg(spec.api.to_string())
+       .arg("--p2p-port").arg(spec.p2p.to_string())
+       .arg("--data-dir").arg(&data_dir)
+       .arg("--key-file").arg(key_file(short));
+    if std::env::var_os("CF_TEST_STORAGE_V2").is_some() { cmd.arg("--storage-v2-experimental"); }
+    cmd.stdout(log.try_clone().unwrap()).stderr(log).stdin(Stdio::null());
+    let handle = NodeHandle { proc: cmd.spawn().unwrap_or_else(|e| panic!("spawn {}: {e}", spec.name)) };
+    // Read Alice's peer ID so peers can bootstrap with the authenticated multiaddr.
+    let peer_id = read_peer_id(&log_path, Duration::from_secs(15));
+    let bootstrap = format!("/ip4/127.0.0.1/tcp/{}/p2p/{peer_id}", spec.p2p);
+    (handle, bootstrap)
+}
+
+fn spawn(spec: &Spec, log_dir: &PathBuf, bootstrap: &str) -> NodeHandle {
     let short = spec.name.trim_start_matches("qcb1");
     let data_dir = log_dir.join(format!("data-{short}"));
     std::fs::create_dir_all(&data_dir).unwrap();
@@ -110,8 +161,8 @@ fn spawn(spec: &Spec, log_dir: &PathBuf) -> NodeHandle {
        .arg("--api-port").arg(spec.api.to_string())
        .arg("--p2p-port").arg(spec.p2p.to_string())
        .arg("--data-dir").arg(&data_dir)
-       .arg("--key-file").arg(key_file(short));
-    for p in &spec.peers { cmd.arg("--bootstrap").arg(format!("/ip4/127.0.0.1/tcp/{p}")); }
+       .arg("--key-file").arg(key_file(short))
+       .arg("--bootstrap").arg(bootstrap);
     if std::env::var_os("CF_TEST_STORAGE_V2").is_some() { cmd.arg("--storage-v2-experimental"); }
     cmd.stdout(log.try_clone().unwrap()).stderr(log).stdin(Stdio::null());
     NodeHandle { proc: cmd.spawn().unwrap_or_else(|e| panic!("spawn {}: {e}", spec.name)) }
@@ -222,7 +273,6 @@ fn h0_11b_auto_suspend_live() {
     let names = ["qcb1alice", "qcb1bob", "qcb1carol", "qcb1dave"];
     let specs: Vec<Spec> = (0..4).map(|i| Spec {
         name: names[i], api: ports[i].0, p2p: ports[i].1,
-        peers: (0..4).filter(|&j| j != i).map(|j| ports[j].1).collect(),
     }).collect();
     let api: Vec<u16> = specs.iter().map(|s| s.api).collect();
     let (alice, bob, carol, dave) = (api[0], api[1], api[2], api[3]);
@@ -236,7 +286,11 @@ fn h0_11b_auto_suspend_live() {
     println!("\n── H0-11B Automatic Suspension ────────────────────────────────────────");
     println!("   chain_id={CHAIN_ID} logs={tmp:?}");
 
-    let mut nodes: Vec<Option<NodeHandle>> = specs.iter().map(|s| Some(spawn(s, &tmp))).collect();
+    // Start Alice first; read her libp2p peer ID so peers can bootstrap with the full multiaddr.
+    let (alice_handle, alice_bootstrap) = spawn_first(&specs[0], &tmp);
+    let mut nodes: Vec<Option<NodeHandle>> = std::iter::once(Some(alice_handle))
+        .chain(specs[1..].iter().map(|s| Some(spawn(s, &tmp, &alice_bootstrap))))
+        .collect();
     for (i, s) in specs.iter().enumerate() {
         assert!(port_open(s.api, Duration::from_secs(30)),
                 "{} API did not come up\n--- log ---\n{}", s.name, tail_log(&tmp, s.name, 40));
@@ -329,7 +383,7 @@ fn h0_11b_auto_suspend_live() {
     say("Restarting Carol to verify persistence and state-root agreement…".into());
     nodes[2] = None; // kill Carol
     std::thread::sleep(Duration::from_secs(2));
-    nodes[2] = Some(spawn(&specs[2], &tmp));
+    nodes[2] = Some(spawn(&specs[2], &tmp, &alice_bootstrap));
     assert!(port_open(carol, Duration::from_secs(30)),
             "AS-06: Carol API did not come back\n--- log ---\n{}", tail_log(&tmp, "qcb1carol", 40));
 
