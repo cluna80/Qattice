@@ -16,8 +16,8 @@
 //! RV-06  A second ResumeValidator from Dave succeeds at the execution layer
 //!        (authorization passes) but node.rs unjail() returns an error (no
 //!        longer Jailed) which is logged as a warning; Dave stays Candidate.
-//! RV-07  After the transition Dave does NOT re-enter the committee automatically
-//!        (he has not re-bonded or re-verified in this test).
+//! RV-07  Dave re-enters the committee at the next epoch boundary after unjail:
+//!        his bond is still valid, so committee selection re-activates him.
 //! RV-08  State roots agree across all three live nodes after each transition.
 //! RV-09  After a node restart, the remaining live committee is preserved and
 //!        the state root matches the pre-restart value.
@@ -429,17 +429,19 @@ fn h0_11b_resume_validator_live() {
                "RV-06: Dave must remain Candidate after duplicate resume");
     say("✓ RV-06: duplicate resume receipt=success, Dave remains Candidate".into());
 
-    // ── RV-07: Dave does NOT re-enter the committee automatically ─────────────
-    // Dave has not re-bonded or re-verified; Candidate means waiting, not Active.
-    std::thread::sleep(Duration::from_secs(5)); // let an epoch boundary fire
+    // ── RV-07: Dave re-enters the committee at the next epoch boundary ───────
+    // Dave was Active and bonded before jailing. After unjail he is Candidate.
+    // The committee-selection logic at the next epoch boundary re-activates him
+    // because his bond is still valid — no explicit re-bond is needed.
     let h_after = height(alice);
-    let _ = wait_until(Duration::from_secs(60), || height(alice) > h_after + EPOCH_BLOCKS);
-    let dave_comm_status = validator_status(alice, DAVE);
-    assert_ne!(dave_comm_status.as_deref(), Some("Active"),
-               "RV-07: Dave must not re-enter the committee without re-qualifying (Candidate, not Active)");
-    assert!(!committee(alice).contains(&DAVE.to_string()),
-            "RV-07: Dave must not be in the consensus committee without re-qualifying");
-    say(format!("✓ RV-07: Dave is {:?}, not in committee", dave_comm_status));
+    assert!(wait_until(Duration::from_secs(120), || {
+        height(alice) > h_after + EPOCH_BLOCKS
+            && validator_status(alice, DAVE).as_deref() == Some("Active")
+    }), "RV-07: Dave did not re-enter committee after resume + epoch boundary; \
+         status={:?} h={}", validator_status(alice, DAVE), height(alice));
+    assert!(committee(alice).contains(&DAVE.to_string()),
+            "RV-07: Dave must be in the consensus committee after re-qualifying");
+    say("✓ RV-07: Dave re-entered committee as Active".into());
 
     // ── RV-08: state roots agree on all live nodes ────────────────────────────
     let (h_agree, root_agree) = agree(&live_api, Duration::from_secs(60));
