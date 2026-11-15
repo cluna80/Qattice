@@ -48,7 +48,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chain_forge_crypto::{MlDsaScheme, SchemeId, SignatureScheme, mldsa_tx_prehash};
+use chain_forge_crypto::{KeyPair, MlDsaScheme, SchemeId, SignatureScheme, mldsa_tx_prehash};
 use chain_forge_execution::{Transaction, TxBody};
 
 const CHAIN_ID:     &str = "qcb-devnet-val-delay";
@@ -146,8 +146,27 @@ fn wait_until(timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
     false
 }
 
-fn ml_dsa_sign(mut tx: Transaction, seed: &str) -> Transaction {
-    let kp = MlDsaScheme.generate_keypair(seed).unwrap();
+fn load_key(sender: &str) -> KeyPair {
+    let label = sender.strip_prefix("qcb1").unwrap_or(sender);
+    let path  = devnet("keys").join("mldsa").join(format!("{label}.key.json"));
+    let json: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read key file {path:?}: {e}"))
+    ).unwrap();
+    let decode_hex = |hex: &str| -> Vec<u8> {
+        (0..hex.len()).step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i+2], 16).unwrap())
+            .collect()
+    };
+    KeyPair {
+        scheme:      SchemeId::MlDsa,
+        public_key:  decode_hex(json["public_key"].as_str().unwrap()),
+        private_key: decode_hex(json["private_key"].as_str().unwrap()),
+    }
+}
+
+fn ml_dsa_sign(mut tx: Transaction, sender: &str) -> Transaction {
+    let kp = load_key(sender);
     let body_json = serde_json::to_string(&tx.body).unwrap();
     let message = mldsa_tx_prehash(CHAIN_ID, body_json.as_bytes());
     let sig = MlDsaScheme.sign(&message, &kp).unwrap();

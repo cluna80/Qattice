@@ -37,7 +37,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chain_forge_crypto::{MlDsaScheme, SchemeId, SignatureScheme, mldsa_tx_prehash};
+use chain_forge_crypto::{KeyPair, MlDsaScheme, SchemeId, SignatureScheme, mldsa_tx_prehash};
 use chain_forge_execution::{Transaction, TxBody, validator_key_registration_signing_bytes};
 
 const CHAIN_ID:    &str = "qcb-devnet-val-evict";
@@ -300,10 +300,30 @@ fn voting_power(port: u16, addr: &str) -> u64 {
 
 // ── Tx builders ───────────────────────────────────────────────────────────────
 
-/// Sign `tx` with an ML-DSA-65 keypair derived from `seed` (the sender address).
-/// Sets pq_signatures/sig_scheme/pq_public_key; clears classical fields.
-fn ml_dsa_sign(mut tx: Transaction, seed: &str) -> Transaction {
-    let kp = MlDsaScheme.generate_keypair(seed).unwrap();
+/// Load the ML-DSA-65 keypair for `sender` from the devnet key file.
+/// The sender address is the filename stem after stripping the "qcb1" prefix.
+fn load_key(sender: &str) -> KeyPair {
+    let label = sender.strip_prefix("qcb1").unwrap_or(sender);
+    let path  = key_file(label);
+    let json: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read key file {path:?}: {e}"))
+    ).unwrap();
+    let decode_hex = |hex: &str| -> Vec<u8> {
+        (0..hex.len()).step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i+2], 16).unwrap())
+            .collect()
+    };
+    KeyPair {
+        scheme:      SchemeId::MlDsa,
+        public_key:  decode_hex(json["public_key"].as_str().unwrap()),
+        private_key: decode_hex(json["private_key"].as_str().unwrap()),
+    }
+}
+
+/// Sign `tx` with the genesis-registered ML-DSA-65 key for `sender`.
+fn ml_dsa_sign(mut tx: Transaction, sender: &str) -> Transaction {
+    let kp = load_key(sender);
     let body_json = serde_json::to_string(&tx.body).unwrap();
     let message = mldsa_tx_prehash(CHAIN_ID, body_json.as_bytes());
     let sig = MlDsaScheme.sign(&message, &kp).unwrap();
