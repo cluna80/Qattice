@@ -4931,12 +4931,16 @@ impl Node {
                 ));
             }
         }
-        // PQ-HotStuff embeds the CommitCertificate in the engine, not the block payload.
-        // Use `cert` directly; Tendermint nodes embed last_commit in the payload.
+        // Participation (liveness, rewards, activity) must come from committed
+        // block content, identical on every node -- never from `cert`, which
+        // each node assembles from whichever quorum of votes arrived first.
+        let participation = self.canonical_participation(proposal.height, &payload);
+        // The explorer summary is display-only; under PQ-HotStuff it shows the
+        // certificate that committed this block.
         #[cfg(feature = "pq-hotstuff")]
-        let participation = Some(cert.clone());
+        let summary_commit = Some(cert.clone());
         #[cfg(not(feature = "pq-hotstuff"))]
-        let participation = payload.last_commit.clone();
+        let summary_commit = participation.clone();
         let txs: Vec<Transaction> = payload.txs;
         self.remove_committed_from_mempool(&txs);
 
@@ -6083,8 +6087,8 @@ impl Node {
                 tx_count:     tx_ids.len(),
                 tx_ids,
                 proposer:     proposal.proposer.0.clone(),
-                last_commit_signers: participation.as_ref().map(commit_signers).unwrap_or_default(),
-                last_commit: participation.clone(),
+                last_commit_signers: summary_commit.as_ref().map(commit_signers).unwrap_or_default(),
+                last_commit: summary_commit.clone(),
             });
             while ex.blocks.len() > MAX_RECENT_BLOCKS {
                 ex.blocks.pop_back();
@@ -6228,6 +6232,46 @@ impl Node {
     /// quorum threshold. `Err` otherwise, with a string explaining which
     /// check failed.
     /// H0-1/H0-2: check a proposal's payload before voting for it.
+    /// The participation evidence a committed block contributes. Tendermint
+    /// payloads carry `last_commit` for height-1, already validated by every
+    /// voter. PQ-HotStuff pipelines blocks, so the proposer's `last_commit` is
+    /// for its latest committed height, which may lag by more than one. Each
+    /// evidence height is counted once: a block's evidence counts only if it is
+    /// newer than the evidence in the most recent earlier block that carried
+    /// any, and only if it certifies the block committed at that height.
+    /// Every input comes from the committed chain, so every node agrees.
+    fn canonical_participation(
+        &self,
+        height: u64,
+        payload: &BlockPayload,
+    ) -> Option<chain_forge_consensus::CommitCertificate> {
+        #[cfg(feature = "pq-hotstuff")]
+        if self.consensus.variant() == ConsensusVariant::PqHotStuff {
+            let lc = payload.last_commit.as_ref()?;
+            if lc.height >= height {
+                return None;
+            }
+            let prev = self.chain_store.range(..height).rev().find_map(|(_, (_, p))| {
+                if p.tx_data.starts_with(chain_forge_consensus::EPOCH_CHANGE_MAGIC) {
+                    return None;
+                }
+                BlockPayload::decode(&p.tx_data).last_commit.map(|c| c.height)
+            });
+            if prev.is_some_and(|ph| lc.height <= ph) {
+                return None;
+            }
+            let (committed, _) = self.chain_store.get(&lc.height)?;
+            if committed.block_hash != lc.block_hash
+                || self.verify_certificate_against_history(lc).is_err()
+            {
+                return None;
+            }
+            return Some(lc.clone());
+        }
+        let _ = height;
+        payload.last_commit.clone()
+    }
+
     fn validate_block_payload(&self, proposal: &BlockProposal) -> Result<(), String> {
         let max_block_bytes = self.genesis.limits.max_block_bytes as usize;
         if max_block_bytes > 0 && proposal.tx_data.len() > max_block_bytes {
