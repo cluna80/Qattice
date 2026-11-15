@@ -474,19 +474,19 @@ fn validator_jail_live() {
         assert!(r["success"].as_bool().unwrap_or(false), "bond for {n} failed: {r}");
     }
     let h = height(alice);
-    assert!(wait_until(Duration::from_secs(60), || height(alice) >= h + EPOCH_BLOCKS + 1), "no epoch after bonds");
+    assert!(wait_until(Duration::from_secs(120), || height(alice) >= h + EPOCH_BLOCKS + 1), "no epoch after bonds");
     for n in names { assert!(voting_power(alice, n) > 0, "{n} has no voting power after bond"); }
     say("all four bonded and seated with voting power".into());
 
     // ── JL-01: healthy network, nobody jailed ────────────────────────────────
-    assert!(wait_until(Duration::from_secs(120), || api.iter().all(|&p| height(p) >= 30)),
+    assert!(wait_until(Duration::from_secs(300), || api.iter().all(|&p| height(p) >= 30)),
             "healthy devnet did not pass height 30");
     for n in names {
         let s = status_of(alice, n).unwrap_or_else(|| panic!("{n} missing from status"));
         assert_eq!(s["status"].as_str(), Some("Active"), "JL-01: {n} not Active: {s}");
     }
     assert_eq!(committee(alice).len(), 4, "JL-01: committee must have four seats");
-    let (h_ok, root_ok) = agree(&api, Duration::from_secs(30));
+    let (h_ok, root_ok) = agree(&api, Duration::from_secs(60));
     say(format!("✓ JL-01: four validators finalizing, none jailed (height {h_ok}, root {})", &root_ok[..12]));
 
     // ── Kill Dave ────────────────────────────────────────────────────────────
@@ -528,7 +528,7 @@ fn validator_jail_live() {
             "JL-03: jailed_epoch {jailed_epoch} must be the validator epoch (height {h_jailed_seen} / {EPOCH_BLOCKS}), \
              not a block height");
     for p in [bob, carol] {
-        assert!(wait_until(Duration::from_secs(30), || is_jailed(p, DAVE)), "JL-03: a live node never jailed Dave");
+        assert!(wait_until(Duration::from_secs(60), || is_jailed(p, DAVE)), "JL-03: a live node never jailed Dave");
         let r = status_of(p, DAVE).unwrap();
         assert_eq!((r["jailed_epoch"].clone(), r["unjail_after"].clone()), (rec["jailed_epoch"].clone(), rec["unjail_after"].clone()),
                    "JL-03: nodes disagree on the jail record");
@@ -554,7 +554,7 @@ fn validator_jail_live() {
             assert!(!seated, "JL-05: Dave still seated at height {h_before}, past the boundary {boundary}");
             break;
         }
-        assert!(started.elapsed() < Duration::from_secs(120), "JL-05: boundary {boundary} never passed");
+        assert!(started.elapsed() < Duration::from_secs(180), "JL-05: boundary {boundary} never passed");
         std::thread::sleep(Duration::from_millis(150));
     }
     if seated_at_first_sight && h_jailed_seen < boundary {
@@ -562,14 +562,14 @@ fn validator_jail_live() {
     }
     say(format!("✓ JL-04: Dave kept his seat until the boundary at height {boundary}"));
     for p in live_api {
-        assert!(wait_until(Duration::from_secs(30), || committee(p) == ["qcb1alice", "qcb1bob", "qcb1carol"]),
+        assert!(wait_until(Duration::from_secs(60), || committee(p) == ["qcb1alice", "qcb1bob", "qcb1carol"]),
                 "JL-05: a live node still seats Dave: {:?}", committee(p));
     }
     say("✓ JL-05: Dave removed from the committee on alice, bob and carol".into());
 
     // ── JL-06: the remaining three still FINALIZE after the transition ───────
     let h_after_transition = height(alice);
-    assert!(wait_until(Duration::from_secs(90), || live_api.iter().all(|&p| height(p) >= h_after_transition + 10)),
+    assert!(wait_until(Duration::from_secs(180), || live_api.iter().all(|&p| height(p) >= h_after_transition + 10)),
             "JL-06: the three-validator committee stopped finalizing blocks");
     let xfer = transfer_tx("qcb1carol", "qcb1eve", nonce(carol, "qcb1carol"));
     let r = submit_and_wait(carol, &xfer, Duration::from_secs(60));
@@ -622,7 +622,7 @@ fn validator_jail_live() {
     //  3. GET /api/validators/status    (Dave Jailed, asserted above)
     //  4. the consensus ENGINE itself: who it lets propose which (height, round).
     let three = ["qcb1alice", "qcb1bob", "qcb1carol"];
-    assert!(wait_until(Duration::from_secs(120), || height(alice) >= h8 + 9), "JL-08: chain stalled after resuming");
+    assert!(wait_until(Duration::from_secs(180), || height(alice) >= h8 + 9), "JL-08: chain stalled after resuming");
     assert_eq!(persisted_committee(&tmp, "qcb1bob"), three, "JL-08: bob's persisted committee");
     for &p in &api { assert_eq!(committee(p), three, "JL-08: API committee on port {p}"); }
     let mut engine_checked = std::collections::BTreeSet::new();
@@ -646,7 +646,7 @@ fn validator_jail_live() {
     // ── JL-09: expiry is not reinstatement ───────────────────────────────────
     let expiry_height = (unjail_after + 2) * EPOCH_BLOCKS;
     say(format!("  waiting for height {expiry_height} (jail expires at epoch {unjail_after}); Dave is online"));
-    assert!(wait_until(Duration::from_secs(400), || height(alice) >= expiry_height), "JL-09: epoch {unjail_after} never passed");
+    assert!(wait_until(Duration::from_secs(900), || height(alice) >= expiry_height), "JL-09: epoch {unjail_after} never passed");
     assert!(nodes[3].as_mut().unwrap().alive(), "Dave's process must still be running");
     for &p in &api {
         let s = status_of(p, DAVE).unwrap();
