@@ -22,9 +22,9 @@
     "personhood_weighted": true,
     "bft_variant": "pq-hotstuff",
     "liveness": {
-      "window_blocks": 20,
+      "window_blocks": 100,
       "max_missed_pct": 33,
-      "start_height": 5,
+      "start_height": 10,
       "automatic_suspension_enabled": true
     }
   },

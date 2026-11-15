@@ -18,15 +18,16 @@
 //! ## Notes
 //!
 //! Uses `genesis-auto-suspend.json`:
-//!   - `window_blocks = 20`, `max_missed_pct = 33`, `start_height = 5`
+//!   - `window_blocks = 100`, `max_missed_pct = 33`, `start_height = 10`
 //!   - `automatic_suspension_enabled = true`
 //!   - `validator_epoch_blocks = 5`
 //!
 //! At ~9 s/block (Windows/MINGW64):
-//!   - Window fills in ~20 blocks × 9 s = ~180 s
+//!   - Window fills in ~100 blocks × 9 s = ~900 s
 //!   - Grace window: 50 blocks × 9 s = ~450 s
-//!   - Total to jail: ~630 s (~10 min)
-//!   - Generous timeout: 1200 s (20 min)
+//!   - Jail fires at next epoch boundary after grace expires: +5 blocks
+//!   - Total to jail: ~155 blocks × 9 s ≈ 1395 s (~23 min)
+//!   - Generous timeout: 1800 s (30 min)
 //!
 //! Per CLAUDE.md: ✅ only after confirmed passing on Windows (MINGW64 / BossKing).
 //!
@@ -43,11 +44,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-const CHAIN_ID:     &str = "qcb-devnet-auto-suspend";
-const DAVE:         &str = "qcb1dave";
-const EPOCH_BLOCKS: u64  = 5;
-// GRACE_WINDOW_BLOCKS constant from liveness_policy (50 blocks, see chain-forge-validators).
-const GRACE_WINDOW_BLOCKS: u64 = 50;
+const CHAIN_ID:              &str = "qcb-devnet-auto-suspend";
+const DAVE:                  &str = "qcb1dave";
+const LIVENESS_WINDOW_BLOCKS: u64 = 100;
 
 // ── Infra helpers ─────────────────────────────────────────────────────────────
 
@@ -243,9 +242,9 @@ fn h0_11b_auto_suspend_live() {
                 "{} API did not come up\n--- log ---\n{}", s.name, tail_log(&tmp, s.name, 40));
         let _ = i;
     }
-    // Wait for all four nodes to reach height > start_height so liveness enforcement is live.
-    assert!(wait_until(Duration::from_secs(60), || all_api.iter().all(|&p| height(p) > 10)),
-            "devnet did not reach height 10");
+    // Wait for all four nodes to reach height > start_height (10) so liveness enforcement is live.
+    assert!(wait_until(Duration::from_secs(60), || all_api.iter().all(|&p| height(p) > 15)),
+            "devnet did not reach height 15");
     say(format!("devnet up at height {}", height(alice)));
 
     // ── AS-01: healthy network — all Active ──────────────────────────────────
@@ -273,13 +272,14 @@ fn h0_11b_auto_suspend_live() {
     say("✓ AS-02: Dave still Active immediately after kill (threshold not yet breached)".into());
 
     // ── AS-03: grace window entered — Dave still Active ───────────────────────
-    // After ~20 blocks Dave's miss rate exceeds 33%; the suspension_tracker entry
+    // After ~100 blocks Dave's miss rate exceeds 33%; the suspension_tracker entry
     // is created but the grace window (50 blocks) has not yet expired. Dave remains
-    // Active throughout. The window_blocks=20 at ~9s/block takes ~180s to fill.
-    // The grace window is a further 50 blocks (~450s). Allow 900s total.
-    // We sample partway through the grace window to verify Dave is still Active.
-    let breach_height = dave_kill_height + 20 + 5; // conservative: window + epoch
-    assert!(wait_until(Duration::from_secs(600), || height(alice) >= breach_height),
+    // Active throughout. The window_blocks=100 at ~9s/block takes ~900s to fill.
+    // We sample partway through the grace window (at window + 10 blocks) to verify
+    // Dave is still Active before the grace window expires.
+    // Allow 1200s (~20 min) to reach the sample point.
+    let breach_height = dave_kill_height + LIVENESS_WINDOW_BLOCKS + 10;
+    assert!(wait_until(Duration::from_secs(1200), || height(alice) >= breach_height),
             "AS-03: did not reach h={breach_height} in time (stuck at h={})", height(alice));
     // At this point we are in the grace window: Dave missed >33% but suspension has
     // not fired yet (grace window ~50 more blocks needed). He must still be Active.
@@ -297,9 +297,9 @@ fn h0_11b_auto_suspend_live() {
     // After the grace window expires (~50 blocks after first breach), the commit_block
     // Pass 5 fires jail() at the next epoch boundary. With epoch_blocks=5 this happens
     // within 5 blocks of the grace expiry.
-    // Total budget: window(20) + grace(50) + epoch_jitter(10) = 80 blocks × 9 s ≈ 720 s.
-    // Add generous margin: 1200 s (20 min).
-    assert!(wait_until(Duration::from_secs(1200), || {
+    // Total budget: window(100) + grace(50) + epoch_jitter(10) = 160 blocks × 9 s ≈ 1440 s.
+    // Add generous margin: 1800 s (30 min).
+    assert!(wait_until(Duration::from_secs(1800), || {
         validator_status(alice, DAVE).as_deref() == Some("Jailed")
     }), "AS-04: Dave was not automatically jailed within 20 min\nlast status: {:?}",
         validator_status(alice, DAVE));
