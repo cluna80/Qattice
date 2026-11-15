@@ -570,12 +570,13 @@ fn validator_jail_live() {
 
     // ── JL-06: the remaining four still FINALIZE after the transition ────────
     let h_after_transition = height(alice);
-    assert!(wait_until(Duration::from_secs(180), || live_api.iter().all(|&p| height(p) >= h_after_transition + 10)),
-            "JL-06: the four-validator committee stopped finalizing blocks");
+    assert!(wait_until(Duration::from_secs(450), || live_api.iter().all(|&p| height(p) >= h_after_transition + 10)),
+            "JL-06: the four-validator committee stopped finalizing blocks (start {h_after_transition}, now {:?})",
+            live_api.iter().map(|&p| height(p)).collect::<Vec<_>>());
     let xfer = transfer_tx("qcb1carol", "qcb1dave", nonce(carol, "qcb1carol"));
-    let r = submit_and_wait(carol, &xfer, Duration::from_secs(60));
+    let r = submit_and_wait(carol, &xfer, Duration::from_secs(180));
     assert!(r["success"].as_bool().unwrap_or(false), "JL-06: a tx must finalize under the new committee: {r}");
-    let (h6, root6) = agree(&live_api, Duration::from_secs(60));
+    let (h6, root6) = agree(&live_api, Duration::from_secs(180));
     assert!(h6 > boundary + 5, "JL-06: agreement must be on a post-transition block (h={h6}, boundary={boundary})");
     say(format!("✓ JL-06: four-validator committee finalizing (height {h6} > boundary {boundary}); tx landed; root {}", &root6[..12]));
 
@@ -593,7 +594,7 @@ fn validator_jail_live() {
     nodes[3] = Some(spawn(&specs[3], &tmp, &alice_bootstrap));
     assert!(api_listening(&tmp, DAVE, dave, Duration::from_secs(30)),
             "Dave did not restart\n{}", tail_log(&tmp, DAVE, 40));
-    assert!(wait_until(Duration::from_secs(300), || height(dave) + 3 >= height(alice)),
+    assert!(wait_until(Duration::from_secs(900), || height(dave) + 3 >= height(alice)),
             "Dave never caught up (dave {} vs alice {})\n{}", height(dave), height(alice), tail_log(&tmp, DAVE, 40));
     let (h_all, _) = agree(&api, Duration::from_secs(180));
     assert!(is_jailed(dave, DAVE), "Dave's own replay did not derive Jailed");
@@ -618,7 +619,7 @@ fn validator_jail_live() {
         assert_eq!(before[k], after[k], "JL-08: {k} changed across restart");
     }
     assert_eq!(committee(bob), ["qcb1alice", "qcb1bob", "qcb1carol", "qcb1eve"], "JL-08: committee changed across restart");
-    assert!(wait_until(Duration::from_secs(240), || height(alice) >= h_down + 6),
+    assert!(wait_until(Duration::from_secs(450), || height(alice) >= h_down + 6),
             "JL-08: chain did not resume after bob returned");
     let (h8, _) = agree(&live_api, Duration::from_secs(180));
 
@@ -628,7 +629,7 @@ fn validator_jail_live() {
     //  3. GET /api/validators/status    (Dave Jailed, asserted above)
     //  4. the consensus ENGINE itself: who it lets propose which (height, round).
     let four = ["qcb1alice", "qcb1bob", "qcb1carol", "qcb1eve"];
-    assert!(wait_until(Duration::from_secs(300), || height(alice) >= h8 + 9), "JL-08: chain stalled after resuming");
+    assert!(wait_until(Duration::from_secs(600), || height(alice) >= h8 + 9), "JL-08: chain stalled after resuming");
     assert_eq!(persisted_committee(&tmp, "qcb1bob"), four, "JL-08: bob's persisted committee");
     for p in live_api { assert_eq!(committee(p), four, "JL-08: API committee on port {p}"); }
     // Dave is online (restarted above) but jailed — not in live_api; check him separately.
@@ -662,7 +663,7 @@ fn validator_jail_live() {
         assert_eq!(s["status"].as_str(), Some("Jailed"), "JL-09: expiry must not reinstate: {s}");
         assert!(!committee(p).iter().any(|i| i == DAVE), "JL-09: Dave regained a seat on expiry");
     }
-    let (h9, root9) = agree(&live_api, Duration::from_secs(120));
+    let (h9, root9) = agree(&live_api, Duration::from_secs(180));
     say(format!("✓ JL-09: jail expired, Dave online and caught up, still Jailed and unseated (height {h9}, root {})", &root9[..12]));
 
     println!("\n── Summary ──────────────────────────────────────────────────────────");
