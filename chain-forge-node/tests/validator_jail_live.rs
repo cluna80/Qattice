@@ -86,10 +86,10 @@ fn genesis_path() -> PathBuf {
 }
 
 fn key_file(label: &str) -> PathBuf {
-    repo_root().join("tests").join("devnet").join("keys").join(format!("{label}.key.json"))
+    repo_root().join("tests").join("devnet").join("keys").join("mldsa").join(format!("{label}.key.json"))
 }
 
-struct NodeHandle { proc: Child }
+struct NodeHandle { proc: Child, log_path: PathBuf }
 impl NodeHandle {
     fn alive(&mut self) -> bool { matches!(self.proc.try_wait(), Ok(None)) }
 }
@@ -101,10 +101,59 @@ impl Drop for NodeHandle {
 }
 
 #[derive(Clone)]
-struct Spec { name: &'static str, api: u16, p2p: u16, peers: Vec<u16> }
+struct Spec { name: &'static str, api: u16, p2p: u16 }
 
-fn spawn(spec: &Spec, log_dir: &PathBuf) -> NodeHandle {
-    let data_dir = log_dir.join(format!("data-{}", spec.name.trim_start_matches("qcb1")));
+fn read_peer_id(log_path: &PathBuf, timeout: Duration) -> String {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let text = std::fs::read_to_string(log_path).unwrap_or_default();
+        let mut clean = String::with_capacity(text.len());
+        let mut in_esc = false;
+        for c in text.chars() {
+            if c == '\x1b' { in_esc = true; continue; }
+            if in_esc { if c == 'm' { in_esc = false; } continue; }
+            clean.push(c);
+        }
+        if let Some(id) = clean.lines()
+            .filter(|l| l.contains("P2P listening"))
+            .find_map(|l| l.split("peer=").nth(1))
+            .map(|rest| rest.split_whitespace().next().unwrap_or("").to_string())
+            .filter(|id| id.starts_with("12D3"))
+        {
+            return id;
+        }
+        assert!(Instant::now() < deadline, "no libp2p peer id in {log_path:?}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn spawn_first(spec: &Spec, log_dir: &PathBuf) -> (NodeHandle, String) {
+    let short = spec.name.trim_start_matches("qcb1");
+    let data_dir = log_dir.join(format!("data-{short}"));
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let log_path = log_dir.join(format!("{}.log", spec.name));
+    let log = std::fs::File::create(&log_path).unwrap();
+    let mut cmd = Command::new(node_bin());
+    cmd.arg("--genesis").arg(genesis_path())
+       .arg("--validator").arg(spec.name)
+       .arg("--api-port").arg(spec.api.to_string())
+       .arg("--p2p-port").arg(spec.p2p.to_string())
+       .arg("--data-dir").arg(&data_dir)
+       .arg("--key-file").arg(key_file(short));
+    if std::env::var_os("CF_TEST_STORAGE_V2").is_some() { cmd.arg("--storage-v2-experimental"); }
+    cmd.stdout(log.try_clone().unwrap()).stderr(log).stdin(Stdio::null());
+    let handle = NodeHandle {
+        proc: cmd.spawn().unwrap_or_else(|e| panic!("spawn {}: {e}", spec.name)),
+        log_path: log_path.clone(),
+    };
+    let peer_id = read_peer_id(&log_path, Duration::from_secs(15));
+    let bootstrap = format!("/ip4/127.0.0.1/tcp/{}/p2p/{peer_id}", spec.p2p);
+    (handle, bootstrap)
+}
+
+fn spawn(spec: &Spec, log_dir: &PathBuf, bootstrap: &str) -> NodeHandle {
+    let short = spec.name.trim_start_matches("qcb1");
+    let data_dir = log_dir.join(format!("data-{short}"));
     std::fs::create_dir_all(&data_dir).unwrap();
     let log_path = log_dir.join(format!("{}.log", spec.name));
     if log_path.exists() {
@@ -119,12 +168,14 @@ fn spawn(spec: &Spec, log_dir: &PathBuf) -> NodeHandle {
        .arg("--api-port").arg(spec.api.to_string())
        .arg("--p2p-port").arg(spec.p2p.to_string())
        .arg("--data-dir").arg(&data_dir)
-       .arg("--key-file").arg(key_file(spec.name.trim_start_matches("qcb1")));
-    for p in &spec.peers { cmd.arg("--bootstrap").arg(format!("/ip4/127.0.0.1/tcp/{p}")); }
-    // Storage format 2 test switch (default OFF): CF_TEST_STORAGE_V2=1 runs this test on the experimental v2 layout.
+       .arg("--key-file").arg(key_file(short))
+       .arg("--bootstrap").arg(bootstrap);
     if std::env::var_os("CF_TEST_STORAGE_V2").is_some() { cmd.arg("--storage-v2-experimental"); }
     cmd.stdout(log.try_clone().unwrap()).stderr(log).stdin(Stdio::null());
-    NodeHandle { proc: cmd.spawn().unwrap_or_else(|e| panic!("spawn {}: {e}", spec.name)) }
+    NodeHandle {
+        proc: cmd.spawn().unwrap_or_else(|e| panic!("spawn {}: {e}", spec.name)),
+        log_path: log_path,
+    }
 }
 
 fn tail_log(log_dir: &PathBuf, name: &str, n: usize) -> String {
@@ -362,7 +413,6 @@ fn validator_jail_live() {
     let names = ["qcb1alice", "qcb1bob", "qcb1carol", "qcb1dave"];
     let specs: Vec<Spec> = (0..4).map(|i| Spec {
         name: names[i], api: ports[i].0, p2p: ports[i].1,
-        peers: (0..4).filter(|&j| j != i).map(|j| ports[j].1).collect(),
     }).collect();
     let api: Vec<u16> = specs.iter().map(|s| s.api).collect();
     let (alice, bob, carol, dave) = (api[0], api[1], api[2], api[3]);
@@ -373,7 +423,13 @@ fn validator_jail_live() {
     println!("\n── Validator Jail (H0-11B phase 1) ─────────────────────────────────");
     println!("   chain_id={CHAIN_ID} logs={tmp:?}");
 
-    let mut nodes: Vec<Option<NodeHandle>> = specs.iter().map(|s| Some(spawn(s, &tmp))).collect();
+    let (alice_node, alice_bootstrap) = spawn_first(&specs[0], &tmp);
+    let mut nodes: Vec<Option<NodeHandle>> = vec![
+        Some(alice_node),
+        Some(spawn(&specs[1], &tmp, &alice_bootstrap)),
+        Some(spawn(&specs[2], &tmp, &alice_bootstrap)),
+        Some(spawn(&specs[3], &tmp, &alice_bootstrap)),
+    ];
     for (i, s) in specs.iter().enumerate() {
         assert!(port_open(s.api, Duration::from_secs(30)),
                 "{} API did not come up\n--- log ---\n{}", s.name, tail_log(&tmp, s.name, 40));
@@ -502,7 +558,7 @@ fn validator_jail_live() {
     say(format!("✓ JL-07: Dave's bond is still {dave_bond} uqcb (jailed, not slashed)"));
 
     // ── Bring Dave back, healthy: he must replay the chain and stay out ──────
-    nodes[3] = Some(spawn(&specs[3], &tmp));
+    nodes[3] = Some(spawn(&specs[3], &tmp, &alice_bootstrap));
     assert!(api_listening(&tmp, DAVE, dave, Duration::from_secs(30)), "Dave did not restart\n{}", tail_log(&tmp, DAVE, 40));
     assert!(wait_until(Duration::from_secs(240), || height(dave) + 3 >= height(alice)),
             "Dave never caught up (dave {} vs alice {})\n{}", height(dave), height(alice), tail_log(&tmp, DAVE, 40));
@@ -518,7 +574,7 @@ fn validator_jail_live() {
     let advanced_without_bob = height(alice) > h_down + 1;
     say(format!("  bob down: chain {} (3-validator committee needs all three)",
         if advanced_without_bob { "STILL ADVANCED" } else { "halted, as expected for f=0" }));
-    nodes[1] = Some(spawn(&specs[1], &tmp));
+    nodes[1] = Some(spawn(&specs[1], &tmp, &alice_bootstrap));
     assert!(api_listening(&tmp, "qcb1bob", bob, Duration::from_secs(30)), "bob did not restart\n{}", tail_log(&tmp, "qcb1bob", 40));
     assert!(wait_until(Duration::from_secs(60), || is_jailed(bob, DAVE)),
             "JL-08: bob forgot Dave's jail across a restart\n{}", tail_log(&tmp, "qcb1bob", 40));
