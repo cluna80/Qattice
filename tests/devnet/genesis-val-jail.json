@@ -27,7 +27,8 @@
             "automatic_suspension_enabled": true,
             "grace_window_blocks": 25
         },
-        "bft_variant": "pq-hotstuff"
+        "bft_variant": "pq-hotstuff",
+        "chain_store_keep_blocks": 200
     },
     "execution": {
         "state_model": "account",

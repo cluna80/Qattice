@@ -6140,8 +6140,9 @@ impl Node {
         // Insert first, then prune: a peer requesting the block we just committed
         // will always find it here even if it falls exactly at the watermark.
         self.chain_store.insert(committed_height, (cert.clone(), proposal.clone()));
-        if committed_height >= CHAIN_STORE_KEEP {
-            let new_watermark = committed_height - CHAIN_STORE_KEEP + 1;
+        let keep = self.genesis.consensus.chain_store_keep_blocks.unwrap_or(CHAIN_STORE_KEEP);
+        if committed_height >= keep {
+            let new_watermark = committed_height - keep + 1;
             let prev = self.status.lock().map(|s| s.chain_store_watermark).unwrap_or(0);
             if new_watermark > prev {
                 self.chain_store.retain(|&h, _| h >= new_watermark);
