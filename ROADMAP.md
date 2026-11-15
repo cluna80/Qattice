@@ -949,7 +949,7 @@ Protocol first; applications (PoCD, marketplace, research apps) come after the p
 | BIZ-PRE-2 | **DIS — Account Security and Recovery** | DIS-003D and DIS-003E confirmed locally on Windows/MINGW64 | ✅ DIS-003D (2026-10-30) + DIS-003E (2026-11-01) both Windows-confirmed; both also passed on 2026-10-31 on earlier code (D 38.77 s, E 55.78 s) |
 | BIZ-PRE-3 | **DIS Standalone Product** | Independent cryptographic review gate passed (currently marked ⚠️ return before production on DIS-CORE-001, DIS-PQ-001, DIS-PRIV-001) | 🔲 |
 | BIZ-PRE-4 | **FeeSponsor** | FS-03 live authorization complete (SponsorAuthorization wired into execution path) | 🔲 |
-| BIZ-PRE-5 | **Validator Onboarding** | Validator eviction policy decided and implemented (H0-11) | 🔲 |
+| BIZ-PRE-5 | **Validator Onboarding** | Validator eviction policy decided and implemented (H0-11) | ✅ |
 
 > All five gates do not need to close simultaneously. BIZ-PRE-1 and BIZ-PRE-2 are the minimum viable gates — the company can be formed and SAM.gov registration started in parallel with engineering, but active SBIR pursuit requires a demonstrable post-quantum identity capability (DIS-003D/E complete) and a provably correct state machine (H0-5/H0-7 confirmed).
 
@@ -1383,6 +1383,20 @@ Machine 1 (Alice) → creates Agent-A → funds 100 test QCB
 - **#80** (`64138a7`, head `4d43a0a`): repository references updated to Qattice (`Cargo.toml` metadata, `dis-core/README.md`, a rename note under the title). Docs and metadata only.
 
 **Still open (Qattice):** ACCT-LEAF-1 (investigation next, read-only; no change to leaf encoding or state-root behavior without a separate design and compatibility review); H0-11B/C/D and BIZ-PRE-5; P2P automatic reconnection (not implemented); the 24-suite live sweep and the Phase 0 closeout write-up (`PHASE-0-CLOSEOUT.md` covers P0-1 only); the QRC cleanup in this repository (QRC is retired; `chain-forge-qrc`, `chain-forge-resource`, `qrc_sim/`, the `qrc` / `market` modules and dormant QRC paths in `execution` and `node`; QRC in signed or persisted data such as `RecordAgentSpend.amount_uqrc` is a separate design decision; `chain-forge-tokenomics` has no importer and is assessed in that cleanup); the remaining DIS hooks still in the core path (`RecoverAccountKey` admission, gas and size tables, signature policy, module gating) and the `TxBody` enum; machine and deployment follow-ups for the rename (remotes on other machines, webhooks, Vercel). No item is newly marked complete beyond what the cited PRs and runs show.
+
+### Qattice status log (2026-11-15)
+
+**H0-11B Phase 3 — automatic suspension confirmed on Windows (BossKing). BIZ-PRE-5 ✅.**
+
+Completed since the 2026-11-04 entry (all confirmed on Windows/MINGW64):
+
+- **H0-11B automatic suspension gate** (`e687643`, branch `feat/pqhs2-fips204-signing`): `GenesisLiveness.automatic_suspension_enabled` field wired through `LivenessParams`; `SuspendEligible` arm in `commit_block` Pass 5 calls `validator_registry.jail()` when the flag is true. Genesis fixture `genesis-auto-suspend.json`: Tendermint engine, ML-DSA-65 keys (`pqc-native` / `ml-dsa-65`), `window_blocks=100`, `max_missed_pct=33`, `automatic_suspension_enabled=true`, `validator_epoch_blocks=5`.
+- **AS-01..AS-06 live acceptance test** (`h0_11b_auto_suspend_live.rs`) passed on BossKing in 842 s: four validators Active → Dave killed → liveness window fills → grace window → auto-jail at epoch 22 → 3-node state-root agreement → Carol restart with persistence confirmed. Bootstrap multiaddr fix applied (reads Alice's libp2p peer ID from her log, full `/ip4/.../tcp/.../p2p/<peer_id>` form, matching the working `devnet_4node.rs` pattern).
+- **Ed25519 retired from Qattice** (owner, 2026-10-30): recorded in `CLAUDE.md`. All new tests use ML-DSA-65 keys (`keys/mldsa/`) and `pqc-native`/`ml-dsa-65`. Classical-compatibility fixtures (`genesis-val-jail.json`, root-level `keys/*.key.json`) are not copied into new tests.
+
+**BIZ-PRE-5 ✅** — validator eviction policy decided and implemented (H0-11A jail/unjail + H0-11B automatic suspension, both Windows-confirmed).
+
+**Still open (Qattice, in owner priority order):** H0-11C/D; 24-suite live sweep; `PHASE-0-CLOSEOUT.md`; P2P automatic reconnection; ACCT-LEAF-1 (investigation only, read-only); QRC cleanup; remaining DIS hooks; machine/deployment follow-ups for the rename.
 
 ### Protocol Blockers
 
