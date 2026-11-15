@@ -168,6 +168,14 @@ pub struct PqHotStuffEngine {
     // are signed with write-before-broadcast guarantees. When None, the engine runs
     // in sign-later mode (suitable for unit tests and the CF-C1 skeleton).
     signing_ctx: Option<Box<dyn EngineSigningContext>>,
+
+    // Equivocation detection: first vote seen per (round, ValidatorId).
+    // Any subsequent vote from the same (round, validator) for a different block
+    // triggers an EquivocationDetected event regardless of vote_type.
+    // Cleared on advance_round so stale-round votes don't pollute the new round.
+    vote_tracker: BTreeMap<(Round, ValidatorId), Vote>,
+    /// Equivocation evidence pending draining by the node.
+    pending_equivocations: Vec<crate::tendermint::EquivocationDetected>,
 }
 
 impl PqHotStuffEngine {
@@ -195,6 +203,8 @@ impl PqHotStuffEngine {
             seal_round: None,
             pacemaker: Pacemaker::new(1000),
             signing_ctx: None,
+            vote_tracker: BTreeMap::new(),
+            pending_equivocations: Vec::new(),
         }
     }
 
@@ -265,6 +275,7 @@ impl PqHotStuffEngine {
     fn advance_round(&mut self, new_round: Round) {
         self.round = new_round;
         self.accumulator.clear();
+        self.vote_tracker.clear();
         self.pending_proposal = None;
     }
 
@@ -329,6 +340,8 @@ impl ConsensusEngine for PqHotStuffEngine {
         self.high_qc = Qc::genesis();
         self.seal_round = None;
         self.accumulator.clear();
+        self.vote_tracker.clear();
+        self.pending_equivocations.clear();
         self.pending_proposal = None;
         Ok(())
     }
@@ -409,6 +422,47 @@ impl ConsensusEngine for PqHotStuffEngine {
     async fn receive_vote(&mut self, vote: Vote) -> ConsensusResult<Option<CommitCertificate>> {
         if vote.height != self.height {
             return Err(ConsensusError::StaleMessage(vote.height, self.height));
+        }
+
+        // Equivocation detection: track the first vote seen per (round, validator).
+        // Runs before the Precommit-only filter so gossip-injected Prevote equivocations
+        // (e.g. from the slashing live-test attacker) are caught regardless of vote type.
+        {
+            use std::collections::btree_map::Entry;
+            let key = (vote.round, vote.validator.clone());
+            match self.vote_tracker.entry(key) {
+                Entry::Vacant(e) => { e.insert(vote.clone()); }
+                Entry::Occupied(prev) => {
+                    let prev_vote = prev.get();
+                    if prev_vote.block_hash != vote.block_hash {
+                        let vote_type_byte = match vote.vote_type {
+                            VoteType::Prevote   => 0,
+                            VoteType::Precommit => 1,
+                            VoteType::Nil       => 2,
+                        };
+                        let hash_a = prev_vote.block_hash.clone()
+                            .unwrap_or_else(|| BlockHash("nil".into()));
+                        let hash_b = vote.block_hash.clone()
+                            .unwrap_or_else(|| BlockHash("nil".into()));
+                        let (hash_a, sig_a, hash_b, sig_b) = if hash_a.0 <= hash_b.0 {
+                            (hash_a, prev_vote.signature.clone(), hash_b, vote.signature.clone())
+                        } else {
+                            (hash_b, vote.signature.clone(), hash_a, prev_vote.signature.clone())
+                        };
+                        self.pending_equivocations.push(crate::tendermint::EquivocationDetected {
+                            validator_id:   vote.validator.clone(),
+                            height:         vote.height,
+                            round:          vote.round,
+                            vote_type_byte,
+                            epoch:          prev_vote.epoch,
+                            block_hash_a:   hash_a,
+                            block_hash_b:   hash_b,
+                            signature_a:    sig_a,
+                            signature_b:    sig_b,
+                        });
+                    }
+                }
+            }
         }
 
         // PQ-HotStuff is single-phase: only Precommit votes count toward quorum.
@@ -610,6 +664,7 @@ impl ConsensusEngine for PqHotStuffEngine {
         self.height = certificate.height + 1;
         self.round = 1;
         self.accumulator.clear();
+        self.vote_tracker.clear();
         self.pending_proposal = None;
         // Reset per-height QC state so round counters from the previous height
         // don't block quorum at round 1 of the new height (high_qc.round check).
@@ -623,6 +678,10 @@ impl ConsensusEngine for PqHotStuffEngine {
     fn current_height(&self) -> BlockHeight { self.height }
     fn current_round(&self) -> Round { self.round }
     fn current_epoch(&self) -> u64 { self.epoch }
+
+    fn drain_equivocations(&mut self) -> Vec<crate::tendermint::EquivocationDetected> {
+        std::mem::take(&mut self.pending_equivocations)
+    }
 
     fn verify_commit(
         &self,
@@ -660,6 +719,8 @@ impl ConsensusEngine for PqHotStuffEngine {
         self.round = 1;
         self.validator_set = validator_set;
         self.accumulator.clear();
+        self.vote_tracker.clear();
+        self.pending_equivocations.clear();
         self.pending_proposal = None;
         Ok(())
     }
