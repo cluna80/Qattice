@@ -25,7 +25,7 @@
             "max_missed_pct": 33,
             "start_height": 20,
             "automatic_suspension_enabled": true,
-            "grace_window_blocks": 50
+            "grace_window_blocks": 25
         },
         "bft_variant": "pq-hotstuff"
     },

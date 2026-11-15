@@ -72,8 +72,10 @@ pub const SUSPENSION_THRESHOLD_PCT: u32 = 33;
 
 /// Blocks before the suspension trigger fires after the threshold is first
 /// exceeded. Gives a restarting validator time to rejoin without being jailed.
-/// At ~9 s/block (PQ-HotStuff-2 Windows devnet) this is ~7.5 minutes.
-pub const GRACE_WINDOW_BLOCKS: u64 = 50;
+/// Re-measured 2026-11-15: BossKing runs at ~15 s/block (not the original 9 s),
+/// so 50 blocks became ~12.5 min — double the intended 7.5 min grace window.
+/// 25 blocks × ~15 s ≈ 6 min, preserving the design intent.
+pub const GRACE_WINDOW_BLOCKS: u64 = 25;
 
 /// Tier-W (warning) alert: miss rate ≥ this percent over `TIER_W_WINDOW_BLOCKS`.
 /// Triggers a log event / monitoring alert only — no jailing.
