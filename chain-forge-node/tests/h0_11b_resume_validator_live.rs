@@ -377,23 +377,16 @@ fn h0_11b_resume_validator_live() {
     assert!(wait_until(Duration::from_secs(750), || height(alice) >= release_height),
             "RV-04: jail-release epoch never passed (stuck at h={})", height(alice));
 
-    // Restart Dave so he can submit the tx himself.
-    // Dave has been offline since he was killed; his data directory is intact.
-    say("Restarting Dave to submit ResumeValidator…".into());
-    nodes[3] = Some(spawn(&specs[3], &tmp));
-    assert!(port_open(dave, Duration::from_secs(60)),
-            "Dave API did not come up after restart\n{}", tail_log(&tmp, DAVE, 30));
-    // Give Dave enough time to sync at least to the current live height before submitting.
-    let sync_target = height(alice);
-    assert!(wait_until(Duration::from_secs(120), || height(dave) >= sync_target.saturating_sub(5)),
-            "Dave did not sync to height {sync_target} within 2 min");
-    say(format!("Dave restarted and synced (h={})", height(dave)));
-
     // ── RV-04: authorized resume (Dave → Dave) must succeed ──────────────────
-    let dave_nonce = nonce(dave, DAVE);
+    // Dave is still offline. Authorization is `tx.sender == validator_id` checked
+    // by the execution layer — it does not matter which node receives the tx.
+    // We sign with Dave's keypair and submit to a live node; query Dave's nonce
+    // from Alice so we get the chain-head value regardless of Dave's sync state.
+    say("Submitting authorized ResumeValidator via live node (Dave is offline)…".into());
+    let dave_nonce = nonce(alice, DAVE);
     let resume = resume_tx(DAVE, DAVE, dave_nonce);
     let resume_id = resume.id.clone();
-    let submit_resp = submit_tx(dave, &resume);
+    let submit_resp = submit_tx(alice, &resume);
     assert_eq!(submit_resp["status"].as_str().unwrap_or(""), "queued",
                "RV-04: resume tx not queued: {submit_resp}");
     let result = wait_tx(alice, &resume_id, Duration::from_secs(60));
@@ -417,8 +410,8 @@ fn h0_11b_resume_validator_live() {
     say("✓ RV-05: Dave is Candidate on all live nodes".into());
 
     // ── RV-06: duplicate resume — succeeds in execution layer, unjail() warns ─
-    // Dave's nonce has advanced by 1; submit a second resume at nonce+1.
-    let dave_nonce2 = nonce(dave, DAVE);
+    // Dave is still offline; query Alice for the updated nonce.
+    let dave_nonce2 = nonce(alice, DAVE);
     assert!(dave_nonce2 > dave_nonce, "RV-06: Dave's nonce did not advance after first resume");
     let resume2 = resume_tx(DAVE, DAVE, dave_nonce2);
     let result2 = submit_and_wait(alice, &resume2, Duration::from_secs(30));
