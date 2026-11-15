@@ -18,7 +18,6 @@
 //! cargo test -p chain-forge-node --test storage_v2_live -- --nocapture --test-threads=1
 //! ```
 
-use chain_forge_crypto::{MlDsaScheme, SignatureScheme};
 use chain_forge_execution::Transaction;
 use std::{
     io::{BufRead, Write},
@@ -94,12 +93,10 @@ impl Feeder {
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let s2 = stop.clone();
         let h = std::thread::spawn(move || {
-            let kp = MlDsaScheme.generate_keypair("qcb1alice").unwrap();
             let mut sent = 0u64;
             while !s2.load(std::sync::atomic::Ordering::Relaxed) {
                 let nonce = api_get(port, "/api/accounts/qcb1alice").and_then(|v| v["nonce"].as_u64()).unwrap_or(0);
-                let mut tx = Transaction::transfer(&format!("v2l-{nonce}-{sent}"), "qcb1alice", "qcb1bob", "uqcb", 1_000, nonce);
-                tx.sign(&kp, CHAIN_ID).unwrap();
+                let tx = Transaction::transfer(&format!("v2l-{nonce}-{sent}"), "qcb1alice", "qcb1bob", "uqcb", 1_000, nonce);
                 if post_tx(port, &tx) { sent += 1; }
                 std::thread::sleep(Duration::from_millis(700));
             }

@@ -36,7 +36,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chain_forge_crypto::{MlDsaScheme, SignatureScheme};
 use chain_forge_execution::{Transaction, TxBody};
 
 const CHAIN_ID:     &str = "qcb-devnet-val-jail";
@@ -103,15 +102,10 @@ fn wait_until(timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
     false
 }
 
-fn signed_tx(mut tx: Transaction, who: &str) -> Transaction {
-    tx.sign(&MlDsaScheme.generate_keypair(who).unwrap(), CHAIN_ID).unwrap();
-    tx
-}
-
 fn bond_tx(who: &str, n: u64) -> Transaction {
     let mut tx = Transaction::bond_validator(&format!("bond-{who}-{n}"), who, GENESIS_BOND as u128, n);
     if let TxBody::BondValidator { ref mut owner_identity_id, .. } = tx.body { *owner_identity_id = Some(who.to_string()); }
-    signed_tx(tx, who)
+    tx
 }
 
 fn submit_and_wait(port: u16, tx: &Transaction) -> serde_json::Value {
@@ -260,7 +254,7 @@ fn read_peer_id(log_path: &std::path::Path, timeout: std::time::Duration) -> Str
             let mut n = sender_nonce;
             let mut sent = 0u64;
             while !stop.load(Ordering::Relaxed) {
-                let tx = signed_tx(Transaction::transfer(&format!("load-{n}"), "qcb1carol", "qcb1eve", "uqcb", 1, n), "qcb1carol");
+                let tx = Transaction::transfer(&format!("load-{n}"), "qcb1carol", "qcb1eve", "uqcb", 1, n);
                 if http("POST", port, "/api/tx", &serde_json::to_string(&tx).unwrap())
                     .map_or(false, |r| r["status"].as_str() == Some("queued")) { n += 1; sent += 1; }
                 std::thread::sleep(Duration::from_millis(350));

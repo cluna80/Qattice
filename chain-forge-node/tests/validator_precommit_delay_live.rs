@@ -48,7 +48,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chain_forge_crypto::{MlDsaScheme, SignatureScheme};
 use chain_forge_execution::{Transaction, TxBody};
 
 const CHAIN_ID:     &str = "qcb-devnet-val-delay";
@@ -149,7 +148,6 @@ fn wait_until(timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
 fn bond_tx(who: &str, n: u64) -> Transaction {
     let mut tx = Transaction::bond_validator(&format!("bond-{who}-{n}"), who, GENESIS_BOND as u128, n);
     if let TxBody::BondValidator { ref mut owner_identity_id, .. } = tx.body { *owner_identity_id = Some(who.to_string()); }
-    tx.sign(&MlDsaScheme.generate_keypair(who).unwrap(), CHAIN_ID).unwrap();
     tx
 }
 
@@ -300,8 +298,7 @@ fn fund_load_accounts(api: &[u16]) {
         let mut ids = vec![];
         for (who, port) in funders.iter() {
             if k >= LOAD_ACCOUNTS { break; }
-            let mut tx = Transaction::transfer(&format!("fund-{k}"), who, &load_addr(k), "uqcb", 50_000_000, nonce(*port, who));
-            tx.sign(&MlDsaScheme.generate_keypair(who).unwrap(), CHAIN_ID).unwrap();
+            let tx = Transaction::transfer(&format!("fund-{k}"), who, &load_addr(k), "uqcb", 50_000_000, nonce(*port, who));
             let r = http("POST", *port, "/api/tx", &serde_json::to_string(&tx).unwrap()).unwrap_or_default();
             assert_eq!(r["status"].as_str(), Some("queued"), "funding tx {k} not queued: {r}");
             ids.push((*port, tx.id.clone()));
@@ -342,8 +339,7 @@ fn start_load(api: Vec<u16>) -> (Arc<AtomicBool>, std::thread::JoinHandle<u64>) 
                     Some((n, at)) => (committed > n && at.elapsed() >= LOAD_MIN_SPACING) || at.elapsed() > Duration::from_secs(14),
                 };
                 if !due { continue; }
-                let mut tx = Transaction::transfer(&format!("ld-{addr}-{committed}"), &addr, "qcb1alice", "uqcb", 1, committed);
-                tx.sign(&MlDsaScheme.generate_keypair(&addr).unwrap(), CHAIN_ID).unwrap();
+                let tx = Transaction::transfer(&format!("ld-{addr}-{committed}"), &addr, "qcb1alice", "uqcb", 1, committed);
                 let ok = http("POST", port, "/api/tx", &serde_json::to_string(&tx).unwrap())
                     .map_or(false, |r| r["status"].as_str() == Some("queued"));
                 if ok { sent[k] = Some((committed, Instant::now())); queued += 1; }
