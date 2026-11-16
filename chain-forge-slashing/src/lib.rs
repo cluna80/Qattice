@@ -339,6 +339,12 @@ pub struct SlashingModule {
     pub equivocation_slashed_uqcb: u128,
     /// Total uqcb slashed for liveness failures.
     pub liveness_slashed_uqcb: u128,
+    /// H0-11B: height at which each validator was first seen above the
+    /// suspension threshold (cleared when it drops back below). Persisted with
+    /// the module so a restarted node evaluates the grace window exactly as the
+    /// nodes that never restarted -- jailing must be deterministic.
+    #[serde(default)]
+    pub suspension_since: std::collections::BTreeMap<String, u64>,
 }
 
 impl SlashingModule {
@@ -351,6 +357,7 @@ impl SlashingModule {
             total_slashed_uqcb:   0,
             equivocation_slashed_uqcb: 0,
             liveness_slashed_uqcb: 0,
+            suspension_since: Default::default(),
         }
     }
 

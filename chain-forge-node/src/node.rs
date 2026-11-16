@@ -952,25 +952,6 @@ pub struct Node {
 
     // ── H0-11B: Liveness-suspension tracker ──────────────────────────────────
 
-    /// Tracks the block height at which each validator's miss-rate first
-    /// exceeded `SUSPENSION_THRESHOLD_PCT`. Used to implement the grace window:
-    /// a validator whose threshold was first breached at height H is not
-    /// eligible for suspension until height H + GRACE_WINDOW_BLOCKS.
-    ///
-    /// Entry is removed when the miss-rate drops below the threshold or when
-    /// a successful `ResumeValidator` tx unjails the validator.
-    ///
-    /// **Not persisted.** On restart every entry is absent, so a validator
-    /// whose threshold was first breached before the restart gets a fresh grace
-    /// window. This is conservative (safer than over-counting): a validator
-    /// cannot be jailed before the grace window clears, and automatic suspension
-    /// is disabled for the production genesis regardless. Persistence to
-    /// StateStore is deferred to the phase when enforcement is enabled.
-    ///
-    /// **Mutation policy:** only commit_block (the finality path) may insert
-    /// or remove entries. propose_block reads this map but does not write it,
-    /// preventing grace-window start heights from being recorded before finality.
-    suspension_tracker: std::collections::HashMap<String, u64>,
 }
 
 /// Default validator-set epoch length in blocks. Matches the scale PoCD's
@@ -1834,7 +1815,6 @@ impl Node {
             historical_validator_sets: std::collections::BTreeMap::new(),
             personhood_power_cap,
             bond_owner_bindings: std::collections::HashMap::new(),
-            suspension_tracker: std::collections::HashMap::new(),
         })
     }
 
@@ -5369,7 +5349,7 @@ impl Node {
                     Ok(()) => {
                         // Clear the suspension tracker entry so a fresh grace
                         // window starts if the validator breaches the threshold again.
-                        self.suspension_tracker.remove(validator_id);
+                        self.slasher.suspension_since.remove(validator_id);
                         info!(
                             validator = %validator_id,
                             epoch,
@@ -5638,18 +5618,12 @@ impl Node {
 
             // Pass 5 (H0-11B): evaluate liveness policy and log alert tiers.
             // This is the finality path (commit_block); it is the ONLY place
-            // that mutates suspension_tracker. The propose_block path (devnet
-            // auto-commit) runs a read-only advisory pass to avoid recording
-            // the grace-window start before finality.
+            // that mutates slasher.suspension_since. The propose_block path
+            // (devnet auto-commit) runs a read-only advisory pass to avoid
+            // recording the grace-window start before finality.
             //
-            // suspension_tracker is NOT persisted. On restart every entry is
-            // absent, so a validator whose threshold was first breached before
-            // the restart gets a fresh grace window. This is conservative and
-            // safe: a validator cannot be jailed before the grace window clears,
-            // and enforcement is disabled anyway for the production genesis.
-            // Exact persistence would require writing to StateStore on every
-            // epoch boundary; that is deferred to the phase when enforcement
-            // is enabled.
+            // suspension_since is persisted with the slasher, so a restarted or
+            // replaying node reaches the same jail decision at the same height.
             {
                 use chain_forge_validators::liveness_policy::{
                     evaluate_liveness_policy, LivenessAlert, ValidatorLivenessRecord,
@@ -5690,12 +5664,12 @@ impl Node {
                         // duration at which the validator was observable above 33%.
                         let threshold_breached = missed_pct >= chain_forge_validators::liveness_policy::SUSPENSION_THRESHOLD_PCT;
                         let blocks_above = if threshold_breached {
-                            let entry = self.suspension_tracker
+                            let entry = self.slasher.suspension_since
                                 .entry(id.clone())
                                 .or_insert(current_height);
                             current_height.saturating_sub(*entry)
                         } else {
-                            self.suspension_tracker.remove(id);
+                            self.slasher.suspension_since.remove(id);
                             0
                         };
                         Some(ValidatorLivenessRecord {
@@ -5760,7 +5734,7 @@ impl Node {
                                             "H0-11B jail failed"
                                         );
                                     } else {
-                                        self.suspension_tracker.remove(&status.validator_id);
+                                        self.slasher.suspension_since.remove(&status.validator_id);
                                         any_changed = true;
                                     }
                                 } else {
@@ -7431,7 +7405,7 @@ impl Node {
                 if !result.success { continue; }
                 match self.validator_registry.unjail(validator_id, epoch) {
                     Ok(()) => {
-                        self.suspension_tracker.remove(validator_id);
+                        self.slasher.suspension_since.remove(validator_id);
                         info!(
                             validator = %validator_id,
                             epoch,
@@ -7508,7 +7482,7 @@ impl Node {
 
             // Pass 5 (H0-11B): liveness policy evaluation — READ-ONLY advisory
             // logging only. This path (propose_block / devnet auto-commit) DOES
-            // NOT mutate suspension_tracker. Only commit_block (the finality path
+            // NOT mutate slasher.suspension_since. Only commit_block (the finality path
             // in multi-node Tendermint) mutates it.
             //
             // Rationale: in multi-node mode the proposer calls propose_block to
@@ -7552,7 +7526,7 @@ impl Node {
                         // Read-only: use the existing tracker entry if present, but
                         // do NOT insert or remove. The commit_block path manages writes.
                         let blocks_above = if threshold_breached {
-                            self.suspension_tracker
+                            self.slasher.suspension_since
                                 .get(id)
                                 .map(|&start| height.saturating_sub(start))
                                 .unwrap_or(0)
@@ -7598,7 +7572,7 @@ impl Node {
                                 );
                             }
                             LivenessAlert::SuspendEligible => {
-                                // Advisory path only — suspension_tracker mutations
+                                // Advisory path only — suspension_since mutations
                                 // and actual jailing happen exclusively in commit_block.
                                 warn!(
                                     validator = %status.validator_id,
