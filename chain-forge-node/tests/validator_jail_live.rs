@@ -308,8 +308,10 @@ fn agree(ports: &[u16], timeout: Duration) -> (u64, String) {
 /// first, then require the follower to hold that same block (hash and root).
 fn follower_agrees(follower: u16, committee: &[u16], timeout: Duration) -> (u64, String) {
     let (h, root) = agree(committee, timeout);
+    // A 404 is JSON too ({"error":"not found"}): only a body with a block hash is a block.
     let block = |p: u16| get(p, &format!("/api/blocks/{h}"))
-        .map(|b| (b["block_hash"].as_str().unwrap_or("").to_string(), b["state_root"].as_str().unwrap_or("").to_string()));
+        .and_then(|b| Some((b["block_hash"].as_str()?.to_string(), b["state_root"].as_str()?.to_string())))
+        .filter(|(hash, _)| !hash.is_empty());
     let want = block(committee[0]).expect("committee node serves the agreed block");
     assert!(wait_until(timeout, || block(follower).is_some()),
             "follower never committed height {h} (it is at {})", height(follower));
