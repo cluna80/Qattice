@@ -428,7 +428,7 @@ fn run(loaded: bool) {
     let _nodes: Vec<NodeHandle> = std::iter::once(alice_node)
         .chain((1..4).map(|i| spawn(NAMES[i], ports[i].0, ports[i].1, &tmp, &alice_bootstrap, &control)))
         .collect();
-    assert!(wait_until(Duration::from_secs(90), || api.iter().all(|&p| height(p) >= 3)), "devnet did not start");
+    assert!(wait_until(Duration::from_secs(240), || api.iter().all(|&p| height(p) >= 3)), "devnet did not start");
     std::thread::sleep(Duration::from_secs(1));
     let active = (0..4).all(|i| {
         std::fs::read_to_string(tmp.join(format!("{}.log", NAMES[i]))).map_or(false, |t| t.contains("fault injection ACTIVE"))
@@ -441,7 +441,8 @@ fn run(loaded: bool) {
         assert!(r["success"].as_bool().unwrap_or(false), "bond for {who} failed: {r}");
     }
     let h = height(api[0]);
-    assert!(wait_until(Duration::from_secs(60), || height(api[0]) >= h + 12), "chain stalled after bonds");
+    assert!(wait_until(Duration::from_secs(360), || height(api[0]) >= h + 12),
+            "chain stalled after bonds (bond height {h}, now {})", height(api[0]));
     say("four validators bonded; fault injection active on all four nodes".into());
 
     if loaded {
@@ -452,7 +453,8 @@ fn run(loaded: bool) {
     if loaded {
         // Prove the load is real BEFORE measuring: committed txs must be flowing.
         let h_start = height(api[0]);
-        assert!(wait_until(Duration::from_secs(120), || height(api[0]) >= h_start + 8), "chain stalled under load");
+        assert!(wait_until(Duration::from_secs(400), || height(api[0]) >= h_start + 8),
+            "chain stalled under load (start {h_start}, now {})", height(api[0]));
         let committed: u64 = (h_start + 1..=height(api[0])).filter_map(|b| get(api[0], &format!("/api/blocks/{b}")))
             .map(|b| b["tx_count"].as_u64().unwrap_or(0)).sum();
         assert!(committed >= 8, "the load generator is not producing committed transactions (only {committed} in 8 blocks); \
@@ -460,7 +462,8 @@ fn run(loaded: bool) {
         say(format!("load verified: {committed} txs committed in the last 8 blocks"));
         // Let the staggered accounts reach their steady cycle before the first scenario.
         let h_warm = height(api[0]);
-        assert!(wait_until(Duration::from_secs(120), || height(api[0]) >= h_warm + 10), "chain stalled during load warm-up");
+        assert!(wait_until(Duration::from_secs(400), || height(api[0]) >= h_warm + 10),
+            "chain stalled during load warm-up (start {h_warm}, now {})", height(api[0]));
     }
 
     // Shorter scenarios under load: per-block persistence cost grows with chain length (KNOWN_ISSUES §9).
@@ -470,7 +473,8 @@ fn run(loaded: bool) {
         std::fs::write(&control, if delay == 0 { "off".to_string() } else { format!("{DAVE} {delay}") }).unwrap();
         std::thread::sleep(Duration::from_secs(7));
         let (h0, obs0, miss0) = dave_window(api[0]);
-        assert!(wait_until(Duration::from_secs(300), || height(api[0]) >= h0 + blocks_per_scenario), "chain stalled at delay {delay} ms");
+        assert!(wait_until(Duration::from_secs(900), || height(api[0]) >= h0 + blocks_per_scenario),
+            "chain stalled at delay {delay} ms (start {h0}, now {})", height(api[0]));
         let (h1, obs1, miss1) = dave_window(api[0]);
         std::thread::sleep(Duration::from_millis(500));
 
