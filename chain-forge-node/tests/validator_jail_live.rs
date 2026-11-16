@@ -303,6 +303,21 @@ fn agree(ports: &[u16], timeout: Duration) -> (u64, String) {
     panic!("nodes never reached the same height and state root within {timeout:?}; last views: {last}");
 }
 
+/// A non-validator learns block h is final only after block h+1's quorum
+/// forms, so it trails the committee by about a block. Agree on the committee
+/// first, then require the follower to hold that same block (hash and root).
+fn follower_agrees(follower: u16, committee: &[u16], timeout: Duration) -> (u64, String) {
+    let (h, root) = agree(committee, timeout);
+    let block = |p: u16| get(p, &format!("/api/blocks/{h}"))
+        .map(|b| (b["block_hash"].as_str().unwrap_or("").to_string(), b["state_root"].as_str().unwrap_or("").to_string()));
+    let want = block(committee[0]).expect("committee node serves the agreed block");
+    assert!(wait_until(timeout, || block(follower).is_some()),
+            "follower never committed height {h} (it is at {})", height(follower));
+    let got = block(follower).unwrap();
+    assert_eq!(got, want, "follower's block {h} (hash, state root) differs from the committee's");
+    (h, root)
+}
+
 // ── Evidence helpers independent of the HTTP API ──────────────────────────────
 
 fn strip_ansi(s: &str) -> String {
@@ -596,7 +611,7 @@ fn validator_jail_live() {
             "Dave did not restart\n{}", tail_log(&tmp, DAVE, 40));
     assert!(wait_until(Duration::from_secs(900), || height(dave) + 3 >= height(alice)),
             "Dave never caught up (dave {} vs alice {})\n{}", height(dave), height(alice), tail_log(&tmp, DAVE, 40));
-    let (h_all, _) = agree(&api, Duration::from_secs(180));
+    let (h_all, _) = follower_agrees(dave, &live_api, Duration::from_secs(180));
     assert!(is_jailed(dave, DAVE), "Dave's own replay did not derive Jailed");
     say(format!("  Dave back online and replayed to height {h_all}; his own state says Jailed"));
 
