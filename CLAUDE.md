@@ -38,7 +38,15 @@ copy their crypto scheme into new test genesis files.
 **Tendermint is retired from all Qattice acceptance tests.**
 
 Owner decision 2026-11-15: PQ-HotStuff-2 (`bft_variant: "pq-hotstuff"`) is the
-only consensus engine used in Qattice test genesis files. Tendermint was the
+only consensus engine used in Qattice test genesis files.
+
+Owner decision 2026-11-16: PQ-HotStuff-2 is the default engine. The node's
+`pq-hotstuff` feature is on by default, a genesis without `bft_variant` selects
+PQ-HotStuff-2, and `"tendermint"` is refused at startup. PQ-HotStuff-2 still runs
+only with `environment.mode = "devnet"` (release gate 2) until its safety review.
+Tendermint removal is phased: (1) default switched — done; (2) migrate remaining
+tests/scripts off Tendermint genesis files and delete them; (3) port unit tests
+and delete the engine code. Tendermint was the
 original devnet engine but was a mistake; PQ-HotStuff-2 is the correct target.
 
 All test genesis files use:

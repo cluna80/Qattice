@@ -2890,6 +2890,7 @@ mod tests {
                 epoch:      0,
                 },
             ],
+            epoch: 0,
         };
 
         let result = engine.verify_commit(&cert, &vs);
@@ -5062,6 +5063,7 @@ mod mldsa_consensus {
             block_hash: Some(hash.clone()),
             signature: MlDsaScheme.sign(&msg, kp).unwrap().bytes,
             scheme: "ml-dsa-65".into(),
+            epoch: 0,
         }
     }
 
@@ -5088,7 +5090,7 @@ mod mldsa_consensus {
         let h = e.current_height();
         let hash = BlockHash("b".into());
         let precommits: Vec<Vote> = (0..3).map(|i| mldsa_vote(h, i, &k[i], VoteType::Precommit, &hash)).collect();
-        let cert = CommitCertificate { height: h, round: 0, block_hash: hash.clone(), precommits };
+        let cert = CommitCertificate { height: h, round: 0, block_hash: hash.clone(), precommits, epoch: 0 };
         e.verify_commit(&cert, &vs).expect("3 of 4 valid ML-DSA precommits must verify");
 
         let mut bad = cert.clone();

@@ -556,9 +556,9 @@ pub struct GenesisConsensus {
     #[serde(default)]
     pub personhood_weighted: bool,
     /// BFT algorithm variant to use for this chain.
-    /// One of: "tendermint" (default), "hotstuff", "xrpl". Omitting it
-    /// selects Tendermint. "hotstuff" and "xrpl" are devnet-only (release
-    /// gate 2); see `GenesisConfig::bft_variant`.
+    /// One of: "pq-hotstuff" (default), "hotstuff", "xrpl". Omitting it
+    /// selects PQ-HotStuff-2. "tendermint" is retired and refused. All
+    /// engines are devnet-only (release gate 2); see `GenesisConfig::bft_variant`.
     #[serde(default)]
     pub bft_variant: Option<String>,
     /// Liveness (missed-participation) policy. Omitted means the engine
@@ -1230,15 +1230,18 @@ impl GenesisConfig {
     /// rather than silently selecting an engine.
     pub fn bft_variant(&self) -> Result<BftVariant, String> {
         let variant = match self.consensus.bft_variant.as_deref() {
-            None | Some("tendermint") | Some("TendermintStyle") => BftVariant::Tendermint,
+            None | Some("pq-hotstuff") | Some("PqHotStuff") => BftVariant::PqHotStuff,
+            Some("tendermint") | Some("TendermintStyle") => return Err(
+                "consensus.bft_variant \"tendermint\" is retired; Qattice runs PQ-HotStuff-2 \
+                 (omit bft_variant or set it to \"pq-hotstuff\")".into()
+            ),
             Some("hotstuff") | Some("HotStuffStyle") => BftVariant::HotStuff,
             Some("xrpl")     | Some("XrplInspired")  => BftVariant::Fba,
-            Some("pq-hotstuff") | Some("PqHotStuff") => BftVariant::PqHotStuff,
             Some(other) => return Err(format!(
-                "consensus.bft_variant {other:?} is not one of \"tendermint\", \"hotstuff\", \"xrpl\", \"pq-hotstuff\""
+                "consensus.bft_variant {other:?} is not one of \"pq-hotstuff\", \"hotstuff\", \"xrpl\""
             )),
         };
-        if variant != BftVariant::Tendermint && self.environment.mode != "devnet" {
+        if self.environment.mode != "devnet" {
             return Err(format!(
                 "consensus.bft_variant {variant:?} has not passed a consensus safety review and \
                  may only run with environment.mode = \"devnet\" (this chain is {:?})",
@@ -1513,10 +1516,17 @@ mod tests {
     }
 
     #[test]
-    fn tendermint_runs_in_every_mode() {
+    fn pq_hotstuff_is_the_default_engine() {
+        assert_eq!(genesis_with_variant("devnet", None).bft_variant(), Ok(BftVariant::PqHotStuff));
+    }
+
+    #[test]
+    fn tendermint_is_retired() {
         for mode in ["devnet", "testnet", "mainnet"] {
-            for v in [None, Some("tendermint"), Some("TendermintStyle")] {
-                assert_eq!(genesis_with_variant(mode, v).bft_variant(), Ok(BftVariant::Tendermint), "{mode} {v:?}");
+            for v in ["tendermint", "TendermintStyle"] {
+                let err = genesis_with_variant(mode, Some(v)).bft_variant()
+                    .expect_err(&format!("{v} must be refused in {mode}"));
+                assert!(err.contains("retired"), "{err}");
             }
         }
     }

@@ -935,9 +935,10 @@ mod tests {
             validator: ValidatorId("v0".into()),
             signature: sig,
             scheme: Vote::default_scheme(),
+            epoch: 0,
         };
         let cert = CommitCertificate {
-            height: 1, round: 3, block_hash: BlockHash("ec".into()), precommits: vec![precommit],
+            height: 1, round: 3, block_hash: BlockHash("ec".into()), precommits: vec![precommit], epoch: 0,
         };
         // verify_handoff_proof requires high_qc.round == cert.round + 1 (consecutive-round
         // check). In the real two-chain flow this is always true because the commit fires

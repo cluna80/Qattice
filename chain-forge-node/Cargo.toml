@@ -71,7 +71,9 @@ zk-vrc = ["chain-forge-personhood"]
 # Devnet wiring for PQ-HotStuff-2 (ML-DSA-65 two-chain HotStuff). Enables the
 # pq-hotstuff-fips204 and gate-b-harness features in chain-forge-consensus so
 # that FsCounter is available for the devnet signing context, and pulls in
-# chain-forge-vca-pq for admission. Never enable for testnet or mainnet.
+# chain-forge-vca-pq for admission. On by default: PQ-HotStuff-2 is Qattice's
+# consensus engine. The engine itself still runs only on devnet genesis files
+# (release gate 2, GenesisConfig::bft_variant) until its safety review.
 pq-hotstuff = [
     "chain-forge-consensus/pq-hotstuff-fips204",
     "chain-forge-consensus/gate-b-harness",
@@ -86,7 +88,7 @@ insecure-dev-quorum = ["chain-forge-core/insecure-dev-quorum"]
 # node (see src/fault.rs). Inert unless CF_FAULT_CONTROL_FILE is set. Never enable
 # for testnet or mainnet builds.
 fault-injection = []
-default = ["real-network"]
+default = ["real-network", "pq-hotstuff"]
 
 [dev-dependencies]
 tokio             = { workspace = true }
