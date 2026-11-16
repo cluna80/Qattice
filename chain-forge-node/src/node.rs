@@ -2654,9 +2654,12 @@ impl Node {
         push("validators.json", serde_json::to_string_pretty(&self.validator_registry))?;
         push("agents.json",     serde_json::to_string_pretty(&self.agents))?;
         push("slashing.json",   serde_json::to_string_pretty(&self.slasher))?;
-        push("chain_store.json",serde_json::to_string_pretty(&self.chain_store))?;
+        // Compact, not pretty: these two hold ML-DSA keys and signatures as byte
+        // arrays and are rewritten on every commit; pretty-printing puts each
+        // byte on its own line (~4x the size, tens of MB per commit).
+        push("chain_store.json",serde_json::to_string(&self.chain_store))?;
         push("historical_validator_sets.json",
-             serde_json::to_string_pretty(&self.historical_validator_sets))?;
+             serde_json::to_string(&self.historical_validator_sets))?;
         // CF-VAL-KEY-002: the live consensus ValidatorSet, exactly as
         // `self.consensus` holds it right now -- real keys, real voting power,
         // every currently-seated validator whether seated at genesis or admitted
