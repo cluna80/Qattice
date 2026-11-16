@@ -864,6 +864,11 @@ pub struct Node {
     /// local certificate plus late precommits gossiped after the commit. The
     /// next proposer publishes it as `BlockPayload::last_commit`.
     last_commit_evidence: Option<chain_forge_consensus::CommitCertificate>,
+    /// PQ-HotStuff: precommits received per height, kept until that height
+    /// commits. The engine's certificate holds only the first quorum, and a
+    /// two-chain commit lands after every vote for the block has arrived, so
+    /// the rest are merged into the published evidence at commit time.
+    recent_precommits: std::collections::BTreeMap<u64, Vec<Vote>>,
     /// When the last block committed (for COMMIT_GATHER_MS).
     last_commit_at: Option<std::time::Instant>,
     #[cfg(feature = "fault-injection")]
@@ -1807,6 +1812,7 @@ impl Node {
             last_capacity_ad_ms: 0,
             last_committed_timestamp_ms: 0,
             last_commit_evidence: None,
+            recent_precommits: std::collections::BTreeMap::new(),
             last_commit_at: None,
             #[cfg(feature = "fault-injection")]
             fault: crate::fault::FaultInjection::from_env(),
@@ -3710,6 +3716,8 @@ impl Node {
                         // arrived after our quorum still counts as participation
                         // evidence for the next proposal.
                         self.absorb_late_precommit(&vote);
+                        #[cfg(feature = "pq-hotstuff")]
+                        self.buffer_precommit(&vote);
 
                         debug!(
                             from = %msg.from,
@@ -6148,6 +6156,8 @@ impl Node {
         // H0-2: the evidence the next proposer publishes starts from this
         // node's own certificate and grows with late precommits.
         self.last_commit_evidence = Some(cert.clone());
+        #[cfg(feature = "pq-hotstuff")]
+        self.merge_buffered_precommits(cert.height);
         self.last_commit_at = Some(std::time::Instant::now());
 
         // Record block participation for every validator and jail any that
@@ -6340,6 +6350,53 @@ impl Node {
 
     /// H0-2: add a late, valid precommit for the last committed block to the
     /// evidence the next proposer will publish.
+    /// Remember a PQ-HotStuff precommit for a height not yet committed.
+    #[cfg(feature = "pq-hotstuff")]
+    fn buffer_precommit(&mut self, vote: &Vote) {
+        if self.consensus.variant() != ConsensusVariant::PqHotStuff
+            || vote.vote_type != VoteType::Precommit
+            || vote.block_hash.is_none()
+        {
+            return;
+        }
+        let committed = self.last_commit_evidence.as_ref().map_or(0, |e| e.height);
+        if vote.height <= committed && committed > 0 {
+            return;
+        }
+        // Bound the buffer to a few heights ahead of the last commit.
+        if vote.height > committed + 16 {
+            return;
+        }
+        let votes = self.recent_precommits.entry(vote.height).or_default();
+        if !votes.iter().any(|v| v.validator == vote.validator && v.round == vote.round) {
+            votes.push(vote.clone());
+        }
+    }
+
+    /// Add buffered precommits for `height` (same round and block as the
+    /// certificate, from members of the set effective at that height) to the
+    /// evidence the next proposer publishes. Vote signatures are not
+    /// re-verified, as for inbound PQ-HotStuff votes (Phase 0 gap).
+    #[cfg(feature = "pq-hotstuff")]
+    fn merge_buffered_precommits(&mut self, height: u64) {
+        let buffered = self.recent_precommits.remove(&height).unwrap_or_default();
+        self.recent_precommits.retain(|h, _| *h > height);
+        if self.consensus.variant() != ConsensusVariant::PqHotStuff {
+            return;
+        }
+        let Some(vs) = self.historical_validator_sets.get(&height).cloned() else { return };
+        let Some(ev) = self.last_commit_evidence.as_mut() else { return };
+        for v in buffered {
+            if v.round == ev.round
+                && v.block_hash.as_ref() == Some(&ev.block_hash)
+                && vs.power_of(&v.validator) > 0
+                && !ev.precommits.iter().any(|p| p.validator == v.validator)
+            {
+                ev.precommits.push(v);
+            }
+        }
+    }
+
     fn absorb_late_precommit(&mut self, vote: &Vote) {
         let Some(evidence) = self.last_commit_evidence.as_ref() else { return };
         if vote.vote_type != VoteType::Precommit
