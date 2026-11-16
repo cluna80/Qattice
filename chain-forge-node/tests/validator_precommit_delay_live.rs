@@ -165,15 +165,18 @@ fn load_key(sender: &str) -> KeyPair {
     }
 }
 
-fn ml_dsa_sign(mut tx: Transaction, sender: &str) -> Transaction {
-    let kp = load_key(sender);
+fn ml_dsa_sign(tx: Transaction, sender: &str) -> Transaction {
+    ml_dsa_sign_with(tx, &load_key(sender))
+}
+
+fn ml_dsa_sign_with(mut tx: Transaction, kp: &KeyPair) -> Transaction {
     let body_json = serde_json::to_string(&tx.body).unwrap();
     let message = mldsa_tx_prehash(CHAIN_ID, body_json.as_bytes());
     let sig = MlDsaScheme.sign(&message, &kp).unwrap();
     let sig_hex: String = sig.bytes.iter().map(|b| format!("{b:02x}")).collect();
     tx.pq_signatures = vec![format!("mldsa65:{sig_hex}")];
     tx.sig_scheme    = Some(SchemeId::MlDsa);
-    tx.pq_public_key = kp.public_key;
+    tx.pq_public_key = kp.public_key.clone();
     tx.signature     = vec![];
     tx.public_key    = vec![];
     tx
@@ -320,7 +323,19 @@ const LOAD_ACCOUNTS: usize = 16;
 const LOAD_TXS_PER_ACCOUNT: u64 = 95;
 const LOAD_MIN_SPACING: Duration = Duration::from_secs(10);
 
-fn load_addr(k: usize) -> String { format!("qcb1ld{k:02}") }
+/// Load accounts are not in genesis, so on an ML-DSA-only chain each must be the
+/// address derived from its own key (a named account with no bound key is refused).
+fn load_keypair(k: usize) -> KeyPair {
+    MlDsaScheme.generate_keypair(&format!("precommit-delay-load-account-{k:02}-seed-000000000000000000"))
+        .expect("ML-DSA keygen")
+}
+fn derived_addr(kp: &KeyPair) -> String {
+    chain_forge_core::Address::from_public_key_schemed(
+        &kp.public_key, "qcb", chain_forge_core::HashWidth::Bits256,
+        chain_forge_core::AddressScheme::PostQuantum,
+    ).as_str().to_string()
+}
+fn load_addr(k: usize) -> String { derived_addr(&load_keypair(k)) }
 
 /// Pipelined nonces fail under gossip (a proposer can see tx 53 without 29..52 and
 /// execution then rejects it, wedging the sender), so the load uses MANY accounts
@@ -356,13 +371,15 @@ fn start_load(api: Vec<u16>) -> (Arc<AtomicBool>, std::thread::JoinHandle<u64>) 
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
     let handle = std::thread::spawn(move || {
+        let keys: Vec<(KeyPair, String)> = (0..LOAD_ACCOUNTS)
+            .map(|k| { let kp = load_keypair(k); let a = derived_addr(&kp); (kp, a) }).collect();
         let mut sent: Vec<Option<(u64, Instant)>> = vec![None; LOAD_ACCOUNTS];
         let mut queued = 0u64;
         let started = Instant::now();
         while !flag.load(Ordering::Relaxed) {
             for k in 0..LOAD_ACCOUNTS {
                 if flag.load(Ordering::Relaxed) { break; }
-                let (addr, port) = (load_addr(k), api[k % 4]);
+                let (addr, port) = (keys[k].1.clone(), api[k % 4]);
                 let committed = nonce(port, &addr);
                 if committed >= LOAD_TXS_PER_ACCOUNT { continue; }
                 // Stagger the first send across the spacing interval so the accounts do not move in
@@ -373,7 +390,7 @@ fn start_load(api: Vec<u16>) -> (Arc<AtomicBool>, std::thread::JoinHandle<u64>) 
                     Some((n, at)) => (committed > n && at.elapsed() >= LOAD_MIN_SPACING) || at.elapsed() > Duration::from_secs(14),
                 };
                 if !due { continue; }
-                let tx = ml_dsa_sign(Transaction::transfer(&format!("ld-{addr}-{committed}"), &addr, "qcb1alice", "uqcb", 1, committed), &addr);
+                let tx = ml_dsa_sign_with(Transaction::transfer(&format!("ld-{addr}-{committed}"), &addr, "qcb1alice", "uqcb", 1, committed), &keys[k].0);
                 let ok = http("POST", port, "/api/tx", &serde_json::to_string(&tx).unwrap())
                     .map_or(false, |r| r["status"].as_str() == Some("queued"));
                 if ok { sent[k] = Some((committed, Instant::now())); queued += 1; }

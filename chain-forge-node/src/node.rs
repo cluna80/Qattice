@@ -310,9 +310,14 @@ pub struct BlockSummary {
     /// PREVIOUS block (the committed `last_commit`), sorted. Liveness is judged
     /// from exactly this set.
     pub last_commit_signers: Vec<String>,
-    /// The commit certificate that caused this block to be finalized.
-    /// Present for multi-node consensus commits; `None` for single-node and replay paths.
+    /// The participation evidence committed in this block (precommits for an
+    /// earlier block). Part of the block, so identical on every node.
     pub last_commit: Option<chain_forge_consensus::CommitCertificate>,
+    /// The certificate that finalized THIS block, as this node assembled it
+    /// (it holds whichever quorum arrived first, so it can differ by node).
+    /// `None` for single-node and replay paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_cert: Option<chain_forge_consensus::CommitCertificate>,
 }
 
 /// One transaction's summary for the explorer.
@@ -3020,6 +3025,7 @@ impl Node {
                         last_commit_signers: BlockPayload::decode(&proposal.tx_data).last_commit
                             .as_ref().map(commit_signers).unwrap_or_default(),
                         last_commit: None,
+                        commit_cert: None,
                     });
                 }
                 // Ensure newest-first ordering after the loop.
@@ -4938,12 +4944,9 @@ impl Node {
         // block content, identical on every node -- never from `cert`, which
         // each node assembles from whichever quorum of votes arrived first.
         let participation = self.canonical_participation(proposal.height, &payload);
-        // The explorer summary is display-only; under PQ-HotStuff it shows the
-        // certificate that committed this block.
-        #[cfg(feature = "pq-hotstuff")]
-        let summary_commit = Some(cert.clone());
-        #[cfg(not(feature = "pq-hotstuff"))]
-        let summary_commit = participation.clone();
+        // The explorer shows the evidence committed in this block (identical on
+        // every node), never this node's locally assembled certificate.
+        let summary_commit = payload.last_commit.clone();
         let txs: Vec<Transaction> = payload.txs;
         self.remove_committed_from_mempool(&txs);
 
@@ -6086,6 +6089,7 @@ impl Node {
                 proposer:     proposal.proposer.0.clone(),
                 last_commit_signers: summary_commit.as_ref().map(commit_signers).unwrap_or_default(),
                 last_commit: summary_commit.clone(),
+                commit_cert: Some(cert.clone()),
             });
             while ex.blocks.len() > MAX_RECENT_BLOCKS {
                 ex.blocks.pop_back();
@@ -7823,6 +7827,7 @@ impl Node {
                 proposer:     proposal.proposer.0.clone(),
                 last_commit_signers: vec![],
                 last_commit: None,
+                commit_cert: None,
             });
             while ex.blocks.len() > MAX_RECENT_BLOCKS {
                 ex.blocks.pop_back();

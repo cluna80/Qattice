@@ -139,7 +139,8 @@ struct LastCommitInfo {
 fn fetch_last_commit(api_port: u16, height: u64) -> Option<LastCommitInfo> {
     let body = http_get_body(api_port, &format!("/api/blocks/{height}"))?;
     let v: serde_json::Value = serde_json::from_str(&body).ok()?;
-    let lc = v.get("last_commit")?;
+    // The certificate that finalized this block (not the evidence it carries).
+    let lc = v.get("commit_cert")?;
     let cert_height = lc.get("height")?.as_u64()?;
     let cert_epoch  = lc.get("epoch")?.as_u64()?;
     let vote_epochs: Vec<u64> = lc
