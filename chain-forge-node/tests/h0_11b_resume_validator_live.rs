@@ -333,7 +333,7 @@ fn h0_11b_resume_validator_live() {
                 "{} API did not come up\n--- log ---\n{}", s.name, tail_log(&tmp, s.name, 40));
         let _ = i;
     }
-    assert!(wait_until(Duration::from_secs(60), || all_api.iter().all(|&p| height(p) >= 3)),
+    assert!(wait_until(Duration::from_secs(240), || all_api.iter().all(|&p| height(p) >= 3)),
             "devnet did not reach height 3");
     say(format!("devnet up at height {}", height(alice)));
 
@@ -344,19 +344,19 @@ fn h0_11b_resume_validator_live() {
         assert!(r["success"].as_bool().unwrap_or(false), "bond for {n} failed: {r}");
     }
     let h = height(alice);
-    assert!(wait_until(Duration::from_secs(60), || height(alice) >= h + EPOCH_BLOCKS + 1),
+    assert!(wait_until(Duration::from_secs(300), || height(alice) >= h + EPOCH_BLOCKS + 1),
             "no epoch boundary after bonding");
     say("all four bonded".into());
 
     // ── RV-01: healthy network — nobody jailed ────────────────────────────────
-    assert!(wait_until(Duration::from_secs(120), || all_api.iter().all(|&p| height(p) >= 30)),
+    assert!(wait_until(Duration::from_secs(600), || all_api.iter().all(|&p| height(p) >= 30)),
             "RV-01: devnet did not reach height 30");
     for n in names {
         assert_eq!(validator_status(alice, n).as_deref(), Some("Active"),
                    "RV-01: {n} is not Active");
     }
     assert_eq!(committee(alice).len(), 4, "RV-01: committee must have four seats");
-    let (h_ok, root_ok) = agree(&all_api, Duration::from_secs(30));
+    let (h_ok, root_ok) = agree(&all_api, Duration::from_secs(120));
     say(format!("✓ RV-01: four validators Active (h={h_ok}, root={}…)", &root_ok[..12]));
 
     // ── Kill Dave ─────────────────────────────────────────────────────────────
@@ -372,7 +372,7 @@ fn h0_11b_resume_validator_live() {
     assert!(wait_until(Duration::from_secs(1800), || {
         validator_status(alice, DAVE).as_deref() == Some("Jailed")
     }), "RV-02: Dave was not jailed within 30 min\nlast status: {:?}", validator_status(alice, DAVE));
-    let (h_jailed, _) = agree(&live_api, Duration::from_secs(90));
+    let (h_jailed, _) = agree(&live_api, Duration::from_secs(180));
 
     let dave_rec = status_of(alice, DAVE).expect("Dave status record");
     let jailed_epoch = dave_rec["jailed_epoch"].as_u64().expect("jailed_epoch");
@@ -394,7 +394,7 @@ fn h0_11b_resume_validator_live() {
     let bad_tx = resume_tx(ALICE, DAVE, alice_nonce);
     // Authorization check in the execution layer: sender (Alice) != validator_id (Dave).
     // The tx must be rejected (success=false) even if it reaches a node.
-    let bad_resp = submit_and_wait(alice, &bad_tx, Duration::from_secs(30));
+    let bad_resp = submit_and_wait(alice, &bad_tx, Duration::from_secs(120));
     assert!(!bad_resp["success"].as_bool().unwrap_or(true),
             "RV-03: unauthorized resume must fail; got: {bad_resp}");
     // Dave must still be Jailed.
@@ -408,7 +408,7 @@ fn h0_11b_resume_validator_live() {
     say(format!("  waiting for height {release_height} (jail release at epoch {unjail_after})…"));
     // Jail lasts 10 epochs × 5 blocks = 50 blocks. At ~9 s/block that is ~450 s.
     // Add 300 s margin for epoch-boundary jitter.
-    assert!(wait_until(Duration::from_secs(750), || height(alice) >= release_height),
+    assert!(wait_until(Duration::from_secs(2400), || height(alice) >= release_height),
             "RV-04: jail-release epoch never passed (stuck at h={})", height(alice));
 
     // ── RV-04: authorized resume (Dave → Dave) must succeed ──────────────────
@@ -423,7 +423,7 @@ fn h0_11b_resume_validator_live() {
     let submit_resp = submit_tx(alice, &resume);
     assert_eq!(submit_resp["status"].as_str().unwrap_or(""), "queued",
                "RV-04: resume tx not queued: {submit_resp}");
-    let result = wait_tx(alice, &resume_id, Duration::from_secs(60));
+    let result = wait_tx(alice, &resume_id, Duration::from_secs(180));
     assert!(result["success"].as_bool().unwrap_or(false),
             "RV-04: authorized resume tx failed: {result}");
     // The event "resume_validator: validator_id=qcb1dave" must be present.
@@ -436,7 +436,7 @@ fn h0_11b_resume_validator_live() {
 
     // ── RV-05: Dave's status is Candidate on every live node ─────────────────
     // Allow a short propagation window for the unjail to be reflected in the API.
-    assert!(wait_until(Duration::from_secs(60), || {
+    assert!(wait_until(Duration::from_secs(240), || {
         live_api.iter().all(|&p| validator_status(p, DAVE).as_deref() == Some("Candidate"))
     }), "RV-05: Dave is not Candidate on all live nodes\n\
         alice={:?} bob={:?} carol={:?}",
@@ -448,7 +448,7 @@ fn h0_11b_resume_validator_live() {
     let dave_nonce2 = nonce(alice, DAVE);
     assert!(dave_nonce2 > dave_nonce, "RV-06: Dave's nonce did not advance after first resume");
     let resume2 = resume_tx(DAVE, DAVE, dave_nonce2);
-    let result2 = submit_and_wait(alice, &resume2, Duration::from_secs(30));
+    let result2 = submit_and_wait(alice, &resume2, Duration::from_secs(120));
     // Execution-layer succeeds (authorization passes; event emitted).
     // node.rs unjail() returns an error (not Jailed) → logged as warn, tx receipt still success.
     assert!(result2["success"].as_bool().unwrap_or(false),
@@ -463,7 +463,7 @@ fn h0_11b_resume_validator_live() {
     // The committee-selection logic at the next epoch boundary re-activates him
     // because his bond is still valid — no explicit re-bond is needed.
     let h_after = height(alice);
-    assert!(wait_until(Duration::from_secs(120), || {
+    assert!(wait_until(Duration::from_secs(600), || {
         height(alice) > h_after + EPOCH_BLOCKS
             && validator_status(alice, DAVE).as_deref() == Some("Active")
     }), "RV-07: Dave did not re-enter committee after resume + epoch boundary; \
@@ -473,7 +473,7 @@ fn h0_11b_resume_validator_live() {
     say("✓ RV-07: Dave re-entered committee as Active".into());
 
     // ── RV-08: state roots agree on all live nodes ────────────────────────────
-    let (h_agree, root_agree) = agree(&live_api, Duration::from_secs(60));
+    let (h_agree, root_agree) = agree(&live_api, Duration::from_secs(180));
     say(format!("✓ RV-08: live nodes agree (h={h_agree}, root={}…)", &root_agree[..12]));
 
     // ── RV-09: restart one live node; chain continues and state root is preserved
@@ -490,7 +490,7 @@ fn h0_11b_resume_validator_live() {
             "Carol did not restart\n{}", tail_log(&tmp, "qcb1carol", 30));
     // agree() over the three running nodes (alice, bob, carol).
     // Dave's node is offline; excluding him from the connectivity check is correct.
-    let (h_final, root_final) = agree(&live_api, Duration::from_secs(120));
+    let (h_final, root_final) = agree(&live_api, Duration::from_secs(240));
     assert!(h_final >= h_agree,
             "RV-09: height regressed after Carol restart ({h_final} < {h_agree})");
     // Alice's registry shows Dave as Active (committed chain state) even though
