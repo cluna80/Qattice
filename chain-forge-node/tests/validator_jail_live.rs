@@ -82,7 +82,7 @@ fn node_bin() -> PathBuf {
 }
 
 fn genesis_path() -> PathBuf {
-    repo_root().join("tests").join("devnet").join("genesis-val-jail.json")
+    repo_root().join("tests").join("devnet").join("genesis-val-jail-5node.json")
 }
 
 fn key_file(label: &str) -> PathBuf {

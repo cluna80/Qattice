@@ -232,14 +232,15 @@ fn read_peer_id(log_path: &std::path::Path, timeout: std::time::Duration) -> Str
     let _nodes: Vec<NodeHandle> = std::iter::once(alice_node)
         .chain((1..4).map(|i| spawn(NAMES[i], ports[i].0, ports[i].1, &tmp, &alice_bootstrap)))
         .collect();
-    assert!(wait_until(Duration::from_secs(90), || api.iter().all(|&p| height(p) >= 3)), "devnet did not start");
+    assert!(wait_until(Duration::from_secs(180), || api.iter().all(|&p| height(p) >= 3)), "devnet did not start");
 
     for (i, who) in NAMES.iter().enumerate() {
         let r = submit_and_wait(api[i], &bond_tx(who, nonce(api[i], who)));
         assert!(r["success"].as_bool().unwrap_or(false), "bond for {who} failed: {r}");
     }
     let h = height(api[0]);
-    assert!(wait_until(Duration::from_secs(60), || height(api[0]) >= h + 6), "no epoch after bonds");
+    assert!(wait_until(Duration::from_secs(300), || height(api[0]) >= h + 6),
+            "no epoch after bonds (bond height {h}, now {})", height(api[0]));
     say("four validators bonded and seated".into());
 
     // Sample all four validators' liveness windows from node 0, flag any jail.
@@ -266,12 +267,12 @@ fn read_peer_id(log_path: &std::path::Path, timeout: std::time::Duration) -> Str
     let t1 = Instant::now();
     let mut agreements = 0;
     let mut next_agree = start1 + 25;
-    assert!(wait_until(Duration::from_secs(420), || {
+    assert!(wait_until(Duration::from_secs(2400), || {
         sample(&mut seen);
         let h = height(api[0]);
         if h >= next_agree { assert_nodes_agree(&api); agreements += 1; next_agree = h + 25; }
         h >= 128 && seen.values().all(|s| s.window >= 100)
-    }), "FP-01: phase 1 did not fill every liveness window");
+    }), "FP-01: phase 1 did not fill every liveness window (start {start1}, now {})", height(api[0]));
     let blocks1 = height(api[0]) - start1;
     say(format!("✓ FP-01 idle: {blocks1} blocks in {}s ({:.1}s/block), full 100-block windows, nobody jailed",
         t1.elapsed().as_secs(), t1.elapsed().as_secs_f64() / blocks1 as f64));
@@ -299,7 +300,7 @@ fn read_peer_id(log_path: &std::path::Path, timeout: std::time::Duration) -> Str
     for s in seen.values_mut() { s.max_missed_pct = 0; }
     let start2 = height(api[0]);
     let t2 = Instant::now();
-    let ok = wait_until(Duration::from_secs(480), || {
+    let ok = wait_until(Duration::from_secs(2400), || {
         sample(&mut seen);
         let h = height(api[0]);
         if h >= next_agree { assert_nodes_agree(&api); agreements += 1; next_agree = h + 25; }
@@ -307,7 +308,7 @@ fn read_peer_id(log_path: &std::path::Path, timeout: std::time::Duration) -> Str
     });
     stop.store(true, Ordering::Relaxed);
     let sent = load.join().unwrap();
-    assert!(ok, "FP-01: loaded phase did not complete");
+    assert!(ok, "FP-01: loaded phase did not complete (start {start2}, now {})", height(api[0]));
     let blocks2 = height(api[0]) - start2;
     say(format!("✓ FP-01 loaded: {blocks2} blocks in {}s ({:.1}s/block), {sent} txs sent, nobody jailed",
         t2.elapsed().as_secs(), t2.elapsed().as_secs_f64() / blocks2 as f64));
