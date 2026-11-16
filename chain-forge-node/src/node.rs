@@ -6350,6 +6350,22 @@ impl Node {
         {
             return;
         }
+        // PQ-HotStuff votes carry a FIPS 204 scheme tag that the Tendermint
+        // certificate check rejects, so no late vote was ever absorbed and an
+        // always-online validator showed ~1/n misses. Check membership in the
+        // set effective at that height instead; vote signatures are not
+        // re-verified, as for inbound PQ-HotStuff votes (Phase 0 gap).
+        #[cfg(feature = "pq-hotstuff")]
+        if self.consensus.variant() == ConsensusVariant::PqHotStuff {
+            let member = self.historical_validator_sets.get(&evidence.height)
+                .is_some_and(|vs| vs.power_of(&vote.validator) > 0);
+            if member {
+                if let Some(ev) = self.last_commit_evidence.as_mut() {
+                    ev.precommits.push(vote.clone());
+                }
+            }
+            return;
+        }
         let candidate = chain_forge_consensus::CommitCertificate {
             precommits: vec![vote.clone()],
             epoch:      0,
