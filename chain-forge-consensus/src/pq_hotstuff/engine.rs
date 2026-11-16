@@ -173,7 +173,8 @@ pub struct PqHotStuffEngine {
     // Any subsequent vote from the same (round, validator) for a different block
     // triggers an EquivocationDetected event regardless of vote_type.
     // Cleared on advance_round so stale-round votes don't pollute the new round.
-    vote_tracker: BTreeMap<(Round, ValidatorId), Vote>,
+    /// First block vote seen per (round, validator, vote type byte).
+    vote_tracker: BTreeMap<(Round, ValidatorId, u8), Vote>,
     /// Equivocation evidence pending draining by the node.
     pending_equivocations: Vec<crate::tendermint::EquivocationDetected>,
 }
@@ -424,22 +425,25 @@ impl ConsensusEngine for PqHotStuffEngine {
             return Err(ConsensusError::StaleMessage(vote.height, self.height));
         }
 
-        // Equivocation detection: track the first vote seen per (round, validator).
-        // Runs before the Precommit-only filter so gossip-injected Prevote equivocations
-        // (e.g. from the slashing live-test attacker) are caught regardless of vote type.
-        {
+        // Equivocation detection: two votes of the same type, in the same round,
+        // for two different blocks. Runs before the Precommit-only filter so
+        // gossip-injected Prevote equivocations are caught too. A Nil (timeout)
+        // vote after a block vote in the same round is normal PQ-HotStuff
+        // behaviour (the round timed out), not a double vote, so Nil votes are
+        // never tracked.
+        let vote_type_byte = match vote.vote_type {
+            VoteType::Prevote   => Some(0u8),
+            VoteType::Precommit => Some(1u8),
+            VoteType::Nil       => None,
+        };
+        if let (Some(vote_type_byte), Some(_)) = (vote_type_byte, vote.block_hash.as_ref()) {
             use std::collections::btree_map::Entry;
-            let key = (vote.round, vote.validator.clone());
+            let key = (vote.round, vote.validator.clone(), vote_type_byte);
             match self.vote_tracker.entry(key) {
                 Entry::Vacant(e) => { e.insert(vote.clone()); }
                 Entry::Occupied(prev) => {
                     let prev_vote = prev.get();
                     if prev_vote.block_hash != vote.block_hash {
-                        let vote_type_byte = match vote.vote_type {
-                            VoteType::Prevote   => 0,
-                            VoteType::Precommit => 1,
-                            VoteType::Nil       => 2,
-                        };
                         let hash_a = prev_vote.block_hash.clone()
                             .unwrap_or_else(|| BlockHash("nil".into()));
                         let hash_b = vote.block_hash.clone()
@@ -1035,6 +1039,22 @@ mod tests {
             scheme: Vote::default_scheme(),
             epoch: 0,
         }
+    }
+
+    // A Nil (timeout) vote after a block vote in the same round is not a
+    // double vote; two precommits for different blocks in one round are.
+    #[tokio::test]
+    async fn timeout_after_block_vote_is_not_equivocation() {
+        let mut e = engine().await;
+        let _ = e.receive_vote(vote_for(1, 1, "block-a", "v0")).await;
+        let nil = Vote { vote_type: crate::VoteType::Nil, block_hash: None, ..vote_for(1, 1, "x", "v0") };
+        let _ = e.receive_vote(nil).await;
+        assert!(e.drain_equivocations().is_empty(), "block vote then timeout must not be flagged");
+
+        let _ = e.receive_vote(vote_for(1, 1, "block-b", "v0")).await;
+        let eqs = e.drain_equivocations();
+        assert_eq!(eqs.len(), 1, "two precommits for different blocks in one round are an equivocation");
+        assert_eq!(eqs[0].vote_type_byte, 1);
     }
 
     // R-LM-1: locked_qc.round never decreases within an epoch.
