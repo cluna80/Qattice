@@ -24,6 +24,7 @@ fn hex_decode(h: &str) -> Vec<u8> {
     (0..h.len()).step_by(2).map(|i| u8::from_str_radix(&h[i..i + 2], 16).unwrap()).collect()
 }
 
+#[allow(dead_code)]
 /// A new key-derived account; `tag` only makes the key unique within this process.
 pub fn new_account(tag: &str) -> String {
     let kp = MlDsaScheme.generate_keypair(&format!("live-test-account-{tag}-0000000000000000000000"))
@@ -34,6 +35,12 @@ pub fn new_account(tag: &str) -> String {
     ).as_str().to_string();
     ACCOUNTS.lock().unwrap().get_or_insert_with(HashMap::new).insert(addr.clone(), kp);
     addr
+}
+
+/// Sign transactions from `addr` with `kp` (for accounts whose key the test made itself).
+#[allow(dead_code)]
+pub fn register(addr: &str, kp: &KeyPair) {
+    ACCOUNTS.lock().unwrap().get_or_insert_with(HashMap::new).insert(addr.to_string(), kp.clone());
 }
 
 /// The signing key for `sender`: one made by `new_account`, else the committed devnet key.

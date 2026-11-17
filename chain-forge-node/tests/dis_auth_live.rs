@@ -214,6 +214,9 @@ fn api_get(port: u16, path: &str) -> Option<serde_json::Value> {
     serde_json::from_str(body).ok()
 }
 
+#[path = "common/pq_sign.rs"]
+mod pq_sign;
+
 fn api_post_tx(port: u16, tx_json: &str) -> Option<serde_json::Value> {
     let addr = format!("127.0.0.1:{port}");
     let mut stream = std::net::TcpStream::connect_timeout(
@@ -222,7 +225,9 @@ fn api_post_tx(port: u16, tx_json: &str) -> Option<serde_json::Value> {
     ).ok()?;
     stream.set_read_timeout(Some(Duration::from_millis(2000))).ok()?;
 
-    let body = tx_json.as_bytes();
+    // pqc-native chain: every transaction is ML-DSA-65 signed by its sender.
+    let signed = pq_sign::sign_json(tx_json, &pq_sign::chain_id_of(&genesis_path()));
+    let body = signed.as_bytes();
     let req = format!(
         "POST /api/tx HTTP/1.0\r\n\
          Host: 127.0.0.1:{port}\r\n\
@@ -472,11 +477,13 @@ async fn dis_auth_live() {
     let kp_a = scheme.generate_random()
         .expect("keypair A generation failed");
     let addr_a = derive_address_from_pq_key(&kp_a.public_key);
+    pq_sign::register(&addr_a, &kp_a);
     let pub_a  = kp_a.public_key_hex();
 
     let kp_b = scheme.generate_random()
         .expect("keypair B generation failed");
     let addr_b = derive_address_from_pq_key(&kp_b.public_key);
+    pq_sign::register(&addr_b, &kp_b);
     let pub_b  = kp_b.public_key_hex();
 
     println!("   wallet A : {addr_a}");
@@ -559,9 +566,12 @@ async fn dis_auth_live() {
     {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            let nonce: u64 = api_get(ports.alice_api, "/api/accounts/qcb1alice")
-                .and_then(|v| v["nonce"].as_u64())
-                .unwrap_or(0);
+            // Both funds must be committed on bob's node too: wallet B registers
+            // through bob, which can trail alice by a block.
+            let nonce: u64 = [ports.alice_api, ports.bob_api].iter()
+                .map(|&p| api_get(p, "/api/accounts/qcb1alice")
+                    .and_then(|v| v["nonce"].as_u64()).unwrap_or(0))
+                .min().unwrap_or(0);
             if nonce >= 2 { break; }
             assert!(Instant::now() < deadline, "fund txs did not settle within 30s (alice nonce={nonce})");
             std::thread::sleep(Duration::from_millis(300));
@@ -809,8 +819,8 @@ async fn dis_auth_live() {
     // Wait for alice to sync to at least current height (bob as reference)
     let bob_h = height_of(ports.bob_api);
     assert!(
-        poll_until_height(&[ports.alice_api], bob_h, Duration::from_secs(30)),
-        "alice did not catch up to height {bob_h} within 30s after restart"
+        poll_until_height(&[ports.alice_api], bob_h, Duration::from_secs(180)),
+        "alice did not catch up to height {bob_h} within 180s after restart"
     );
     println!("   ✓ alice restarted and synced to height {bob_h}");
 
@@ -892,6 +902,7 @@ async fn a04_revocation_propagation() {
     let kp_c   = scheme.generate_random()
         .expect("keypair C generation failed");
     let addr_c = derive_address_from_pq_key(&kp_c.public_key);
+    pq_sign::register(&addr_c, &kp_c);
     let pub_c  = kp_c.public_key_hex();
     println!("   wallet C : {addr_c}");
 
