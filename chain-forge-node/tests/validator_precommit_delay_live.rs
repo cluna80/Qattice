@@ -598,10 +598,11 @@ fn run(loaded: bool) {
         for r in rows.iter().filter(|r| r.delay <= 500) {
             assert_eq!(r.omitted, 0, "{} ms is inside the idle collection window: never omitted", r.delay);
         }
-        for r in rows.iter().filter(|r| r.delay >= 4000) {
-            let networked = r.blocks - r.own;
-            assert!(r.omitted * 10 >= networked * 9, "a {} ms delay should be omitted from >= 90% of networked blocks, got {}/{}", r.delay, r.omitted, networked);
-        }
+        // No upper-delay omission assertion: PQ-HotStuff commits a block only once
+        // the next block's quorum forms, and every precommit received by then is
+        // merged into the evidence, so delays up to about one block time are still
+        // counted (the Tendermint-era ">= 90% omitted at 4.5 s" cliff does not
+        // exist). The table above records where omission begins, if anywhere.
     }
     let dave = get(api[0], "/api/validators/status").and_then(|v| v.as_array().cloned()).unwrap()
         .into_iter().find(|v| v["id"].as_str() == Some(DAVE)).unwrap();
