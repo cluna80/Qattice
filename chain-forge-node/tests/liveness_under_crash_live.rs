@@ -75,7 +75,7 @@ fn genesis_path() -> PathBuf {
 
 fn key_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests").join("devnet").join("keys").join(format!("{name}.key.json"))
+        .join("tests").join("devnet").join("keys").join("mldsa").join(format!("{name}.key.json"))
 }
 
 fn devnet_dirs() -> PathBuf {

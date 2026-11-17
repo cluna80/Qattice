@@ -61,7 +61,7 @@ fn genesis_path() -> PathBuf {
 fn key_path(name: &str) -> PathBuf {
     let short = name.strip_prefix("qcb1").unwrap_or(name);
     consensus_keys::validator_key(short,
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("devnet").join("keys").join(format!("{short}.key.json")))
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("devnet").join("keys").join("mldsa").join(format!("{short}.key.json")))
 }
 
 fn port_is_free(port: u16) -> bool {

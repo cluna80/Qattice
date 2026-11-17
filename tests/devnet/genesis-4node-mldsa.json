@@ -4,7 +4,7 @@
   "engine_version": "0.1.0",
   "genesis_time": "2026-09-29T00:00:00Z",
   "environment": {
-    "mode": "testnet",
+    "mode": "devnet",
     "faucet_enabled": true,
     "relaxed_limits": true
   },
@@ -19,6 +19,7 @@
     "type": "proof-of-stake",
     "validator_set_size": 4,
     "block_time_ms": 2000,
+    "bft_variant": "pq-hotstuff",
     "personhood_weighted": true
   },
   "execution": {

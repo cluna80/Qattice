@@ -1676,7 +1676,9 @@ mod tests {
 
     #[test]
     fn pilot_devnet_genesis_is_authorized_only_on_feature_builds() {
-        let g = GenesisConfig::from_json(include_str!("../../genesis-4node.json")).unwrap();
+        let g = genesis_with("devnet", Some(serde_json::json!({
+            "attestation_quorum": 1, "attestation_cap_per_window": 10, "insecure_dev_identity_overrides": true
+        })));
         if cfg!(feature = "insecure-dev-quorum") {
             assert_eq!(g.attestation_quorum(), Ok(1));
             assert_eq!(g.attestation_cap_per_window(), Ok(10));

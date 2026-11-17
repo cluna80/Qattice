@@ -19,6 +19,7 @@
     "type": "proof-of-stake",
     "validator_set_size": 4,
     "block_time_ms": 2000,
+    "bft_variant": "pq-hotstuff",
     "personhood_weighted": true,
     "liveness": {
       "window_blocks": 100,

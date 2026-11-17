@@ -1,13 +1,16 @@
 # Devnet files
 
-The supported devnet is the **ML-DSA devnet**. The Ed25519 fallback devnet is retired (owner, 2026-10-30). Ed25519 files stay only as classical-compatibility test fixtures.
+The supported devnet is the **ML-DSA devnet on PQ-HotStuff-2**. Every genesis file here uses `"signature_scheme": "pqc-native"`, `"validator_scheme": "ml-dsa-65"`, `"bft_variant": "pq-hotstuff"` and `environment.mode = "devnet"`, with validator keys in `keys/mldsa/`. Tendermint and the Ed25519 devnet are retired from Qattice (owner, 2026-11-15/16); Tendermint remains available as a Chain Forge option in `chain-forge-frontend`.
 
-| File | Status | Used by |
-|---|---|---|
-| `genesis-4node-mldsa.json`, `keys/mldsa/*.key.json` | **Supported devnet.** ML-DSA-65 consensus keys; ML-DSA-only user accounts (`signature_scheme = "pqc-native"`). | `run_4node_devnet.sh`, `run_machine1.sh`, `run_machine2.sh`, `test7`–`test9`, `watch_testnet.sh`, `scripts/start-devnet-local.sh`, `scripts/start-testnet.ps1`, `devnet_4node` (`*_mldsa_*`), `mldsa_only_accounts_live`; template for the upgraded devnet (`docs/devnet-upgrade-phase-0-5.md`) |
-| `genesis-4node.json`, `keys/{alice,bob,carol,dave}.key.json` | Classical-compatibility fixture: Ed25519 consensus keys. Not a supported devnet. | `devnet_4node` (non-`mldsa` tests) |
-| `genesis-mldsa.json`, `genesis-val002.json`, `genesis-3node.json` | Test fixtures for specific suites (Ed25519 or `pqc-native` validator keys, hybrid accounts) | the live tests that name them |
-| repo root `genesis-4node.json` (`qcb-testnet-4node`) | **Legacy pilot devnet.** Preserved as is; runs from branch `devnet-legacy-2026-10` with the backed-up data. | `scripts/start-carol.sh` (legacy only) |
+| File | Used by |
+|---|---|
+| `genesis-4node-mldsa.json` | `run_4node_devnet.sh`, `run_machine1.sh`, `run_machine2.sh`, `test7`–`test9`, `watch_testnet.sh`, `scripts/start-devnet-local.sh`, `scripts/start-testnet.ps1`, `devnet_4node` (`*_mldsa_*`), `mldsa_only_accounts_live`, `bootstrap_order_live`, `h0_8_genesis_peer_verification_live` |
+| `genesis-4node.json` | `devnet_4node` (other tests), `attestation_live`, `dis_auth_live`, `personhood_live`, `vca_pq_live`, `adversarial_gossip`, `scripts/start-machine1.sh` |
+| `genesis-4node-pqhs2*.json` | the `pqhs2_4node_*` live tests |
+| `genesis-val-jail.json`, `genesis-val-jail-5node.json`, `genesis-val-delay.json`, `genesis-val-evict.json`, `genesis-auto-suspend.json` | the H0-11 validator lifecycle live tests |
+| `genesis-mldsa.json`, `genesis-val002.json` | the live tests that name them |
+
+The legacy pilot devnet (repo-root `genesis-4node.json`, `qcb-testnet-4node`, Tendermint + Ed25519) is no longer on this branch; it runs from branch `devnet-legacy-2026-10`, which `scripts/start-carol.sh` and `devnet/restart-machine*.sh` belong to.
 
 All keys in this folder are **public test keys**. Never use them on a network anyone relies on.
 
