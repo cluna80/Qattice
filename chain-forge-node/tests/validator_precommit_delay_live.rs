@@ -517,7 +517,10 @@ fn run(loaded: bool) {
             if dave_trace.iter().any(|e| e.kind == "sent" && e.height == hh) { row.sent += 1 }
 
             let evs = &node_traces.iter().find(|(n, _)| *n == proposer).unwrap().1;
-            if let Some(c) = evs.iter().find(|e| e.kind == "propose" && e.height == hh + 1 && e.round == round) {
+            // /api/blocks/{N} is numbered by execution height, which is one above the
+            // consensus height the proposer logs (explorer block hh+1 = consensus hh).
+            let ctx = evs.iter().find(|e| e.kind == "propose" && e.height == hh && e.round == round);
+            if let Some(c) = ctx {
                 row.proposals_seen += 1;
                 if c.mempool > 0 { row.loaded_proposals += 1 }
                 mempools.push(c.mempool as i64);
