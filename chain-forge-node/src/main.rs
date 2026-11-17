@@ -216,6 +216,14 @@ async fn main() {
         mldsa_signing_v2: node.mldsa_signing_v2(),
     };
     // Set the data directory for state persistence.
+    // A validator keeps its double-sign protection (signing guard, PQ safety store)
+    // in the data directory. Without one, PQ-HotStuff votes go out unsigned and are
+    // rejected by every peer, so the node looks alive while never counting.
+    if args.key_file.is_some() && args.data_dir.is_none() {
+        tracing::error!("FATAL: --key-file requires --data-dir: a validator keeps its double-sign \
+                         protection there (without it, its votes are unsigned and every peer rejects them)");
+        std::process::exit(1);
+    }
     if args.storage_v2 && args.data_dir.is_none() {
         tracing::error!("FATAL: --storage-v2-experimental requires --data-dir");
         std::process::exit(1);

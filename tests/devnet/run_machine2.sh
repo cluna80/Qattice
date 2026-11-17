@@ -27,6 +27,7 @@ BIN="${BIN:-$REPO_ROOT/target/release/chain-forge-node}"
 GENESIS="$SCRIPT_DIR/genesis-4node-mldsa.json"
 KEY_DIR="$SCRIPT_DIR/keys/mldsa"
 LOG_DIR="${LOG_DIR:-/tmp/qcb-devnet-machine2}"
+DATA_DIR="${DATA_DIR:-$LOG_DIR/data}"   # validators keep their double-sign protection here
 
 # ── Machine 1 IP (required) ─────────────────────────────────────────────────
 if [[ -z "${MACHINE1_IP:-}" ]]; then
@@ -84,6 +85,7 @@ echo "  Starting Carol  (api=:19080  p2p=:28000)"
     --genesis "$GENESIS" \
     --validator qcb1carol \
     --key-file "$KEY_DIR/carol.key.json" \
+    --data-dir "$DATA_DIR/carol" \
     --api-port 19080 \
     --p2p-port 28000 \
     --bootstrap "$ALICE_PEER" \
@@ -97,6 +99,7 @@ echo "  Starting Dave   (api=:19081  p2p=:28001)"
     --genesis "$GENESIS" \
     --validator qcb1dave \
     --key-file "$KEY_DIR/dave.key.json" \
+    --data-dir "$DATA_DIR/dave" \
     --api-port 19081 \
     --p2p-port 28001 \
     --bootstrap "$ALICE_PEER" \

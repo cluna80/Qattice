@@ -144,7 +144,7 @@ fn spawn_node(
     let mut cmd = Command::new(node_binary());
     cmd.arg("--genesis").arg(genesis_path())
        .arg("--validator").arg(name)
-       .arg("--key-file").arg(&key_file)
+       .arg("--key-file").arg(&key_file).arg("--data-dir").arg(fresh_data_dir(&key_file))
        .arg("--api-port").arg(api_port.to_string())
        .arg("--p2p-port").arg(p2p_port.to_string());
     if !bootstrap.is_empty() { cmd.arg("--bootstrap").arg(bootstrap); }
@@ -1055,4 +1055,15 @@ async fn a04_revocation_propagation() {
     println!("   correctly downgrades Verified → Provisional on all 4 nodes.");
     println!("   Recovery via a fresh attester (alice) restores Verified tier.");
     println!("   Note: REVOCATION_COOLDOWN_EPOCHS=1 applies to the revoking attester (bob).");
+}
+
+/// A fresh data directory for one node start. A validator needs one for its
+/// double-sign protection (the node refuses --key-file without --data-dir).
+fn fresh_data_dir(key_file: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let stem = key_file.as_ref().file_stem().and_then(|s| s.to_str()).unwrap_or("node").to_string();
+    let d = std::env::temp_dir().join(format!("qcb-data-{}-{stem}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+    let _ = std::fs::remove_dir_all(&d);
+    d
 }

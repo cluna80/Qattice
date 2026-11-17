@@ -7,6 +7,7 @@ BINARY="$HOME/chain-forge-node"
 GENESIS="$HOME/genesis-4node.json"
 KEY="$HOME/qcb1carol.key.json"
 LOG_DIR="$HOME/logs"
+DATA_DIR="${DATA_DIR:-$LOG_DIR/data}"   # validators keep their double-sign protection here
 
 echo "==> Stopping any running chain-forge-node processes..."
 pkill -9 -f chain-forge-node 2>/dev/null || true
@@ -19,6 +20,7 @@ nohup "$BINARY" \
   --genesis "$GENESIS" \
   --validator qcb1carol \
   --key-file "$KEY" \
+  --data-dir "$DATA_DIR/carol" \
   --api-port 8083 \
   --p2p-port 26659 \
   --bootstrap /ip4/192.168.137.2/tcp/26656 \

@@ -37,6 +37,7 @@ BIN="${BIN:-$REPO_ROOT/target/release/chain-forge-node}"
 GENESIS="$SCRIPT_DIR/genesis-4node-mldsa.json"
 KEY_DIR="$SCRIPT_DIR/keys/mldsa"
 LOG_DIR="${LOG_DIR:-/tmp/qcb-devnet-test9-logs}"
+DATA_DIR="${DATA_DIR:-$LOG_DIR/data}"   # validators keep their double-sign protection here
 
 ALICE_API="http://127.0.0.1:19080"
 BOB_API="http://127.0.0.1:19081"
@@ -109,6 +110,7 @@ echo "--- Phase 1: Start Alice + Bob (Machine 2 NOT yet running) ---"
     --genesis "$GENESIS" \
     --validator qcb1alice \
     --key-file "$KEY_DIR/alice.key.json" \
+    --data-dir "$DATA_DIR/alice" \
     --api-port 19080 \
     --p2p-port "$ALICE_P2P" \
     --bootstrap "$CAROL_PEER" \
@@ -121,6 +123,7 @@ ALICE_PID=${PIDS[-1]}
     --genesis "$GENESIS" \
     --validator qcb1bob \
     --key-file "$KEY_DIR/bob.key.json" \
+    --data-dir "$DATA_DIR/bob" \
     --api-port 19081 \
     --p2p-port "$BOB_P2P" \
     --bootstrap "$CAROL_PEER" \
@@ -152,6 +155,7 @@ echo "--- Phase 2: Bring Carol + Dave online (Machine 2 arrives) ---"
     --genesis "$GENESIS" \
     --validator qcb1carol \
     --key-file "$KEY_DIR/carol.key.json" \
+    --data-dir "$DATA_DIR/carol" \
     --api-port 19082 \
     --p2p-port "$CAROL_P2P" \
     --bootstrap "$ALICE_PEER" \
@@ -164,6 +168,7 @@ CAROL_PID=${PIDS[-1]}
     --genesis "$GENESIS" \
     --validator qcb1dave \
     --key-file "$KEY_DIR/dave.key.json" \
+    --data-dir "$DATA_DIR/dave" \
     --api-port 19083 \
     --p2p-port "$DAVE_P2P" \
     --bootstrap "$ALICE_PEER" \

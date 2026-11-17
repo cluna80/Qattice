@@ -28,6 +28,7 @@ KEY_DIR="$SCRIPT_DIR/keys/mldsa"
 TIMEOUT_SECS="${TIMEOUT_SECS:-60}"
 TARGET_HEIGHT="${TARGET_HEIGHT:-3}"
 LOG_DIR="${LOG_DIR:-/tmp/qcb-devnet-4node-mldsa}"
+DATA_DIR="${DATA_DIR:-$LOG_DIR/data}"   # validators keep their double-sign protection here
 
 # Ports: each node gets its own API port and P2P port so they don't collide,
 # and none collides with the legacy devnet (18080-18083 / 27000-27003).
@@ -107,6 +108,7 @@ for i in "${!VALIDATORS[@]}"; do
         --genesis "$GENESIS" \
         --validator "$validator" \
         --key-file "$KEY_DIR/${validator#qcb1}.key.json" \
+        --data-dir "$DATA_DIR/${validator#qcb1}" \
         --api-port "$api_port" \
         --p2p-port "$p2p_port" \
         "${bootstrap[@]}" \

@@ -185,7 +185,7 @@ fn spawn_node(
         cmd.arg("--bootstrap").arg(format!("/ip4/127.0.0.1/tcp/{p}"));
     }
     if let Some(kf) = key_file {
-        cmd.arg("--key-file").arg(kf);
+        cmd.arg("--key-file").arg(&kf).arg("--data-dir").arg(fresh_data_dir(&kf));
     }
     cmd.stdout(log_file.try_clone().unwrap())
        .stderr(log_file)
@@ -719,4 +719,15 @@ fn p0_9_pocd_reward_settlement() {
     );
 
     eprintln!("── P0-9 PASS ────────────────────────────────────────────────────────\n");
+}
+
+/// A fresh data directory for one node start. A validator needs one for its
+/// double-sign protection (the node refuses --key-file without --data-dir).
+fn fresh_data_dir(key_file: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let stem = key_file.as_ref().file_stem().and_then(|s| s.to_str()).unwrap_or("node").to_string();
+    let d = std::env::temp_dir().join(format!("qcb-data-{}-{stem}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+    let _ = std::fs::remove_dir_all(&d);
+    d
 }
