@@ -3322,8 +3322,12 @@ impl Node {
                 break;
             }
             tokio::select! {
-                _ = consensus_interval.tick(), if self.consensus.drives_own_votes() => {
-                    self.consensus_tick().await;
+                _ = consensus_interval.tick() => {
+                    if self.consensus.drives_own_votes() {
+                        self.consensus_tick().await;
+                    } else {
+                        self.release_deferred_votes().await;
+                    }
                 }
 
                 event_result = self.network.next_event() => {
@@ -4548,6 +4552,8 @@ impl Node {
 
         let cert = self.consensus.receive_vote(precommit.clone()).await
             .map_err(|e| e.to_string())?;
+        #[cfg(feature = "fault-injection")]
+        info!(target: "cf_fault", height = precommit.height, round = precommit.round, "sent precommit");
         let _ = self.network.publish(OutboundMessage {
             topic:   GossipTopic::ConsensusVote,
             payload: serde_json::to_vec(&precommit).unwrap_or_default(),
@@ -6814,6 +6820,15 @@ impl Node {
             self.handle_drained_equivocations(eqs, epoch);
         }
         self.drive_consensus().await;
+    }
+
+    /// Engines that do not drive their own votes (PQ-HotStuff) never run
+    /// consensus_tick, so fault-injection deferred precommits are released here.
+    async fn release_deferred_votes(&mut self) {
+        #[cfg(feature = "fault-injection")]
+        for m in self.fault.take_due() {
+            let _ = Box::pin(self.handle_event(NetworkEvent::Message(m))).await;
+        }
     }
 
     /// Engine-driven consensus tick: fire due timers, replay buffered
