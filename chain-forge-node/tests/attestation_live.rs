@@ -106,6 +106,9 @@ fn node_binary() -> PathBuf {
     }
 }
 
+#[path = "common/pq_sign.rs"]
+mod pq_sign;
+
 fn genesis_path() -> PathBuf {
     repo_root().join("tests").join("devnet").join("genesis-4node.json")
 }
@@ -222,7 +225,9 @@ fn api_post_tx(port: u16, tx_json: &str) -> Option<serde_json::Value> {
     ).ok()?;
     stream.set_read_timeout(Some(Duration::from_millis(2000))).ok()?;
 
-    let body = tx_json.as_bytes();
+    // pqc-native chain: every transaction is ML-DSA-65 signed by its sender.
+    let signed = pq_sign::sign_json(tx_json, &pq_sign::chain_id_of(&genesis_path()));
+    let body = signed.as_bytes();
     let req = format!(
         "POST /api/tx HTTP/1.0\r\n\
          Host: 127.0.0.1:{port}\r\n\
@@ -329,7 +334,9 @@ fn unique_claimant() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    format!("qcb1human{ts}")
+    // A key-derived account: on an ML-DSA-only chain a named account outside
+    // genesis cannot sign.
+    pq_sign::new_account(&format!("human{ts}"))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
