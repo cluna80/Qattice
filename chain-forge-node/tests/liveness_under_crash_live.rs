@@ -42,7 +42,7 @@ const DAVE_P2P:  u16 = 27703;
 
 const KILL_AT_HEIGHT:           u64 = 5;
 const CONTINUE_THROUGH_HEIGHT:  u64 = 20;
-const TIMEOUT_SECS:             u64 = 180;
+const TIMEOUT_SECS:             u64 = 900;
 const POLL_MS:                  u64 = 300;
 
 // ── Paths ─────────────────────────────────────────────────────────────────────

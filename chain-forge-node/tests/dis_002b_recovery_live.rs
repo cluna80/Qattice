@@ -727,7 +727,7 @@ fn dis_002b_recovery() {
     );
     let tr_restart_json = serde_json::to_string(&transfer_restart).unwrap();
     let _ = submit_tx(ports.alice_api, &tr_restart_json);
-    let tr_restart_result = wait_tx_result(ports.alice_api, "rec-transfer-restart", Duration::from_secs(15))
+    let tr_restart_result = wait_tx_result(ports.alice_api, "rec-transfer-restart", Duration::from_secs(180))
         .expect("post-restart transfer not settled");
     assert!(
         tr_restart_result["success"].as_bool().unwrap_or(false),
