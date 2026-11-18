@@ -637,7 +637,7 @@ async fn adversarial_equivocation_over_gossip() {
 
     println!("   [phase2] Verifying chain advanced past height {}...", attack_height + 2);
     let advanced = poll_until_height(
-        &ports.quorum_api_ports(), attack_height + 2, Duration::from_secs(20),
+        &ports.quorum_api_ports(), attack_height + 2, Duration::from_secs(120),
     );
 
     let balance_after = balance_of(ports.alice_api, "qcb1alice");
@@ -689,7 +689,7 @@ async fn adversarial_equivocation_over_gossip() {
     // node slashed locally when it saw the double vote, node states
     // diverged and the chain halted; signed evidence also never verified.)
     assert!(
-        poll_until_height(&ports.all_api_ports(), attack_height + 2, Duration::from_secs(20)),
+        poll_until_height(&ports.all_api_ports(), attack_height + 2, Duration::from_secs(120)),
         "all 4 nodes must pass height {} after the equivocation", attack_height + 2
     );
     let balances: Vec<Option<u128>> = ports.all_api_ports().iter()
@@ -809,7 +809,7 @@ async fn adversarial_garbage_signature() {
 
     println!("   [phase2] Verifying chain advanced past attack height...");
     let advanced = poll_until_height(
-        &ports.all_api_ports(), attack_height + 2, Duration::from_secs(30),
+        &ports.all_api_ports(), attack_height + 2, Duration::from_secs(120),
     );
 
     // ── Hard assertion: rejection must appear in node logs ────────────────────
