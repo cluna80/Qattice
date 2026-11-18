@@ -313,9 +313,10 @@ fn follower_agrees(follower: u16, committee: &[u16], timeout: Duration) -> (u64,
         .and_then(|b| Some((b["block_hash"].as_str()?.to_string(), b["state_root"].as_str()?.to_string())))
         .filter(|(hash, _)| !hash.is_empty());
     let want = block(committee[0]).expect("committee node serves the agreed block");
-    assert!(wait_until(timeout, || block(follower).is_some()),
+    let mut got = None;
+    assert!(wait_until(timeout, || { got = block(follower); got.is_some() }),
             "follower never committed height {h} (it is at {})", height(follower));
-    let got = block(follower).unwrap();
+    let got = got.unwrap();
     assert_eq!(got, want, "follower's block {h} (hash, state root) differs from the committee's");
     (h, root)
 }
