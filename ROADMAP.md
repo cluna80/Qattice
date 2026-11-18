@@ -2,6 +2,50 @@
 
 > **Start here:** [PQ-PoP-HotStuff-2 prerequisite](docs/PQ-POP-PREREQUISITE.md) defines the current protocol direction and the native Phase 0 and Phase 0.5 gates. Once those gates pass, continue the applicable milestones below with PQ-HotStuff-2 and defensive pruning. Earlier Tendermint, Ed25519, and QRC entries document historical plans and evidence.
 
+## ⏸ RESUME HERE — Phase 0/0.5 BossKing sweep pending — 2026-11-18
+
+**Status:** paused, waiting for the owner's Windows sweep. Nothing below is ✅ until BossKing confirms it.
+
+**Pinned commit:** `0fd01c7` on `feat/pqhs2-fips204-signing`.
+
+**Done since the last BossKing sweep (`e125b9f`), sandbox only:**
+- Tendermint removal, step 2: tests and genesis files migrated; PQ-HotStuff-2 is the default engine.
+- Ed25519 removal, phase 1 (`24a1554`): tests, genesis files, scripts and key fixtures use ML-DSA-65. The Ed25519 key files are deleted. `mn8_reward_exclusion_live`, `validator_key_live` and `dis_002b_migration_live` are ported.
+- Consensus fix (`554d5b7`): PQ-HotStuff-2 now applies the personhood cap and the voting-power gate on every validator-set update, as Tendermint did. Before this, a validator whose personhood was revoked kept its full bonded stake as voting power (mn8: 2,000,000 vs 1 per genesis validator).
+- Peer exchange (`e4a9bfa`). The node refuses `--key-file` without `--data-dir` (`0d7681f`).
+- Test signing fixes and wider waits across the live tests. `h0_11b_auto_suspend_live` retired (`691d357`; `validator_jail_live` covers it).
+- `scripts/bossking-sweep.sh`: one-command sweep that writes `sweep-<commit>/summary.md`.
+
+**Owner's next step (BossKing, Git Bash in `C:\Dev\chain-forge-engine`):**
+1. Check that Avast excludes `C:\Dev\chain-forge-engine\target\*`.
+2. `git fetch origin && git checkout feat/pqhs2-fips204-signing && git pull origin feat/pqhs2-fips204-signing`
+3. `git log --oneline -1` must show `0fd01c7` or later.
+4. `bash scripts/bossking-sweep.sh` takes several hours. To rerun only some tests, name them: `bash scripts/bossking-sweep.sh validator_jail_live`.
+5. Send `sweep-<commit>/summary.md` to Claude.
+
+**Reading the summary:**
+- PASS: mark ✅ here.
+- FAIL (expected): the known issues below.
+- FAIL (new): fix first.
+
+**Expected failures:**
+- `validator_jail_live` fails at JL-08 (round-drift livelock after a restart).
+- `validator_key_live` fails in `post_genesis_validator_admission` (same livelock).
+- `adversarial_gossip` fails its garbage-signature test, because inbound vote signatures are not verified.
+- `pqhs2_4node_epoch_live` fails because the handoff signs and verifies different message formats.
+- `h0_3_crash_recovery_live` fails at C-01, because a single-validator PQ-HotStuff node produces no blocks.
+- `storage_v2_live` fails its 4 Tendermint-era tests.
+
+**After the sweep, in order:**
+1. Fix any new failures.
+2. Vote-signature milestone:
+   - verify inbound PQ-HotStuff vote signatures;
+   - unify the epoch-handoff message format;
+   - add round synchronization (timeout certificates) to fix JL-08.
+   Then the safety review.
+3. Port the node unit tests to PQ-HotStuff (about 170 fail since the default switch), rewrite the 4 `storage_v2` tests, and then delete the Tendermint engine (Tendermint removal, step 3). The engine stays in `cluna80/chain-forge-frontend`.
+4. Ed25519 removal, phase 2: remove it from the crypto, wallet, keygen and execution code, and make the node refuse classical signatures.
+
 ## Full stack re-confirmation — 2026-11-14
 
 ✅ **All five suites Windows-confirmed on integration candidate** (owner-run, BossKing MINGW64, `feat/vote-format-v2` at `a7c2f5a`)
