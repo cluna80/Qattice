@@ -110,12 +110,15 @@ fn node_binary() -> PathBuf {
 
 #[path = "common/consensus_keys.rs"]
 mod consensus_keys;
+#[path = "common/pq_sign.rs"]
+mod pq_sign;
 
 fn genesis_path() -> PathBuf {
     // Reuse genesis-fee-settle.json: four validators, funded user1 and eve,
     // fee_distribution_bps 7000/2000/1000, require_signatures=false.
-    consensus_keys::genesis(&PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests").join("devnet").join("genesis-fee-settle.json"))
+    // ML-DSA-only chain: the funded user accounts are bound to keys this test signs with.
+    pq_sign::bind_accounts(&consensus_keys::genesis(&PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests").join("devnet").join("genesis-fee-settle.json")), &["qcb1user1", "qcb1eve"])
 }
 
 fn key_path(short_name: &str) -> PathBuf {
@@ -289,6 +292,7 @@ fn make_burn(id: &str, sender: &str, nonce: u64, amount: u128) -> Transaction {
 }
 
 fn submit(port: u16, tx: &Transaction) -> serde_json::Value {
+    let tx = &pq_sign::sign(tx.clone(), &pq_sign::chain_id_of(&genesis_path()));
     api_post_tx(port, &serde_json::to_string(tx).unwrap())
         .unwrap_or_else(|| panic!("POST /api/tx for {} failed", tx.id))
 }

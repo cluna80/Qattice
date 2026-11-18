@@ -84,3 +84,32 @@ pub fn chain_id_of(genesis: &std::path::Path) -> String {
     let g: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(genesis).unwrap()).unwrap();
     g["chain_id"].as_str().unwrap().to_string()
 }
+
+/// A copy of `genesis` in which each named account in `addrs` is bound to a key
+/// this process signs with (an ML-DSA-only chain refuses a named account with
+/// no key bound in genesis). Stable within the process: every node of a test
+/// gets the same keys.
+#[allow(dead_code)]
+pub fn bind_accounts(genesis: &std::path::Path, addrs: &[&str]) -> PathBuf {
+    let mut g: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(genesis).unwrap()).unwrap();
+    for addr in addrs {
+        let existing = ACCOUNTS.lock().unwrap().as_ref().and_then(|m| m.get(*addr).cloned());
+        let kp = existing.unwrap_or_else(|| {
+            let kp = MlDsaScheme.generate_keypair(&format!("live-test-bound-{addr}-00000000000000000000"))
+                .expect("ML-DSA keygen");
+            register(addr, &kp);
+            kp
+        });
+        let acct = g["genesis_accounts"].as_array_mut().unwrap().iter_mut()
+            .find(|a| a["address"] == *addr)
+            .unwrap_or_else(|| panic!("{addr} is not a genesis account in {}", genesis.display()));
+        acct["public_key"] = serde_json::Value::String(kp.public_key.iter().map(|b| format!("{b:02x}")).collect());
+    }
+    let out = std::env::temp_dir().join(format!("pq-bound-{}-{}", std::process::id(),
+        genesis.file_name().unwrap().to_string_lossy()));
+    let tmp = out.with_extension(format!("tmp{}", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    std::fs::write(&tmp, g.to_string()).unwrap();
+    std::fs::rename(&tmp, &out).unwrap();
+    out
+}
