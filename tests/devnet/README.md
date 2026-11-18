@@ -7,7 +7,7 @@ The supported devnet is the **ML-DSA devnet on PQ-HotStuff-2**. Every genesis fi
 | `genesis-4node-mldsa.json` | `run_4node_devnet.sh`, `run_machine1.sh`, `run_machine2.sh`, `test7`–`test9`, `watch_testnet.sh`, `scripts/start-devnet-local.sh`, `scripts/start-testnet.ps1`, `devnet_4node` (`*_mldsa_*`), `mldsa_only_accounts_live`, `bootstrap_order_live`, `h0_8_genesis_peer_verification_live` |
 | `genesis-4node.json` | `devnet_4node` (other tests), `attestation_live`, `dis_auth_live`, `personhood_live`, `vca_pq_live`, `adversarial_gossip`, `scripts/start-machine1.sh` |
 | `genesis-4node-pqhs2*.json` | the `pqhs2_4node_*` live tests |
-| `genesis-val-jail.json`, `genesis-val-jail-5node.json`, `genesis-val-delay.json`, `genesis-val-evict.json`, `genesis-auto-suspend.json` | the H0-11 validator lifecycle live tests |
+| `genesis-val-jail.json`, `genesis-val-jail-5node.json`, `genesis-val-delay.json`, `genesis-val-evict.json` | the H0-11 validator lifecycle live tests |
 | `genesis-mldsa.json`, `genesis-val002.json` | the live tests that name them |
 
 The legacy pilot devnet (repo-root `genesis-4node.json`, `qcb-testnet-4node`, Tendermint + Ed25519) is no longer on this branch; it runs from branch `devnet-legacy-2026-10`, which `scripts/start-carol.sh` and `devnet/restart-machine*.sh` belong to.

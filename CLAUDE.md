@@ -66,7 +66,7 @@ cargo test -p chain-forge-node --test <name> --features pq-hotstuff -- --nocaptu
 Do NOT run a separate `cargo build --features pq-hotstuff` then `cargo test` without
 the flag — `cargo test` recompiles the binary without the feature, overwriting it.
 
-Tendermint genesis files (`genesis-4node-mldsa.json`, `genesis-auto-suspend.json`)
+Tendermint genesis files (`genesis-4node-mldsa.json`; `genesis-auto-suspend.json` retired 2026-11-18)
 are retained as historical / compatibility references only. Do not write new test
 genesis files using Tendermint.
 
