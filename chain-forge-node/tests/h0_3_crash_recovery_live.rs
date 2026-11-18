@@ -141,7 +141,7 @@ mod h0_3_crash_recovery_live {
     #[allow(dead_code)]
     fn alice_key() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/devnet/keys/alice.key.json")
+            .join("tests/devnet/keys/mldsa/alice.key.json")
     }
 
     fn free_port() -> u16 {
@@ -766,9 +766,9 @@ mod h0_3_crash_recovery_live {
             .join("tests/devnet/genesis-4node-crash.json");
         assert!(genesis_4node.exists(), "genesis-4node-crash.json not found");
 
-        // Key files for all four validators (Ed25519 keys matching the genesis).
+        // Key files for all four validators (ML-DSA-65 keys matching the genesis).
         let keys_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/devnet/keys");
+            .join("tests/devnet/keys/mldsa");
 
         // ── allocate ports ────────────────────────────────────────────────────
 

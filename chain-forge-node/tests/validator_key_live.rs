@@ -83,8 +83,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chain_forge_crypto::{ClassicalScheme, SignatureScheme};
-use chain_forge_execution::{Transaction, TxBody, validator_key_registration_signing_bytes};
+use chain_forge_crypto::{MlDsaScheme, SignatureScheme};
+use chain_forge_execution::{Transaction, TxBody, validator_key_registration_signing_bytes_v2};
+
+#[path = "common/pq_sign.rs"]
+mod pq_sign;
+
+/// A fresh ML-DSA-65 consensus key (random per process).
+fn new_consensus_key(tag: &str) -> chain_forge_crypto::KeyPair {
+    MlDsaScheme.generate_keypair(&format!("{tag}-consensus-000000000000000000000000")).unwrap()
+}
 
 const CHAIN_ID: &str = "qcb-devnet-val002";
 /// Eve's wallet address (literal, matches genesis-val002.json genesis_accounts entry).
@@ -153,7 +161,7 @@ fn genesis_path() -> PathBuf {
 }
 
 fn key_file(label: &str) -> PathBuf {
-    repo_root().join("tests").join("devnet").join("keys")
+    repo_root().join("tests").join("devnet").join("keys").join("mldsa")
         .join(format!("{label}.key.json"))
 }
 
@@ -239,7 +247,14 @@ fn spawn_node(
 
 fn spawn_devnet(ports: &DevnetPorts, log_dir: &PathBuf, data_dirs: Option<&[PathBuf; 4]>) -> Vec<NodeHandle> {
     let kf = |label: &str| Some(key_file(label));
-    let dd = |i: usize| data_dirs.map(|d| d[i].clone());
+    // A validator needs a data dir (its signing safety store); tests that don't
+    // keep one get a fresh dir under the log dir.
+    let dd = |i: usize| Some(data_dirs.map(|d| d[i].clone()).unwrap_or_else(|| {
+        let d = log_dir.join(format!("data-{i}"));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }));
     vec![
         spawn_node("qcb1alice", ports.alice_api, ports.alice_p2p, log_dir,
                    &[ports.bob_p2p, ports.carol_p2p, ports.dave_p2p], kf("alice"), dd(0)),
@@ -395,35 +410,35 @@ fn latest_block(port: u16) -> Option<serde_json::Value> {
 // ── Tx builders ──────────────────────────────────────────────────────────────
 
 /// Build and sign a RegisterIdentity tx for `sender`.
-/// Signing key = ClassicalScheme.generate_keypair(sender) — deterministic.
+/// Signing key = the sender's committed ML-DSA-65 devnet key (`keys/mldsa/`).
 fn build_register_identity_tx(sender: &str, nonce: u64) -> Transaction {
-    let kp = ClassicalScheme.generate_keypair(sender).unwrap();
+    let kp = pq_sign::key_for(sender);
     let mut tx = Transaction::register_identity(
         &format!("reg-id-{sender}-{nonce}"), sender, nonce,
     );
-    tx.sign(&kp, CHAIN_ID).unwrap();
+    tx = pq_sign::sign_with(tx, CHAIN_ID, &kp);
     tx
 }
 
 /// Build and sign an Attest tx: `attester` vouches for `claimant`.
 fn build_attest_tx(attester: &str, attester_nonce: u64, claimant: &str) -> Transaction {
-    let kp = ClassicalScheme.generate_keypair(attester).unwrap();
+    let kp = pq_sign::key_for(attester);
     let mut tx = Transaction::attest(
         &format!("attest-{attester}-for-{claimant}-{attester_nonce}"),
         attester, claimant, attester_nonce,
     );
-    tx.sign(&kp, CHAIN_ID).unwrap();
+    tx = pq_sign::sign_with(tx, CHAIN_ID, &kp);
     tx
 }
 
 /// Build and sign a Transfer tx from `from` to `to`.
 fn build_transfer_tx(from: &str, from_nonce: u64, to: &str, amount_uqcb: u64) -> Transaction {
-    let kp = ClassicalScheme.generate_keypair(from).unwrap();
+    let kp = pq_sign::key_for(from);
     let mut tx = Transaction::transfer(
         &format!("xfer-{from}-to-{to}-{from_nonce}"),
         from, to, "uqcb", amount_uqcb as u128, from_nonce,
     );
-    tx.sign(&kp, CHAIN_ID).unwrap();
+    tx = pq_sign::sign_with(tx, CHAIN_ID, &kp);
     tx
 }
 
@@ -435,7 +450,7 @@ fn build_transfer_tx(from: &str, from_nonce: u64, to: &str, amount_uqcb: u64) ->
 /// power at the epoch boundary.  Without it the bond is accepted but marked
 /// "unbound", and `gate_voting_power` zeros the validator at height 10.
 fn build_bond_tx(sender: &str, nonce: u64, amount_uqcb: u64) -> Transaction {
-    let kp = ClassicalScheme.generate_keypair(sender).unwrap();
+    let kp = pq_sign::key_for(sender);
     let mut tx = Transaction::bond_validator(
         &format!("bond-{sender}-{nonce}"),
         sender, amount_uqcb as u128, nonce,
@@ -444,7 +459,7 @@ fn build_bond_tx(sender: &str, nonce: u64, amount_uqcb: u64) -> Transaction {
     if let TxBody::BondValidator { ref mut owner_identity_id, .. } = tx.body {
         *owner_identity_id = Some(sender.to_string());
     }
-    tx.sign(&kp, CHAIN_ID).unwrap();
+    tx = pq_sign::sign_with(tx, CHAIN_ID, &kp);
     tx
 }
 
@@ -458,8 +473,8 @@ fn build_register_key_tx(
     consensus_kp: &chain_forge_crypto::KeyPair,
     chain_id:     &str,
 ) -> Transaction {
-    let pop_msg = validator_key_registration_signing_bytes(chain_id, sender);
-    let pop_sig = ClassicalScheme.sign(&pop_msg, consensus_kp).unwrap();
+    let pop_msg = validator_key_registration_signing_bytes_v2(chain_id, sender, &consensus_kp.public_key);
+    let pop_sig = MlDsaScheme.sign(&pop_msg, consensus_kp).unwrap();
     let mut tx = Transaction {
         id:          format!("regkey-{sender}-{nonce}"),
         sender:      sender.to_string(),
@@ -467,8 +482,8 @@ fn build_register_key_tx(
         body:        TxBody::RegisterValidatorKey {
             consensus_pubkey:    consensus_kp.public_key.clone(),
             proof_of_possession: pop_sig.bytes,
-            scheme:              String::new(),
-            pop_version:         1,
+            scheme:              "ml-dsa-65".into(),
+            pop_version:         2,
         },
         gas_limit:   10_000,
         signature:   vec![],
@@ -477,7 +492,7 @@ fn build_register_key_tx(
         sig_scheme:    None,
         pq_public_key: vec![],
     };
-    tx.sign(wallet_kp, chain_id).unwrap();
+    tx = pq_sign::sign_with(tx, chain_id, wallet_kp);
     tx
 }
 
@@ -572,8 +587,8 @@ fn post_genesis_validator_admission() {
     // Derive Eve's keypairs.
     // wallet_kp signs Eve's transactions (outer tx auth for RegisterValidatorKey).
     // consensus_kp is the key Eve registers for block signing.
-    let eve_wallet_kp    = ClassicalScheme.generate_keypair(EVE_ADDR).unwrap();
-    let eve_consensus_kp = ClassicalScheme.generate_keypair("qcb1eve-consensus").unwrap();
+    let eve_wallet_kp    = pq_sign::key_for(EVE_ADDR);
+    let eve_consensus_kp = new_consensus_key("qcb1eve");
     let eve_consensus_hex = hex::encode(&eve_consensus_kp.public_key);
     eprintln!("   Eve wallet pubkey:    {}", hex::encode(&eve_wallet_kp.public_key));
     eprintln!("   Eve consensus pubkey: {eve_consensus_hex}");
@@ -1057,8 +1072,8 @@ fn invalid_proof_of_possession_rejected() {
     // Allow 60 s: under concurrent test load startup can be slower than in isolation.
     assert!(poll_height(&ports.all_api(), 2, Duration::from_secs(60)), "chain stuck");
 
-    let wallet_kp    = ClassicalScheme.generate_keypair(EVE_ADDR).unwrap();
-    let consensus_kp = ClassicalScheme.generate_keypair("qcb1eve-consensus").unwrap();
+    let wallet_kp    = pq_sign::key_for(EVE_ADDR);
+    let consensus_kp = new_consensus_key("qcb1eve");
 
     // Build a RegisterValidatorKey tx with GARBAGE proof-of-possession.
     let mut tx = Transaction {
@@ -1068,8 +1083,8 @@ fn invalid_proof_of_possession_rejected() {
         body:        TxBody::RegisterValidatorKey {
             consensus_pubkey:    consensus_kp.public_key.clone(),
             proof_of_possession: vec![0xde, 0xad, 0xbe, 0xef].into_iter().cycle().take(64).collect(),  // 64 bytes of garbage
-            scheme:              String::new(),
-            pop_version:         1,
+            scheme:              "ml-dsa-65".into(),
+            pop_version:         2,
         },
         gas_limit:   10_000,
         signature:   vec![],
@@ -1078,7 +1093,7 @@ fn invalid_proof_of_possession_rejected() {
         sig_scheme:    None,
         pq_public_key: vec![],
     };
-    tx.sign(&wallet_kp, CHAIN_ID).unwrap();
+    tx = pq_sign::sign_with(tx, CHAIN_ID, &wallet_kp);
 
     let tx_id = tx.id.clone();
     submit_tx(ports.alice_api, &tx).expect("tx accepted into mempool");
@@ -1133,12 +1148,12 @@ fn forged_outer_signature_rejected() {
     // Allow 60 s: under concurrent test load startup can be slower than in isolation.
     assert!(poll_height(&ports.all_api(), 2, Duration::from_secs(60)), "chain stuck");
 
-    let attacker_kp  = ClassicalScheme.generate_keypair("qcb1attacker").unwrap();
-    let consensus_kp = ClassicalScheme.generate_keypair("qcb1eve-consensus").unwrap();
+    let attacker_kp  = new_consensus_key("qcb1attacker");
+    let consensus_kp = new_consensus_key("qcb1eve");
 
     // Build RegisterValidatorKey for EVE but sign the outer tx with ATTACKER's key.
-    let pop_msg = validator_key_registration_signing_bytes(CHAIN_ID, EVE_ADDR);
-    let pop_sig = ClassicalScheme.sign(&pop_msg, &consensus_kp).unwrap();
+    let pop_msg = validator_key_registration_signing_bytes_v2(CHAIN_ID, EVE_ADDR, &consensus_kp.public_key);
+    let pop_sig = MlDsaScheme.sign(&pop_msg, &consensus_kp).unwrap();
     let mut tx = Transaction {
         id:          "forged-sig-test".to_string(),
         sender:      EVE_ADDR.to_string(),  // claims to be Eve
@@ -1146,8 +1161,8 @@ fn forged_outer_signature_rejected() {
         body:        TxBody::RegisterValidatorKey {
             consensus_pubkey:    consensus_kp.public_key.clone(),
             proof_of_possession: pop_sig.bytes,
-            scheme:              String::new(),
-            pop_version:         1,
+            scheme:              "ml-dsa-65".into(),
+            pop_version:         2,
         },
         gas_limit:   10_000,
         signature:   vec![],
@@ -1156,7 +1171,7 @@ fn forged_outer_signature_rejected() {
         sig_scheme:    None,
         pq_public_key: vec![],
     };
-    tx.sign(&attacker_kp, CHAIN_ID).unwrap();  // signed by attacker, not Eve
+    tx = pq_sign::sign_with(tx, CHAIN_ID, &attacker_kp);  // signed by attacker, not Eve
 
     let resp = api_post(ports.alice_api, "/api/tx",
         &serde_json::to_string(&tx).unwrap());
@@ -1222,12 +1237,12 @@ fn wrong_chain_id_in_pop_rejected() {
     // Allow 60 s: under concurrent test load startup can be slower than in isolation.
     assert!(poll_height(&ports.all_api(), 2, Duration::from_secs(60)), "chain stuck");
 
-    let wallet_kp    = ClassicalScheme.generate_keypair(EVE_ADDR).unwrap();
-    let consensus_kp = ClassicalScheme.generate_keypair("qcb1eve-consensus").unwrap();
+    let wallet_kp    = pq_sign::key_for(EVE_ADDR);
+    let consensus_kp = new_consensus_key("qcb1eve");
 
     // Sign PoP for the WRONG chain ID.
-    let pop_msg = validator_key_registration_signing_bytes("wrong-chain-id", EVE_ADDR);
-    let pop_sig = ClassicalScheme.sign(&pop_msg, &consensus_kp).unwrap();
+    let pop_msg = validator_key_registration_signing_bytes_v2("wrong-chain-id", EVE_ADDR, &consensus_kp.public_key);
+    let pop_sig = MlDsaScheme.sign(&pop_msg, &consensus_kp).unwrap();
     let mut tx = Transaction {
         id:          "wrong-chain-id-pop".to_string(),
         sender:      EVE_ADDR.to_string(),
@@ -1235,8 +1250,8 @@ fn wrong_chain_id_in_pop_rejected() {
         body:        TxBody::RegisterValidatorKey {
             consensus_pubkey:    consensus_kp.public_key.clone(),
             proof_of_possession: pop_sig.bytes,
-            scheme:              String::new(),
-            pop_version:         1,
+            scheme:              "ml-dsa-65".into(),
+            pop_version:         2,
         },
         gas_limit:   10_000,
         signature:   vec![],
@@ -1245,7 +1260,7 @@ fn wrong_chain_id_in_pop_rejected() {
         sig_scheme:    None,
         pq_public_key: vec![],
     };
-    tx.sign(&wallet_kp, CHAIN_ID).unwrap();  // outer tx correctly signed for right chain
+    tx = pq_sign::sign_with(tx, CHAIN_ID, &wallet_kp);  // outer tx correctly signed for right chain
 
     let tx_id = tx.id.clone();
     submit_tx(ports.alice_api, &tx).expect("tx accepted into mempool");

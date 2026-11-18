@@ -53,7 +53,7 @@
 //!   - `settlement_operators: ["qcb1alice"]`
 //!   - `treasury:pocd-research` pre-funded with 50,000,000 uqcb
 //!   - `qcb1researcher` starts with 0 balance
-//!   - `require_signatures: false` (validators use Ed25519; no ML-DSA signing needed here)
+//!   - `require_signatures: false` (claims are still ML-DSA-signed by their submitters)
 //!
 //! ## Run
 //!

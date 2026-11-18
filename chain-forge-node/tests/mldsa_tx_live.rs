@@ -34,9 +34,8 @@
 //!   genesis — the existing devnet state is never touched.
 //! - `qcb1sender` has no pre-bound ML-DSA key in genesis; the first signed tx
 //!   uses the first-use registration path (`pq_public_key` in the tx envelope).
-//! - `qcb1alice` and the other validators sign their own txs with classical Ed25519
-//!   (they are validators, not ML-DSA user accounts). This test only exercises
-//!   the ML-DSA path for the `qcb1sender` user account.
+//! - The validators sign with their committed ML-DSA-65 keys (`keys/mldsa/`).
+//!   This test exercises the first-use ML-DSA path for the `qcb1sender` account.
 //! - Address derivation: `qcb1pq…` — ML-DSA-65 addresses use the `pq` namespace
 //!   (CS-001-H1). `qcb1sender` is a classical alias pre-funded in genesis.
 //!

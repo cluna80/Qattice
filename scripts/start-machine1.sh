@@ -13,7 +13,7 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 BINARY="$REPO/target/release/chain-forge-node"
 GENESIS="$REPO/tests/devnet/genesis-4node.json"
-KEYS="$REPO/tests/devnet/keys"
+KEYS="$REPO/tests/devnet/keys/mldsa"
 DATA_BASE="$HOME/chain-forge-data"
 
 ALICE_DATA="$DATA_BASE/alice"

@@ -11,11 +11,8 @@
 //!
 //! ## Notes
 //!
-//! The pqhs2 genesis uses `signature_scheme: "pqc-native"`, which forces
-//! ML-DSA signatures on user transactions.  To submit *unsigned* transactions
-//! for the nonce-overflow corner case we patch `signature_scheme` to `"hybrid"`
-//! (Ed25519Allowed policy) while keeping `bft_variant: "pq-hotstuff"`.  Signed
-//! ML-DSA transactions are used for all other cases.
+//! The genesis is `pqc-native` (ML-DSA-only accounts); every transaction,
+//! including the u64::MAX-nonce one, is ML-DSA-signed by Alice.
 //!
 //! ## Run
 //!
@@ -93,8 +90,6 @@ fn hex_encode(b: &[u8]) -> String {
 ///
 /// Patches:
 /// - `chain_id` → CHAIN_ID
-/// - `cryptography.signature_scheme` → "hybrid"  (allows unsigned txs on PQ-HotStuff-2)
-/// - `execution.require_signatures` → false       (consistent with hybrid)
 /// - Adds ALICE_ADDR (funded, ML-DSA key bound)
 /// - Adds RECV_ADDR  (funded, no key — acts as a plain recipient)
 fn genesis_path() -> PathBuf {
@@ -108,11 +103,6 @@ fn genesis_path() -> PathBuf {
 
         g["chain_id"] = serde_json::Value::String(CHAIN_ID.to_string());
         g["consensus"]["block_time_ms"] = serde_json::Value::Number(10_000.into());
-
-        // Hybrid policy: ML-DSA-signed txs still work but unsigned ones are
-        // also accepted, enabling NR-01 (u64::MAX nonce) with an unsigned tx.
-        g["cryptography"]["signature_scheme"] = serde_json::Value::String("hybrid".into());
-        g["execution"]["require_signatures"]  = serde_json::Value::Bool(false);
 
         // Alice's ML-DSA-65 key — bound in genesis so key-binding doesn't fire.
         let kp     = MlDsaScheme.generate_keypair(ALICE_SEED).expect("alice ML-DSA keygen");
@@ -367,21 +357,6 @@ fn wait_height(nodes: &mut Vec<NodeProcess>, target: u64, timeout: Duration, log
 
 // ── Transaction builders ──────────────────────────────────────────────────────
 
-fn unsigned_transfer(id: &str, sender: &str, nonce: u64) -> Transaction {
-    Transaction {
-        id:            id.to_string(),
-        sender:        sender.to_string(),
-        nonce,
-        body:          TxBody::Transfer { to: RECV_ADDR.to_string(), denom: "uqcb".to_string(), amount: TX_AMOUNT },
-        gas_limit:     200_000,
-        signature:     vec![],
-        public_key:    vec![],
-        pq_signatures: vec![],
-        sig_scheme:    None,
-        pq_public_key: vec![],
-    }
-}
-
 fn signed_transfer(id: &str, nonce: u64) -> Transaction {
     let kp       = MlDsaScheme.generate_keypair(ALICE_SEED).expect("alice ML-DSA keygen");
     let body     = TxBody::Transfer { to: RECV_ADDR.to_string(), denom: "uqcb".to_string(), amount: TX_AMOUNT };
@@ -429,7 +404,7 @@ fn h0_4_nonce_replay() {
 
     // ── Start devnet ──────────────────────────────────────────────────────────
 
-    println!("── starting 4-node PQ-HotStuff-2 devnet (hybrid sig policy) ──");
+    println!("── starting 4-node PQ-HotStuff-2 devnet (ML-DSA-only accounts) ──");
 
     let alice_data = dat_dir.join("alice");
     let alice_log  = log_dir.join("qcb1alice.log");
@@ -462,7 +437,7 @@ fn h0_4_nonce_replay() {
 
     println!("\n── NR-01: nonce == u64::MAX refused at admission ──");
     {
-        let tx     = unsigned_transfer("nr01-maxnonce", ALICE_ADDR, u64::MAX);
+        let tx     = signed_transfer("nr01-maxnonce", u64::MAX);
         let tx_json = serde_json::to_string(&tx).expect("serialise");
         let (status, resp) = api_post(API_PORTS[0], "/api/tx", &tx_json)
             .expect("no response");

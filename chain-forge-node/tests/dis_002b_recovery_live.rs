@@ -457,7 +457,7 @@ fn build_recover_account_key(
         signature:     vec![],
         public_key:    vec![],
         pq_signatures: vec![],
-        // Tag as MlDsa so the ingress Ed25519-sig check skips this tx.
+        // Tag as MlDsa so ingress verifies the ML-DSA signature.
         // RecoverAccountKey authentication is via guardian sigs in the body,
         // not via the outer tx signature; verify_authorization() returns Ok(())
         // for this variant unconditionally.

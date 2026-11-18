@@ -14944,16 +14944,6 @@ mod tests {
         }
     }
 
-    /// The repo's Ed25519 devnet key files say "classical-ed25519"; they
-    /// must keep loading (the Ed25519 devnet is the fallback).
-    #[tokio::test]
-    async fn repo_ed25519_devnet_key_file_still_loads() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../tests/devnet/keys/alice.key.json");
-        let mut node = Node::new(GENESIS, None).await.unwrap();
-        node.load_signing_key(&path).expect("the Ed25519 devnet key file must load");
-    }
-
     /// A commit certificate carried as `last_commit` must verify with
     /// ML-DSA precommits; the vote's scheme tag must match its key.
     #[tokio::test]

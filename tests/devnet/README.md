@@ -10,7 +10,7 @@ The supported devnet is the **ML-DSA devnet on PQ-HotStuff-2**. Every genesis fi
 | `genesis-val-jail.json`, `genesis-val-jail-5node.json`, `genesis-val-delay.json`, `genesis-val-evict.json` | the H0-11 validator lifecycle live tests |
 | `genesis-mldsa.json`, `genesis-val002.json` | the live tests that name them |
 
-The legacy pilot devnet (repo-root `genesis-4node.json`, `qcb-testnet-4node`, Tendermint + Ed25519) is no longer on this branch; it runs from branch `devnet-legacy-2026-10`, which `scripts/start-carol.sh` and `devnet/restart-machine*.sh` belong to.
+The legacy pilot devnet (repo-root `genesis-4node.json`, `qcb-testnet-4node`, Tendermint + Ed25519) is no longer on this branch; it runs from branch `devnet-legacy-2026-10`; its scripts were removed from this branch (Ed25519 retired).
 
 All keys in this folder are **public test keys**. Never use them on a network anyone relies on.
 

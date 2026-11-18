@@ -41,29 +41,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chain_forge_crypto::{MlDsaScheme, SchemeId, SignatureScheme, mldsa_tx_prehash, KeyPair};
+use chain_forge_crypto::{MlDsaScheme, SchemeId, SignatureScheme, mldsa_tx_prehash};
 #[path = "common/live_genesis.rs"]
 mod live_genesis;
+#[path = "common/pq_sign.rs"]
+mod pq_sign;
 
 use chain_forge_execution::{
     Transaction, TxBody,
     account_key_rotation_signing_bytes,
 };
-
-/// Load an Ed25519 keypair from a `.key.json` file (validator key format).
-fn load_ed25519_keypair(path: &PathBuf) -> KeyPair {
-    let text = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("cannot read key file {path:?}: {e}"));
-    let v: serde_json::Value = serde_json::from_str(&text)
-        .unwrap_or_else(|e| panic!("cannot parse key file {path:?}: {e}"));
-    let pk_hex = v["public_key"].as_str().expect("public_key missing in key file");
-    let sk_hex = v["private_key"].as_str().expect("private_key missing in key file");
-    KeyPair {
-        scheme:      SchemeId::Classical,
-        public_key:  hex::decode(pk_hex).expect("public_key hex decode"),
-        private_key: hex::decode(sk_hex).expect("private_key hex decode"),
-    }
-}
 
 const CHAIN_ID:    &str = "qcb-devnet-dis002b";
 const PILOT_ADDR:  &str = "qcb1pilot";
@@ -403,15 +390,14 @@ fn build_register_identity(seed: &str, sender: &str, nonce: u64) -> Transaction 
     }
 }
 
-/// Build an Attest tx signed with an Ed25519 validator keypair (genesis validators).
-fn build_attest_ed25519(
-    kp: &KeyPair,
+/// Build an Attest tx signed with the attester's ML-DSA-65 devnet key (genesis validators).
+fn build_attest(
     attester: &str,
     attester_nonce: u64,
     claimant_id: &str,
 ) -> Transaction {
     let body = TxBody::Attest { claimant_id: claimant_id.to_string() };
-    let mut tx = Transaction {
+    let tx = Transaction {
         id:            format!("dis002b-attest-{attester}-for-{claimant_id}"),
         sender:        attester.to_string(),
         nonce:         attester_nonce,
@@ -420,11 +406,10 @@ fn build_attest_ed25519(
         signature:     vec![],
         public_key:    vec![],
         pq_signatures: vec![],
-        sig_scheme:    Some(SchemeId::Classical),
+        sig_scheme:    None,
         pq_public_key: vec![],
     };
-    tx.sign(kp, CHAIN_ID).expect("Ed25519 sign Attest");
-    tx
+    pq_sign::sign(tx, CHAIN_ID)
 }
 
 fn build_transfer(
@@ -605,10 +590,9 @@ fn dis_002b_migration() {
     eprintln!("[phase1] RegisterIdentity succeeded.");
 
     // ── Phase 2: Attest from qcb1bob ─────────────────────────────────────────
-    // qcb1bob is Verified at genesis and uses Ed25519. Load the key file and sign.
+    // qcb1bob is Verified at genesis; he signs with his ML-DSA-65 devnet key.
     eprintln!("\n[phase2] Attest from qcb1bob for {PILOT_ADDR}");
-    let bob_kp = load_ed25519_keypair(&key_file("bob"));
-    let attest_tx = build_attest_ed25519(&bob_kp, "qcb1bob", 0, PILOT_ADDR);
+    let attest_tx = build_attest("qcb1bob", 0, PILOT_ADDR);
     let attest_json = serde_json::to_string(&attest_tx).expect("serialise attest");
     let resp_attest = submit_tx(bob_port, &attest_json);
     let ingress_attest = resp_attest["status"].as_str().unwrap_or("").to_string();

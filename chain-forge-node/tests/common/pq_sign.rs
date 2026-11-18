@@ -60,13 +60,18 @@ pub fn key_for(sender: &str) -> KeyPair {
 }
 
 /// Sign a transaction as its sender.
-pub fn sign(mut tx: Transaction, chain_id: &str) -> Transaction {
+pub fn sign(tx: Transaction, chain_id: &str) -> Transaction {
     let kp = key_for(&tx.sender);
+    sign_with(tx, chain_id, &kp)
+}
+
+/// Sign a transaction with `kp`, whoever its sender is (e.g. a forged signature).
+pub fn sign_with(mut tx: Transaction, chain_id: &str, kp: &KeyPair) -> Transaction {
     let body_json = serde_json::to_string(&tx.body).unwrap();
-    let sig = MlDsaScheme.sign(&mldsa_tx_prehash(chain_id, body_json.as_bytes()), &kp).unwrap();
+    let sig = MlDsaScheme.sign(&mldsa_tx_prehash(chain_id, body_json.as_bytes()), kp).unwrap();
     tx.pq_signatures = vec![format!("mldsa65:{}", sig.bytes.iter().map(|b| format!("{b:02x}")).collect::<String>())];
     tx.sig_scheme = Some(SchemeId::MlDsa);
-    tx.pq_public_key = kp.public_key;
+    tx.pq_public_key = kp.public_key.clone();
     tx.signature = vec![];
     tx.public_key = vec![];
     tx

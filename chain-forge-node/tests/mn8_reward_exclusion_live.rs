@@ -41,8 +41,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chain_forge_crypto::{ClassicalScheme, SignatureScheme};
-use chain_forge_execution::{validator_key_registration_signing_bytes, Transaction, TxBody};
+use chain_forge_crypto::{MlDsaScheme, SignatureScheme};
+
+#[path = "common/pq_sign.rs"]
+mod pq_sign;
+use chain_forge_execution::{validator_key_registration_signing_bytes_v2, Transaction, TxBody};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -195,7 +198,9 @@ fn wait_for_height(ports: &[u16], target: u64, timeout: Duration) {
 // ── Transactions ──────────────────────────────────────────────────────────────
 
 fn submit(port: u16, tx: &Transaction) {
-    let resp = api_post_tx(port, &serde_json::to_string(tx).unwrap())
+    // Every tx on this ML-DSA-only chain must be signed by its sender.
+    let signed = if tx.pq_signatures.is_empty() { pq_sign::sign(tx.clone(), CHAIN_ID) } else { tx.clone() };
+    let resp = api_post_tx(port, &serde_json::to_string(&signed).unwrap())
         .unwrap_or_else(|| panic!("POST /api/tx for {} failed (network)", tx.id));
     let st = resp["status"].as_str().unwrap_or("unknown");
     assert!(st == "queued" || st == "ok", "{} rejected at ingress: {resp}", tx.id);
@@ -376,14 +381,14 @@ fn mn8_revoked_validator_is_excluded_from_epoch_rewards() {
 
     // Eve's wallet key must be the one genesis binds to her account (her
     // RegisterValidatorKey is always signature-checked).
-    let wallet = ClassicalScheme.generate_keypair(EVE).unwrap();
+    let wallet = pq_sign::key_for(EVE);
     let genesis_json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&genesis).unwrap()).unwrap();
     let bound = genesis_json["genesis_accounts"].as_array().unwrap().iter()
         .find(|a| a["address"] == EVE).unwrap()["public_key"].as_str().unwrap().to_string();
     assert_eq!(hex::encode(&wallet.public_key), bound,
-        "genesis-mn8.json must bind Eve's wallet key (generate_keypair(\"{EVE}\"))");
-    let consensus = ClassicalScheme.generate_keypair("qcb1eve-consensus").unwrap();
+        "genesis-mn8.json must bind Eve's wallet key (keys/mldsa/eve.key.json)");
+    let consensus = MlDsaScheme.generate_keypair("qcb1eve-consensus-00000000000000000000000000").unwrap();
     let consensus_hex = hex::encode(&consensus.public_key);
 
     let timeout  = Duration::from_secs(TIMEOUT_SECS);
@@ -399,7 +404,7 @@ fn mn8_revoked_validator_is_excluded_from_epoch_rewards() {
         "address": EVE,
         "private_key": hex::encode(&consensus.private_key),
         "public_key": consensus_hex,
-        "scheme": "classical-ed25519",
+        "scheme": "ml-dsa-65",
     }).to_string()).unwrap();
     let run = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs()).unwrap_or(0);
@@ -423,7 +428,7 @@ fn mn8_revoked_validator_is_excluded_from_epoch_rewards() {
     println!("── MN8-1: identity, bond, consensus key ──");
     let eve_nonce = account_nonce(ports[0], EVE);
     let mut reg = Transaction::register_identity(&format!("mn8-reg-{run}"), EVE, eve_nonce);
-    reg.sign(&wallet, CHAIN_ID).unwrap();
+    reg = pq_sign::sign(reg, CHAIN_ID);
     submit(ports[0], &reg);
     confirm_success(&ports, &reg.id, timeout);
 
@@ -439,18 +444,18 @@ fn mn8_revoked_validator_is_excluded_from_epoch_rewards() {
         // The owner binding ties the seat to Eve's personhood; without it a
         // post-genesis validator is fail-closed to zero power.
         TxBody::BondValidator { amount: EVE_BOND_UQCB, owner_identity_id: Some(EVE.into()) });
-    bond.sign(&wallet, CHAIN_ID).unwrap();
+    bond = pq_sign::sign(bond, CHAIN_ID);
     submit(ports[0], &bond);
     confirm_success(&ports, &bond.id, timeout);
 
-    let pop = ClassicalScheme.sign(&validator_key_registration_signing_bytes(CHAIN_ID, EVE), &consensus).unwrap();
+    let pop = MlDsaScheme.sign(&validator_key_registration_signing_bytes_v2(CHAIN_ID, EVE, &consensus.public_key), &consensus).unwrap();
     let mut regkey = unsigned(format!("mn8-regkey-{run}"), EVE, eve_nonce + 2, TxBody::RegisterValidatorKey {
         consensus_pubkey: consensus.public_key.clone(),
         proof_of_possession: pop.bytes,
-        scheme: String::new(),
-        pop_version: 1,
+        scheme: "ml-dsa-65".into(),
+        pop_version: 2,
     });
-    regkey.sign(&wallet, CHAIN_ID).unwrap();
+    regkey = pq_sign::sign(regkey, CHAIN_ID);
     submit(ports[0], &regkey);
     let events = confirm_success(&ports, &regkey.id, timeout);
     assert!(events.iter().any(|e| e.contains(&consensus_hex)), "MN8-1: key event missing: {events:?}");

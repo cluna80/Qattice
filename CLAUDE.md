@@ -29,9 +29,12 @@ the discrepancy before closing the milestone.
 use Ed25519 keys.** Ed25519 was retired from Qattice (owner, 2026-10-30).
 All new tests must use ML-DSA-65 keys (`keys/mldsa/`) and
 `"signature_scheme": "pqc-native"` / `"validator_scheme": "ml-dsa-65"`.
-The existing `genesis-val-jail.json` and `{alice,bob,carol,dave}.key.json`
-(root of `keys/`) survive only as classical-compatibility fixtures — do not
-copy their crypto scheme into new test genesis files.
+Ed25519 removal is phased (owner, 2026-11-18): (1) tests, genesis files,
+scripts and key fixtures moved to ML-DSA-65 and the Ed25519 key files deleted —
+done; (2) after the Phase 0/0.5 sweep, remove Ed25519 from the crypto, wallet,
+keygen and execution code and make the node refuse classical signatures. The
+only Ed25519 left in tests is negative: checking that an Ed25519-signed tx is
+refused (`mldsa_only_accounts_live`).
 
 ## Consensus engine: PQ-HotStuff-2 only (locked 2026-11-15)
 

@@ -106,7 +106,7 @@ fn genesis_path() -> PathBuf {
 }
 
 fn key_file(label: &str) -> PathBuf {
-    consensus_keys::validator_key(label, manifest_dir().join("tests").join("devnet").join("keys")
+    consensus_keys::validator_key(label, manifest_dir().join("tests").join("devnet").join("keys").join("mldsa")
         .join(format!("{label}.key.json")))
 }
 

@@ -2,14 +2,12 @@
 //! Ed25519 retired 2026-10-30): the test's genesis is copied with every
 //! validator key replaced by the committed devnet ML-DSA key
 //! (`tests/devnet/keys/mldsa/`) and `validator_scheme = "ml-dsa-65"`, and
-//! validators load those key files. `CF_CONSENSUS_KEYS=classical` restores the
-//! test's own genesis and key files (classical-compatibility fixtures only).
+//! validators load those key files. There is no classical opt-out.
 
 use std::path::{Path, PathBuf};
 
-pub fn mldsa() -> bool {
-    std::env::var("CF_CONSENSUS_KEYS").map(|v| v != "classical").unwrap_or(true)
-}
+#[allow(dead_code)]
+pub fn mldsa() -> bool { true }
 
 fn mldsa_key_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -24,9 +22,6 @@ fn mldsa_key(short: &str) -> PathBuf {
 
 /// The genesis file to run: `path` itself, or its ML-DSA-65 copy.
 pub fn genesis(path: &Path) -> PathBuf {
-    if !mldsa() {
-        return path.to_path_buf();
-    }
     let mut g: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     g["cryptography"]["validator_scheme"] = "ml-dsa-65".into();
@@ -53,7 +48,7 @@ pub fn genesis(path: &Path) -> PathBuf {
     out
 }
 
-/// The key file for validator `short` ("alice"): `default`, or its ML-DSA key.
-pub fn validator_key(short: &str, default: PathBuf) -> PathBuf {
-    if mldsa() { mldsa_key(short) } else { default }
+/// The ML-DSA key file for validator `short` ("alice"); `_default` is ignored.
+pub fn validator_key(short: &str, _default: PathBuf) -> PathBuf {
+    mldsa_key(short)
 }

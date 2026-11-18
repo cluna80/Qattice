@@ -24,10 +24,8 @@
 //! or cannot insert rules (no root / no CAP_NET_ADMIN).
 //!
 //! ## Variants
-//! The `*_mldsa_*` tests run the supported devnet: `genesis-4node-mldsa.json`
-//! (ML-DSA-65 consensus keys, ML-DSA-only user accounts). The other two run
-//! `genesis-4node.json` with Ed25519 consensus keys as a classical-compatibility
-//! check; the Ed25519 fallback devnet itself is retired (owner, 2026-10-30).
+//! Both genesis files are ML-DSA-65 throughout (consensus keys and user
+//! accounts): `genesis-4node.json` and `genesis-4node-mldsa.json`.
 //!
 //! ## Run
 //! ```
@@ -101,8 +99,8 @@ fn node_binary() -> PathBuf {
     }
 }
 
-/// Ed25519 consensus keys (the fallback devnet).
-const ED25519: (&str, &str) = ("genesis-4node.json", "keys/mldsa"); // genesis-4node.json is ML-DSA now (Ed25519 retired)
+/// `genesis-4node.json` (ML-DSA-65).
+const BASE: (&str, &str) = ("genesis-4node.json", "keys/mldsa");
 /// ML-DSA-65 consensus keys (owner decision 2026-10-28).
 const MLDSA: (&str, &str) = ("genesis-4node-mldsa.json", "keys/mldsa");
 
@@ -450,11 +448,10 @@ fn poll_until_height(
 
 #[test]
 fn devnet_4node_reaches_target_height() {
-    liveness(ED25519, "qcb-devnet-4node");
+    liveness(BASE, "qcb-devnet-4node");
 }
 
-/// Same run with every validator on an ML-DSA-65 consensus key: no
-/// Ed25519 key exists in this genesis, so every counted vote is ML-DSA.
+/// Same run on `genesis-4node-mldsa.json`.
 #[test]
 fn devnet_4node_mldsa_reaches_target_height() {
     liveness(MLDSA, "qcb-devnet-4node-mldsa");
@@ -520,7 +517,7 @@ fn liveness((genesis_file, key_dir): (&str, &str), log_name: &str) {
 /// Skipped (not failed) when iptables is unavailable or unprivileged.
 #[test]
 fn devnet_4node_partition_recovery() {
-    partition_recovery(ED25519, "qcb-devnet-4node-partition");
+    partition_recovery(BASE, "qcb-devnet-4node-partition");
 }
 
 #[test]
@@ -631,13 +628,13 @@ fn partition_recovery((genesis_file, key_dir): (&str, &str), log_name: &str) {
     // NodeProcess::drop() kills the children.
 }
 
-/// The node's keygen produces a fresh key per run, for both schemes.
+/// The node's keygen produces a fresh ML-DSA-65 key per run.
 #[test]
 fn keygen_never_repeats_a_key() {
     let bin = PathBuf::from(env!("CARGO_BIN_EXE_chain-forge-keygen"));
     let dir = std::env::temp_dir().join(format!("cf-keygen-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    for scheme in ["ed25519", "ml-dsa-65"] {
+    for scheme in ["ml-dsa-65"] {
         let keys: Vec<serde_json::Value> = (0..2).map(|i| {
             let out = dir.join(format!("{scheme}-{i}.key.json"));
             let st = Command::new(&bin)
