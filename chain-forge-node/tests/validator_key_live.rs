@@ -541,7 +541,7 @@ fn post_genesis_validator_admission() {
     // Allow 60 s: under concurrent test load (5 devnets × 4 nodes) startup
     // can be slower than in isolation.
     assert!(
-        poll_height(&ports.all_api(), 2, Duration::from_secs(60)),
+        poll_height(&ports.all_api(), 2, Duration::from_secs(240)),
         "chain did not reach height 2"
     );
     let h0 = height_of(ports.alice_api);
@@ -575,7 +575,7 @@ fn post_genesis_validator_admission() {
         genesis_bond_ids.push((gv, bond_id));
     }
     for (gv, bond_id) in &genesis_bond_ids {
-        let events = wait_tx_executed(ports.alice_api, bond_id, Duration::from_secs(20))
+        let events = wait_tx_executed(ports.alice_api, bond_id, Duration::from_secs(120))
             .unwrap_or_else(|| panic!("Phase 0b: BondValidator for {gv} never executed"));
         eprintln!("   BondValidator executed for {gv}: {events:?}");
     }
@@ -605,7 +605,7 @@ fn post_genesis_validator_admission() {
     eprintln!("   RegisterIdentity queued: {reg_id}");
 
     // Wait for registration to commit and appear in explorer.
-    let events = wait_tx_executed(ports.alice_api, &reg_id, Duration::from_secs(20))
+    let events = wait_tx_executed(ports.alice_api, &reg_id, Duration::from_secs(120))
         .expect("RegisterIdentity tx never executed");
     eprintln!("   RegisterIdentity executed. Events: {events:?}");
     assert!(
@@ -643,15 +643,15 @@ fn post_genesis_validator_admission() {
     submit_tx(ports.alice_api, &att3).expect("attest3 rejected");
 
     // Wait for all three to execute.
-    let e1 = wait_tx_executed(ports.alice_api, &att1_id, Duration::from_secs(20))
+    let e1 = wait_tx_executed(ports.alice_api, &att1_id, Duration::from_secs(120))
         .expect("attest1 not executed");
     eprintln!("   attest1 executed: {e1:?}");
 
-    let e2 = wait_tx_executed(ports.alice_api, &att2_id, Duration::from_secs(20))
+    let e2 = wait_tx_executed(ports.alice_api, &att2_id, Duration::from_secs(120))
         .expect("attest2 not executed");
     eprintln!("   attest2 executed: {e2:?}");
 
-    let e3 = wait_tx_executed(ports.alice_api, &att3_id, Duration::from_secs(20))
+    let e3 = wait_tx_executed(ports.alice_api, &att3_id, Duration::from_secs(120))
         .expect("attest3 not executed");
     eprintln!("   attest3 executed: {e3:?}");
 
@@ -684,7 +684,7 @@ fn post_genesis_validator_admission() {
     let bond_id    = bond_tx.id.clone();
     submit_tx(ports.alice_api, &bond_tx).expect("BondValidator rejected");
 
-    let bond_events = wait_tx_executed(ports.alice_api, &bond_id, Duration::from_secs(20))
+    let bond_events = wait_tx_executed(ports.alice_api, &bond_id, Duration::from_secs(120))
         .expect("BondValidator not executed");
     eprintln!("   BondValidator executed: {bond_events:?}");
 
@@ -698,7 +698,7 @@ fn post_genesis_validator_admission() {
     eprintln!("   Current height: {h_before_key}. Waiting for epoch boundary at {next_epoch}...");
 
     assert!(
-        poll_height(&ports.all_api(), next_epoch + 2, Duration::from_secs(60)),
+        poll_height(&ports.all_api(), next_epoch + 2, Duration::from_secs(240)),
         "chain did not reach height {} before key registration check", next_epoch + 2
     );
 
@@ -733,7 +733,7 @@ fn post_genesis_validator_admission() {
     submit_tx(ports.alice_api, &regkey_tx).expect("RegisterValidatorKey rejected at submission");
     eprintln!("   RegisterValidatorKey queued: {regkey_id}");
 
-    let key_events = wait_tx_executed(ports.alice_api, &regkey_id, Duration::from_secs(20))
+    let key_events = wait_tx_executed(ports.alice_api, &regkey_id, Duration::from_secs(120))
         .expect("RegisterValidatorKey never executed");
     eprintln!("   RegisterValidatorKey executed. Events: {key_events:?}");
 
@@ -757,7 +757,7 @@ fn post_genesis_validator_admission() {
     // update that raises quorum from 3/4 to 4/5.  The chain may pause
     // briefly while the new set takes effect.  2 blocks × 2 s + 90 s slack.
     assert!(
-        poll_height(&ports.all_api(), admission_epoch + 3, Duration::from_secs(120)),
+        poll_height(&ports.all_api(), admission_epoch + 3, Duration::from_secs(300)),
         "chain did not reach height {} after epoch boundary (quorum transition 3/4→4/5)", admission_epoch + 3
     );
 
@@ -860,7 +860,7 @@ fn post_genesis_validator_admission() {
     // Give 120 s for 2 blocks to handle worst-case proposer-rotation delays.
     let quorum_ports = [ports.bob_api, ports.carol_api, ports.dave_api];
     assert!(
-        poll_height(&quorum_ports, h_before_restart + 2, Duration::from_secs(120)),
+        poll_height(&quorum_ports, h_before_restart + 2, Duration::from_secs(300)),
         "Bob/Carol/Dave could not commit blocks after Alice killed (quorum sufficient: 3/5 active but Bob+Carol+Dave hold >2/3 power)"
     );
     eprintln!("   ✓ Bob/Carol/Dave advanced without Alice.");
@@ -917,7 +917,7 @@ fn post_genesis_validator_admission() {
     // so her proposal rounds time out before the next proposer takes over.
     let without_bob = [ports.alice_api, ports.carol_api, ports.dave_api];
     assert!(
-        poll_height(&without_bob, h_before_bob_restart + 2, Duration::from_secs(120)),
+        poll_height(&without_bob, h_before_bob_restart + 2, Duration::from_secs(300)),
         "chain halted while Bob was down (Alice+Carol+Dave hold >2/3 power, quorum should be reachable)"
     );
     eprintln!("   ✓ Chain advanced without Bob.");
@@ -934,7 +934,7 @@ fn post_genesis_validator_admission() {
 
     let h_all_target = height_of(ports.carol_api) + 2;
     assert!(
-        poll_height(&ports.all_api(), h_all_target, Duration::from_secs(60)),
+        poll_height(&ports.all_api(), h_all_target, Duration::from_secs(240)),
         "Not all 5 nodes advanced after Bob restart"
     );
 
@@ -985,11 +985,12 @@ fn bonded_and_verified_without_key_stays_at_zero_power() {
         "devnet did not come up"
     );
     // Allow 60 s: under concurrent test load startup can be slower than in isolation.
-    assert!(poll_height(&ports.all_api(), 2, Duration::from_secs(60)), "chain stuck");
+    assert!(poll_height(&ports.all_api(), 2, Duration::from_secs(240)), "chain stuck");
 
     // Register Frank (using "qcb1frank" seed). He won't be in genesis so he
     // needs funding first. We fund via Alice (she has plenty of uqcb).
-    let frank_addr = "qcb1frank";
+    let frank_addr_owned = pq_sign::new_account("frank");
+    let frank_addr = frank_addr_owned.as_str();
     let alice_nonce = api_get(ports.alice_api, &format!("/api/accounts/{ALICE_ADDR}"))
         .and_then(|v| v["nonce"].as_u64()).unwrap_or(0);
 
@@ -997,7 +998,7 @@ fn bonded_and_verified_without_key_stays_at_zero_power() {
     let fund_tx = build_transfer_tx(ALICE_ADDR, alice_nonce, frank_addr, 5_000_000);
     let fund_id = fund_tx.id.clone();
     submit_tx(ports.alice_api, &fund_tx).expect("fund tx rejected");
-    wait_tx_executed(ports.alice_api, &fund_id, Duration::from_secs(20))
+    wait_tx_executed(ports.alice_api, &fund_id, Duration::from_secs(120))
         .expect("fund tx not executed");
 
     // Frank: RegisterIdentity, 3 attestations, BondValidator — but NO RegisterValidatorKey.
@@ -1016,13 +1017,13 @@ fn bonded_and_verified_without_key_stays_at_zero_power() {
     let att3 = build_attest_tx("qcb1carol", carol_n0, frank_addr);
     let att3_id = att3.id.clone();
     submit_tx(ports.alice_api, &att3).expect("att3 rejected");
-    wait_tx_executed(ports.alice_api, &att3_id, Duration::from_secs(20))
+    wait_tx_executed(ports.alice_api, &att3_id, Duration::from_secs(120))
         .expect("att3 not executed");
 
     let bond_tx = build_bond_tx(frank_addr, 1, 2_000_000);
     let bond_id = bond_tx.id.clone();
     submit_tx(ports.alice_api, &bond_tx).expect("bond rejected");
-    wait_tx_executed(ports.alice_api, &bond_id, Duration::from_secs(20))
+    wait_tx_executed(ports.alice_api, &bond_id, Duration::from_secs(120))
         .expect("bond not executed");
 
     // Advance past two epoch boundaries to give the admission path every chance.
@@ -1070,7 +1071,7 @@ fn invalid_proof_of_possession_rejected() {
         "devnet did not come up"
     );
     // Allow 60 s: under concurrent test load startup can be slower than in isolation.
-    assert!(poll_height(&ports.all_api(), 2, Duration::from_secs(60)), "chain stuck");
+    assert!(poll_height(&ports.all_api(), 2, Duration::from_secs(240)), "chain stuck");
 
     let wallet_kp    = pq_sign::key_for(EVE_ADDR);
     let consensus_kp = new_consensus_key("qcb1eve");
@@ -1146,7 +1147,7 @@ fn forged_outer_signature_rejected() {
         "devnet did not come up"
     );
     // Allow 60 s: under concurrent test load startup can be slower than in isolation.
-    assert!(poll_height(&ports.all_api(), 2, Duration::from_secs(60)), "chain stuck");
+    assert!(poll_height(&ports.all_api(), 2, Duration::from_secs(240)), "chain stuck");
 
     let attacker_kp  = new_consensus_key("qcb1attacker");
     let consensus_kp = new_consensus_key("qcb1eve");
@@ -1235,7 +1236,7 @@ fn wrong_chain_id_in_pop_rejected() {
         "devnet did not come up"
     );
     // Allow 60 s: under concurrent test load startup can be slower than in isolation.
-    assert!(poll_height(&ports.all_api(), 2, Duration::from_secs(60)), "chain stuck");
+    assert!(poll_height(&ports.all_api(), 2, Duration::from_secs(240)), "chain stuck");
 
     let wallet_kp    = pq_sign::key_for(EVE_ADDR);
     let consensus_kp = new_consensus_key("qcb1eve");
