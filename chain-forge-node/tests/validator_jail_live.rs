@@ -615,7 +615,9 @@ fn validator_jail_live() {
     assert!(wait_until(Duration::from_secs(900), || height(dave) + 3 >= height(alice)),
             "Dave never caught up (dave {} vs alice {})\n{}", height(dave), height(alice), tail_log(&tmp, DAVE, 40));
     let (h_all, _) = follower_agrees(dave, &live_api, Duration::from_secs(180));
-    assert!(is_jailed(dave, DAVE), "Dave's own replay did not derive Jailed");
+    // A single status read can fail while Dave is still busy catching up: retry.
+    assert!(wait_until(Duration::from_secs(60), || is_jailed(dave, DAVE)),
+            "Dave's own replay did not derive Jailed: {:?}", status_of(dave, DAVE));
     say(format!("  Dave back online and replayed to height {h_all}; his own state says Jailed"));
 
     // ── JL-08: restart a committee member ────────────────────────────────────
