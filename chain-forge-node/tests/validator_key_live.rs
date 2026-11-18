@@ -1029,10 +1029,10 @@ fn bonded_and_verified_without_key_stays_at_zero_power() {
     // Advance past two epoch boundaries to give the admission path every chance.
     // Eve is in genesis with a key but no running process — every round she is
     // proposer times out (~8 s).  Two full epochs × up to 10 Eve-proposer slots
-    // = up to 160 s worst case; allow 200 s.
+    // = up to 160 s at 8 s/block; PQ-HotStuff timeouts are longer, allow 600 s.
     let h = height_of(ports.alice_api);
     let target = ((h / 10) + 2) * 10 + 2;
-    assert!(poll_height(&ports.all_api(), target, Duration::from_secs(200)), "chain stuck");
+    assert!(poll_height(&ports.all_api(), target, Duration::from_secs(600)), "chain stuck");
 
     let frank_vs = get_validator(ports.alice_api, frank_addr);
     eprintln!("   Frank in validator set: {frank_vs:?}");
