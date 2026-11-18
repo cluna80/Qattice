@@ -1484,6 +1484,15 @@ Phase 0 milestones remain closed. Phase 0.5 adds adversarial coverage on top of 
 6. Network-wide security — post-quantum protections extend beyond wallets to validators and other critical authorization paths.
 7. Open-standard ambitions — QSWIP can eventually provide reusable security specifications for other Chain Forge chains.
 
+**Planned NFC enrollment and private credential sharing**
+
+- The Qattice wallet reads a supported NFC e-passport or ID locally, verifies the issuer signature against trusted issuer keys, and checks chip authenticity where supported. Keep source documents and any holder-verification images on-device and off-chain. Define a separate enrollment route for people without supported documents.
+- Generate a zero-knowledge proof of the required enrollment checks and bind it to wallet-controlled DIS key material. Prove that the enrollment nullifier is derived from the authenticated document under the DIS registry scope. The registry checks and records the nullifier atomically to prevent repeat enrollment of the same document. Use a privacy-preserving derivation that resists guessing from document details.
+- The wallet stores issuer-signed credentials for Qattice and external platforms that trust a DIS-compatible issuer. A QR request shows the platform and requested claims before the user approves. Present a fresh proof bound to the platform and challenge. Keep the enrollment nullifier and globally reused public keys out of platform presentations. Use a platform-scoped nullifier only when the platform requires repeat-use detection.
+- Treat document deduplication and one-person eligibility as separate checks. Define holder verification and how reissuance, revocation, and wallet recovery affect enrollment before using the credential for personhood-weighted eligibility.
+
+**First acceptance milestone:** Use test documents to verify local NFC enrollment, reject repeat enrollment of the same document, and present approved claims to two demo platforms without a shared holder identifier. Reject expired and replayed presentation challenges.
+
 **Authentication flow:**
 ```
 User opens Qattice app → QR challenge displayed
