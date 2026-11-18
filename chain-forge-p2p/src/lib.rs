@@ -588,6 +588,7 @@ pub fn check_message_size(payload: &[u8], limit: usize) -> P2pResult<()> {
 /// Phase 1 status: full implementation. Nodes can peer, gossip block
 /// proposals, consensus votes, and transactions across machines.
 pub mod bootstrap;
+pub mod peer_exchange;
 
 #[cfg(feature = "real-network")]
 pub mod real {
@@ -783,6 +784,7 @@ pub mod real {
                 "chain-forge/peer-announce/1.0.0",
                 "chain-forge/sync-request/1.0.0",
                 "chain-forge/sync-response/1.0.0",
+                PX_TOPIC,
             ] {
                 let topic = gossipsub::IdentTopic::new(topic_str);
                 swarm.behaviour_mut().gossipsub.subscribe(&topic)
@@ -821,6 +823,11 @@ pub mod real {
                 let mut peer_conn_count: HashMap<String, usize> = HashMap::new();
                 let started = std::time::Instant::now();
                 let mut redial_tick = tokio::time::interval(Duration::from_millis(500));
+                // Peer exchange (see peer_exchange.rs): learn and share peers' listen
+                // addresses so validators form a mesh, not a star around the bootstrap node.
+                let mut px = crate::peer_exchange::PeerExchange::new();
+                let mut own_addrs: std::collections::HashSet<String> = Default::default();
+                let mut px_tick = tokio::time::interval(Duration::from_secs(5));
 
                 loop {
                     tokio::select! {
@@ -829,6 +836,22 @@ pub mod real {
                             for a in bootstrap_retry.due(started.elapsed()) {
                                 if let Ok(addr) = a.parse::<Multiaddr>() {
                                     tracing::debug!(%a, "redialling bootstrap peer");
+                                    let _ = swarm.dial(addr);
+                                }
+                            }
+                        }
+                        _ = px_tick.tick() => {
+                            let connected: std::collections::HashSet<String> = peer_conn_count.keys().cloned().collect();
+                            let ann = px.announcement(&connected);
+                            if !ann.peers.is_empty() {
+                                let _ = swarm.behaviour_mut().gossipsub.publish(
+                                    gossipsub::IdentTopic::new(PX_TOPIC),
+                                    serde_json::to_vec(&ann).unwrap_or_default(),
+                                );
+                            }
+                            for a in px.due_dials(&connected, &own_addrs, std::time::Instant::now()) {
+                                if let Ok(addr) = a.parse::<Multiaddr>() {
+                                    tracing::debug!(%a, "peer exchange: dialling");
                                     let _ = swarm.dial(addr);
                                 }
                             }
@@ -878,6 +901,7 @@ pub mod real {
                         event = swarm.select_next_some() => {
                             match event {
                                 SwarmEvent::NewListenAddr { address, .. } => {
+                                    own_addrs.insert(address.to_string());
                                     tracing::info!(
                                         addr = %address,
                                         peer = %local_peer_id,
@@ -892,6 +916,12 @@ pub mod real {
                                 SwarmEvent::Behaviour(ChainForgeBehaviourEvent::Gossipsub(
                                     gossipsub::Event::Message { message, .. }
                                 )) => {
+                                    if message.topic.as_str() == PX_TOPIC {
+                                        if let Ok(ann) = serde_json::from_slice::<crate::peer_exchange::Announcement>(&message.data) {
+                                            px.merge(&ann, &local_peer_id.to_string(), &own_addrs);
+                                        }
+                                        continue;
+                                    }
                                     if let Some(gt) = gossip_topic_from(&message.topic) {
                                         let from = message.source
                                             .map(|p| PeerId(p.to_string()))
@@ -1027,6 +1057,7 @@ pub mod real {
                                 SwarmEvent::Behaviour(ChainForgeBehaviourEvent::Identify(
                                     identify::Event::Received { peer_id, info, .. }
                                 )) => {
+                                    px.record(&peer_id.to_string(), info.listen_addrs.iter().map(|a| a.to_string()));
                                     // agent_version format: "chain-forge-node/<genesis_hash>"
                                     const PREFIX: &str = "chain-forge-node/";
                                     if let Some(hash) = info.agent_version.strip_prefix(PREFIX) {
@@ -1127,6 +1158,9 @@ pub mod real {
     }
 
     // -- Topic helpers --------------------------------------------------------
+
+    /// Internal peer-exchange topic; never surfaced to the node.
+    const PX_TOPIC: &str = "chain-forge/peer-exchange/1.0.0";
 
     fn topic_str_for(topic: &GossipTopic) -> &'static str {
         match topic {

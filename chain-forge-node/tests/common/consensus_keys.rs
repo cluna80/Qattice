@@ -1,13 +1,14 @@
-//! `CF_CONSENSUS_KEYS=mldsa` runs a live test on ML-DSA-65 consensus keys
-//! (owner decision 2026-10-28): the test's genesis is copied with every
+//! Live tests run on ML-DSA-65 consensus keys (owner decision 2026-10-28;
+//! Ed25519 retired 2026-10-30): the test's genesis is copied with every
 //! validator key replaced by the committed devnet ML-DSA key
 //! (`tests/devnet/keys/mldsa/`) and `validator_scheme = "ml-dsa-65"`, and
-//! validators load those key files. Unset, the test runs unchanged.
+//! validators load those key files. `CF_CONSENSUS_KEYS=classical` restores the
+//! test's own genesis and key files (classical-compatibility fixtures only).
 
 use std::path::{Path, PathBuf};
 
 pub fn mldsa() -> bool {
-    std::env::var("CF_CONSENSUS_KEYS").map(|v| v == "mldsa").unwrap_or(false)
+    std::env::var("CF_CONSENSUS_KEYS").map(|v| v != "classical").unwrap_or(true)
 }
 
 fn mldsa_key_dir() -> PathBuf {

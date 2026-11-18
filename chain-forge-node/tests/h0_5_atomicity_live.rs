@@ -218,7 +218,8 @@ fn spawn_node(
         "--api-port",  &api_port.to_string(),
         "--p2p-port",  &p2p_port.to_string(),
     ]);
-    if let Some(d) = data_dir {
+    let d = data_dir.map(|d| d.to_path_buf()).unwrap_or_else(|| fresh_data_dir(&key_file));
+    {
         cmd.args(["--data-dir", d.to_str().unwrap()]);
     }
     for b in bootstraps {
@@ -531,4 +532,15 @@ fn h0_5_execution_atomicity_multi_node() {
         for n in &restarted { print_tail(&n.log_path, 20); }
     }
     println!("\n   H0-5 live: H5-1..H5-5 passed");
+}
+
+/// A fresh data directory for one node start. A validator needs one for its
+/// double-sign protection (the node refuses --key-file without --data-dir).
+fn fresh_data_dir(key_file: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let stem = key_file.as_ref().file_stem().and_then(|s| s.to_str()).unwrap_or("node").to_string();
+    let d = std::env::temp_dir().join(format!("qcb-data-{}-{stem}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+    let _ = std::fs::remove_dir_all(&d);
+    d
 }

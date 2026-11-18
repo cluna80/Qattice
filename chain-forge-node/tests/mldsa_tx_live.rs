@@ -220,6 +220,11 @@ fn spawn_node(
        .arg("--api-port").arg(api_port.to_string())
        .arg("--p2p-port").arg(p2p_port.to_string());
     if !bootstrap.is_empty() { cmd.arg("--bootstrap").arg(bootstrap); }
+    let data_dir = match (&key_file, data_dir) {
+        (_, Some(dd)) => Some(dd),
+        (Some(kf), None) => Some(fresh_data_dir(kf)),
+        (None, None) => None,
+    };
     if let Some(kf) = key_file {
         cmd.arg("--key-file").arg(kf);
     }
@@ -660,4 +665,15 @@ fn mldsa_tx_signing_enforcement() {
     eprintln!("\n══ P0-3/P0-4/P0-5/P0-6: PASS ═══════════════════════════════════════");
     eprintln!("   ML-DSA-65 signature enforcement confirmed on 4-node devnet.");
     eprintln!("   require_signatures: true — all four criteria satisfied.");
+}
+
+/// A fresh data directory for one node start. A validator needs one for its
+/// double-sign protection (the node refuses --key-file without --data-dir).
+fn fresh_data_dir(key_file: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let stem = key_file.as_ref().file_stem().and_then(|s| s.to_str()).unwrap_or("node").to_string();
+    let d = std::env::temp_dir().join(format!("qcb-data-{}-{stem}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+    let _ = std::fs::remove_dir_all(&d);
+    d
 }
