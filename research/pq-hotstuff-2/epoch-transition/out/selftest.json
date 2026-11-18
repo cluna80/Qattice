@@ -1,0 +1,10 @@
+{
+ "config": "selftest",
+ "command": "java -XX:+UseParallelGC -Xmx6g -cp /tmp/claude-0/-home-user/035c2905-d7b6-5dfd-921f-7259c4e0a6ef/scratchpad/tla/tla2tools.jar tlc2.TLC -workers 4 -metadir /tmp/tlc-meta-selftest -config /home/user/chain-forge-engine/research/pq-hotstuff-2/epoch-transition/cfg/selftest.cfg /home/user/chain-forge-engine/research/pq-hotstuff-2/epoch-transition/SelfTest.tla",
+ "seconds": 2.0,
+ "timed_out": false,
+ "states_generated": 1,
+ "distinct_states": 1,
+ "depth": 1,
+ "result": "no violation (complete within bounds)"
+}
