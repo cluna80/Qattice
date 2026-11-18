@@ -249,9 +249,22 @@ fn current_height(port: u16) -> u64 {
 
 // ── Tx builders ───────────────────────────────────────────────────────────────
 
+/// The pilot account is bound in genesis-dis003d.json to the committed fixture
+/// key; ML-DSA keygen is random per process, so load that file for the pilot
+/// seed (as dis_003d does) and generate every other key.
+fn keypair_for(seed: &str) -> chain_forge_crypto::KeyPair {
+    if seed != SEED_PILOT {
+        return MlDsaScheme.generate_keypair(seed).expect("keygen");
+    }
+    let path = manifest_dir().join("tests").join("devnet").join("keys").join("dis003d-pilot.key.json");
+    let k: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).expect("pilot fixture")).unwrap();
+    let hex = |f: &str| -> Vec<u8> { let h = k[f].as_str().unwrap(); (0..h.len()).step_by(2).map(|i| u8::from_str_radix(&h[i..i + 2], 16).unwrap()).collect() };
+    chain_forge_crypto::KeyPair { scheme: SchemeId::MlDsa, public_key: hex("public_key"), private_key: hex("private_key") }
+}
+
 fn ml_dsa_tx(seed: &str, sender: &str, nonce: u64, body: TxBody,
              tx_id: &str, gas: u64) -> Transaction {
-    let kp        = MlDsaScheme.generate_keypair(seed).expect("keygen");
+    let kp        = keypair_for(seed);
     let body_json = serde_json::to_string(&body).expect("body serialise");
     let msg       = mldsa_tx_prehash(CHAIN_ID, body_json.as_bytes());
     let sig       = MlDsaScheme.sign(&msg, &kp).expect("sign");
@@ -306,7 +319,7 @@ fn build_recover(
             }
         }).collect();
 
-    let kp_sender = MlDsaScheme.generate_keypair(SEED_PILOT).expect("sender keygen");
+    let kp_sender = keypair_for(SEED_PILOT);
     let body      = TxBody::RecoverAccountKey {
         new_public_key:      new_kp.public_key.clone(),
         new_key_scheme:      "ml-dsa-65".to_string(),
