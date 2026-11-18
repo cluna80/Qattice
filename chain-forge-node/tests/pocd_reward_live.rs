@@ -130,6 +130,9 @@ fn node_binary() -> PathBuf {
     }
 }
 
+#[path = "common/pq_sign.rs"]
+mod pq_sign;
+
 fn genesis_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests").join("devnet").join("genesis-pocd.json")
@@ -137,7 +140,7 @@ fn genesis_path() -> PathBuf {
 
 fn key_file(label: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests").join("devnet").join("keys")
+        .join("tests").join("devnet").join("keys").join("mldsa")
         .join(format!("{label}.key.json"))
 }
 
@@ -374,7 +377,7 @@ fn build_claim_tx_full(
     objective_id: &str,
     task_id:      &str,
 ) -> String {
-    serde_json::json!({
+    let tx = serde_json::json!({
         "id":        tx_id,
         "sender":    sender,
         "nonce":     nonce,
@@ -393,7 +396,10 @@ fn build_claim_tx_full(
             }
         },
         "signature": []
-    }).to_string()
+    }).to_string();
+    // pqc-native chain: signed by the sender, so authority checks (not a missing
+    // signature) decide whether a claim is accepted.
+    pq_sign::sign_json(&tx, &pq_sign::chain_id_of(&genesis_path()))
 }
 
 // ── Test ──────────────────────────────────────────────────────────────────────
