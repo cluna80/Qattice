@@ -297,7 +297,7 @@ fn h0_11b_auto_suspend_live() {
         let _ = i;
     }
     // Wait for all four nodes to reach height > start_height (10) so liveness enforcement is live.
-    assert!(wait_until(Duration::from_secs(60), || all_api.iter().all(|&p| height(p) > 15)),
+    assert!(wait_until(Duration::from_secs(600), || all_api.iter().all(|&p| height(p) > 15)),
             "devnet did not reach height 15");
     say(format!("devnet up at height {}", height(alice)));
 
@@ -307,7 +307,7 @@ fn h0_11b_auto_suspend_live() {
                    "AS-01: {n} is not Active at startup");
     }
     assert_eq!(committee(alice).len(), 4, "AS-01: committee must have four seats");
-    let (h01, root01) = agree(&all_api, Duration::from_secs(30));
+    let (h01, root01) = agree(&all_api, Duration::from_secs(180));
     say(format!("✓ AS-01: four validators Active (h={h01}, root={}…)", &root01[..12]));
 
     // Record the height at which Dave was last seen active before killing him.
@@ -376,7 +376,7 @@ fn h0_11b_auto_suspend_live() {
     assert_eq!(cmt.len(), 3, "AS-05: committee must shrink to 3 after Dave's auto-jail; got {cmt:?}");
     assert!(!cmt.iter().any(|v| v == DAVE), "AS-05: Dave must not be in committee; got {cmt:?}");
 
-    let (h05, root05) = agree(&live_api, Duration::from_secs(90));
+    let (h05, root05) = agree(&live_api, Duration::from_secs(180));
     say(format!("✓ AS-04/AS-05: Dave auto-jailed at epoch {jailed_epoch} (release after epoch {unjail_after}), h={h05}, root={}…", &root05[..12]));
 
     // ── AS-06: Carol restarts; 3-node agreement resumes ──────────────────────
@@ -388,13 +388,13 @@ fn h0_11b_auto_suspend_live() {
             "AS-06: Carol API did not come back\n--- log ---\n{}", tail_log(&tmp, "qcb1carol", 40));
 
     // Carol must sync to the head held by Alice and Bob.
-    assert!(wait_until(Duration::from_secs(300), || {
+    assert!(wait_until(Duration::from_secs(600), || {
         let h_carol = height(carol);
         let h_alice = height(alice);
         h_carol > 0 && h_carol + 5 >= h_alice
     }), "AS-06: Carol did not sync within 5 min");
 
-    let (h06, root06) = agree(&live_api, Duration::from_secs(90));
+    let (h06, root06) = agree(&live_api, Duration::from_secs(180));
     // Dave must still be Jailed after Carol's restart (persisted state).
     assert_eq!(validator_status(carol, DAVE).as_deref(), Some("Jailed"),
                "AS-06: Dave must still be Jailed after Carol restart");

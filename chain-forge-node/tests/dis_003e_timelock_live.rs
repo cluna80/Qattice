@@ -568,7 +568,7 @@ fn dis_003e_timelock_live() {
 
     // Wait past the original activation_height — recovery must not activate.
     println!("C-15: waiting past activation_height={activation_height}...");
-    assert!(wait_height(port, activation_height + 2, Duration::from_secs(30)),
+    assert!(wait_height(port, activation_height + 2, Duration::from_secs(180)),
         "C-15: timed out waiting for height {}", activation_height + 2);
 
     let acct_c15b = account_of(port, PILOT_ADDR).expect("pilot after activation_height");

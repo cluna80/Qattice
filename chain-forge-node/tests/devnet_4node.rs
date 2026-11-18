@@ -102,7 +102,7 @@ fn node_binary() -> PathBuf {
 }
 
 /// Ed25519 consensus keys (the fallback devnet).
-const ED25519: (&str, &str) = ("genesis-4node.json", "keys");
+const ED25519: (&str, &str) = ("genesis-4node.json", "keys/mldsa"); // genesis-4node.json is ML-DSA now (Ed25519 retired)
 /// ML-DSA-65 consensus keys (owner decision 2026-10-28).
 const MLDSA: (&str, &str) = ("genesis-4node-mldsa.json", "keys/mldsa");
 
