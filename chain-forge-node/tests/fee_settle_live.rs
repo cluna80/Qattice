@@ -106,9 +106,13 @@ fn node_binary() -> PathBuf {
     }
 }
 
+#[path = "common/pq_sign.rs"]
+mod pq_sign;
+
 fn genesis_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests").join("devnet").join("genesis-fee-settle.json")
+    // ML-DSA-only chain: the funded user accounts are bound to keys this test signs with.
+    pq_sign::bind_accounts(&PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests").join("devnet").join("genesis-fee-settle.json"), &["qcb1user1", "qcb1eve"])
 }
 
 fn key_path(short_name: &str) -> PathBuf {
@@ -151,7 +155,9 @@ fn api_post_tx(port: u16, tx_json: &str) -> Option<serde_json::Value> {
         Duration::from_millis(500),
     ).ok()?;
     stream.set_read_timeout(Some(Duration::from_millis(2_000))).ok()?;
-    let body = tx_json.as_bytes();
+    // pqc-native chain: every transaction is ML-DSA-65 signed by its sender.
+    let signed = pq_sign::sign_json(tx_json, &pq_sign::chain_id_of(&genesis_path()));
+    let body = signed.as_bytes();
     let req = format!(
         "POST /api/tx HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\
          Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
