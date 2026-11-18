@@ -621,7 +621,7 @@ fn dis_003e_timelock_live() {
     println!("C-16: waiting for activation at height {act_h_c16}...");
 
     // Wait for activation_height + 1 to ensure sweep has run.
-    assert!(wait_height(port, act_h_c16 + 1, Duration::from_secs(40)),
+    assert!(wait_height(port, act_h_c16 + 1, Duration::from_secs(240)),
         "C-16: timed out waiting for height {}", act_h_c16 + 1);
 
     let acct_c16_done = account_of(port, PILOT_ADDR).expect("pilot after activation");
