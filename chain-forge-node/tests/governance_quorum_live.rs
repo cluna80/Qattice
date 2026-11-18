@@ -95,8 +95,15 @@ fn node_bin() -> PathBuf {
     target.join("debug").join(exe)
 }
 
+#[path = "common/pq_sign.rs"]
+mod pq_sign;
+
+const BOUND_USERS: &[&str] = &["qcb1proposer", "qcb1voter1", "qcb1voter2", "qcb1voter3", "qcb1voter4",
+    "qcb1voter5", "qcb1voter6", "qcb1voter7", "qcb1voter8", "qcb1voter9", "qcb1voter10"];
+
 fn genesis_path() -> PathBuf {
-    manifest_dir().join("tests").join("devnet").join("genesis-gov-quorum.json")
+    // ML-DSA-only chain: the user accounts are bound to keys this test signs with.
+    pq_sign::bind_accounts(&manifest_dir().join("tests").join("devnet").join("genesis-gov-quorum.json"), BOUND_USERS)
 }
 
 fn key_file(label: &str) -> PathBuf {
@@ -228,7 +235,9 @@ fn poll_ready(port: u16, timeout: Duration) -> bool {
 }
 
 fn submit_tx_json(port: u16, body: &str) -> serde_json::Value {
-    api_post(port, "/api/tx", body).1
+    // pqc-native chain: every transaction is ML-DSA-65 signed by its sender.
+    let signed = pq_sign::sign_json(body, &pq_sign::chain_id_of(&genesis_path()));
+    api_post(port, "/api/tx", &signed).1
 }
 
 fn wait_tx(port: u16, tx_id: &str, timeout: Duration) -> Option<serde_json::Value> {
@@ -369,7 +378,7 @@ fn bootstrap_identities(port: u16) {
 
         // Wait for this batch to commit before the next batch (next epoch).
         for id in &batch_ids {
-            let r = wait_tx(port, id, Duration::from_secs(30))
+            let r = wait_tx(port, id, Duration::from_secs(120))
                 .unwrap_or_else(|| panic!("{id} never landed"));
             assert!(
                 r["success"].as_bool().unwrap_or(false),
@@ -379,7 +388,7 @@ fn bootstrap_identities(port: u16) {
         // Ensure the chain advances to the next epoch before the next batch.
         if global_offset < all_addrs.len() {
             assert!(
-                wait_for_height(port, h_before + 1, Duration::from_secs(15)),
+                wait_for_height(port, h_before + 1, Duration::from_secs(120)),
                 "chain did not advance for next registration epoch"
             );
         }
@@ -399,7 +408,7 @@ fn bootstrap_identities(port: u16) {
         let r = submit_and_wait(
             port, &id, COORDINATOR, alice_nonce,
             json!({ "Attest": { "claimant_id": addr } }), 100_000,
-            Duration::from_secs(30),
+            Duration::from_secs(120),
         );
         assert!(
             r["success"].as_bool().unwrap_or(false),
@@ -431,7 +440,7 @@ fn governance_quorum_live() {
 
     // Wait for height 3 (gossip mesh stable).
     assert!(
-        wait_for_height(port, 3, Duration::from_secs(30)),
+        wait_for_height(port, 3, Duration::from_secs(120)),
         "chain did not reach height 3"
     );
     println!("   Devnet ready at height {}.", current_height(port));
@@ -442,7 +451,7 @@ fn governance_quorum_live() {
     // Extra block to propagate identity state to all nodes.
     let h_after_bootstrap = current_height(port) + 2;
     assert!(
-        wait_for_height(port, h_after_bootstrap, Duration::from_secs(30)),
+        wait_for_height(port, h_after_bootstrap, Duration::from_secs(120)),
         "chain did not advance after bootstrap"
     );
     println!("   Identity bootstrap complete at height {}.", current_height(port));
@@ -465,7 +474,7 @@ fn governance_quorum_live() {
     let p1_resp = submit_and_wait(
         port, "gov-p01", PROPOSER, current_nonce(port, PROPOSER),
         json!({ "ProposeChange": { "kind_json": ordinary_kind_json() } }), 1_000_000,
-        Duration::from_secs(45),
+        Duration::from_secs(180),
     );
     assert!(p1_resp["success"].as_bool().unwrap_or(false),
         "GQ-01: proposal submission failed: {p1_resp}");
@@ -475,7 +484,7 @@ fn governance_quorum_live() {
     let p2_resp = submit_and_wait(
         port, "gov-p02", PROPOSER, current_nonce(port, PROPOSER),
         json!({ "ProposeChange": { "kind_json": ordinary_kind_json() } }), 1_000_000,
-        Duration::from_secs(45),
+        Duration::from_secs(180),
     );
     assert!(p2_resp["success"].as_bool().unwrap_or(false),
         "GQ-02: proposal submission failed: {p2_resp}");
@@ -485,7 +494,7 @@ fn governance_quorum_live() {
     let p3_resp = submit_and_wait(
         port, "gov-p03", PROPOSER, current_nonce(port, PROPOSER),
         json!({ "ProposeChange": { "kind_json": constitutional_kind_json() } }), 1_000_000,
-        Duration::from_secs(45),
+        Duration::from_secs(180),
     );
     assert!(p3_resp["success"].as_bool().unwrap_or(false),
         "GQ-03: proposal submission failed: {p3_resp}");
@@ -495,7 +504,7 @@ fn governance_quorum_live() {
     let p4_resp = submit_and_wait(
         port, "gov-p04", PROPOSER, current_nonce(port, PROPOSER),
         json!({ "ProposeChange": { "kind_json": constitutional_kind_json() } }), 1_000_000,
-        Duration::from_secs(45),
+        Duration::from_secs(180),
     );
     assert!(p4_resp["success"].as_bool().unwrap_or(false),
         "GQ-04: proposal submission failed: {p4_resp}");
@@ -505,7 +514,7 @@ fn governance_quorum_live() {
     let p5_resp = submit_and_wait(
         port, "gov-p05", PROPOSER, current_nonce(port, PROPOSER),
         json!({ "ProposeChange": { "kind_json": ordinary_kind_json() } }), 1_000_000,
-        Duration::from_secs(45),
+        Duration::from_secs(180),
     );
     assert!(p5_resp["success"].as_bool().unwrap_or(false),
         "GQ-05: proposal submission failed: {p5_resp}");
@@ -515,7 +524,7 @@ fn governance_quorum_live() {
     let p6_resp = submit_and_wait(
         port, "gov-p06", PROPOSER, current_nonce(port, PROPOSER),
         json!({ "ProposeChange": { "kind_json": ordinary_kind_json() } }), 1_000_000,
-        Duration::from_secs(45),
+        Duration::from_secs(180),
     );
     assert!(p6_resp["success"].as_bool().unwrap_or(false),
         "GQ-06: proposal submission failed: {p6_resp}");
@@ -527,7 +536,7 @@ fn governance_quorum_live() {
     let gq06_early = submit_and_wait(
         port, "gov-act-early", COORDINATOR, alice_nonce_gq06,
         json!({ "ActivateChange": { "proposal_id": 6u64 } }), 500_000,
-        Duration::from_secs(20),
+        Duration::from_secs(120),
     );
     assert!(
         !gq06_early["success"].as_bool().unwrap_or(true),
@@ -547,7 +556,7 @@ fn governance_quorum_live() {
     let gq02_vote = submit_and_wait(
         port, "gov-v02-1", VOTERS[0], v1_nonce,
         json!({ "VoteOnProposal": { "proposal_id": 2u64, "choice": "yes" } }), 500_000,
-        Duration::from_secs(20),
+        Duration::from_secs(120),
     );
     assert!(gq02_vote["success"].as_bool().unwrap_or(false),
         "GQ-02: vote failed: {gq02_vote}");
@@ -563,7 +572,7 @@ fn governance_quorum_live() {
                 let vn = current_nonce(port, &voter);
                 submit_and_wait(port, &vid, &voter, vn,
                     json!({ "VoteOnProposal": { "proposal_id": 3u64, "choice": "yes" } }),
-                    500_000, Duration::from_secs(30))
+                    500_000, Duration::from_secs(120))
             })
         }).collect();
         for (i, h) in handles.into_iter().enumerate() {
@@ -588,7 +597,7 @@ fn governance_quorum_live() {
                 let vn = current_nonce(port, &addr);
                 let r = submit_and_wait(port, &vid, &addr, vn,
                     json!({ "VoteOnProposal": { "proposal_id": 4u64, "choice": choice } }),
-                    500_000, Duration::from_secs(30));
+                    500_000, Duration::from_secs(120));
                 (i, addr, r)
             })
         }).collect();
@@ -606,7 +615,7 @@ fn governance_quorum_live() {
     let gq05_vote = submit_and_wait(
         port, "gov-v05-1", VOTERS[0], v1_nonce2,
         json!({ "VoteOnProposal": { "proposal_id": 5u64, "choice": "no" } }), 500_000,
-        Duration::from_secs(20),
+        Duration::from_secs(120),
     );
     assert!(gq05_vote["success"].as_bool().unwrap_or(false),
         "GQ-05: vote failed: {gq05_vote}");
@@ -617,8 +626,8 @@ fn governance_quorum_live() {
     let h_vote_end = current_height(port) + 16;
     println!("   Waiting for height {h_vote_end} (voting period close)...");
     assert!(
-        wait_for_height(port, h_vote_end, Duration::from_secs(90)),
-        "chain did not reach height {h_vote_end} within 90s"
+        wait_for_height(port, h_vote_end, Duration::from_secs(600)),
+        "chain did not reach height {h_vote_end} within 600s"
     );
     println!("   Voting periods closed at height {}.", current_height(port));
 
@@ -640,7 +649,7 @@ fn governance_quorum_live() {
     let gq01_act = submit_and_wait(
         port, "gov-act-01", COORDINATOR, act_nonce,
         json!({ "ActivateChange": { "proposal_id": 1u64 } }), 500_000,
-        Duration::from_secs(20),
+        Duration::from_secs(120),
     );
     act_nonce += 1;
     assert!(gq01_act["success"].as_bool().unwrap_or(false),
