@@ -371,7 +371,7 @@ fn mn8_revoked_validator_is_excluded_from_epoch_rewards() {
     let bin = node_binary();
     assert!(bin.exists(),
         "HARD FAIL: node binary not found at {bin:?}. Run `cargo build -p chain-forge-node` first.");
-    let genesis = genesis_path();
+    let genesis = pq_sign::bind_accounts(&genesis_path(), &[USER]);
     for name in ["alice", "bob", "carol", "dave"] {
         assert!(key_path(name).exists(), "key file not found: {:?}", key_path(name));
     }

@@ -332,6 +332,11 @@ impl ConsensusEngine for PqHotStuffEngine {
         genesis_validators: ValidatorSet,
     ) -> ConsensusResult<()> {
         self.pacemaker = Pacemaker::new(config.propose_timeout_ms);
+        // Same as Tendermint: the personhood cap applies from genesis.
+        let genesis_validators = match &config.personhood {
+            Some(pc) => crate::apply_personhood_cap(genesis_validators, pc),
+            None => genesis_validators,
+        };
         self.config = config;
         self.validator_set = genesis_validators;
         self.epoch = 0;
@@ -349,8 +354,15 @@ impl ConsensusEngine for PqHotStuffEngine {
 
     fn validator_set(&self) -> &ValidatorSet { &self.validator_set }
 
-    fn update_validator_set(&mut self, vs: ValidatorSet) -> Result<(), ConsensusError> {
-        self.validator_set = vs;
+    fn update_validator_set(&mut self, mut vs: ValidatorSet) -> Result<(), ConsensusError> {
+        // Same as Tendermint: personhood cap, then the unconditional key /
+        // verification gate (a validator without PoP or a key has no power).
+        // Without this a validator whose personhood was revoked kept its full
+        // bonded stake as voting power.
+        if let Some(pc) = self.config.personhood.clone() {
+            vs = crate::apply_personhood_cap(vs, &pc);
+        }
+        self.validator_set = crate::gate_voting_power(vs);
         Ok(())
     }
 
@@ -836,6 +848,18 @@ mod tests {
         };
         e.init(config, four_node_set()).await.unwrap();
         e
+    }
+
+    #[tokio::test]
+    async fn update_validator_set_zeroes_unverified_validators() {
+        let mut e = PqHotStuffEngine::new();
+        let mut vs = four_node_set();
+        for v in &mut vs.validators { v.pop_verified = true; v.public_key = vec![1]; }
+        vs.validators[3].pop_verified = false;
+        vs.validators[3].voting_power = 2_000_000;
+        e.update_validator_set(vs).unwrap();
+        assert_eq!(e.validator_set().validators[3].voting_power, 0);
+        assert!(e.validator_set().validators[..3].iter().all(|v| v.voting_power > 0));
     }
 
     #[tokio::test]
