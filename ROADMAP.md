@@ -1493,6 +1493,17 @@ Phase 0 milestones remain closed. Phase 0.5 adds adversarial coverage on top of 
 
 **First acceptance milestone:** Use test documents to verify local NFC enrollment, reject repeat enrollment of the same document, and present approved claims to two demo platforms without a shared holder identifier. Reject expired and replayed presentation challenges.
 
+**Planned acceptance gate for decentralized DIS enrollment and sponsorship**
+
+Run a shutdown drill with two independently operated enrollment providers, independently operated Qattice nodes, and an external verifier. Take the original enrollment provider and Qattice-operated application servers offline.
+
+1. **Alternate enrollment and shared deduplication.** A new user can enroll through another authorized provider. Re-enrolling the same supported document through that provider is rejected by the shared DIS registry using the same document-scoped nullifier. This tests document deduplication. Personhood uniqueness across different documents and renewals requires separate acceptance evidence.
+2. **Recovery without the original issuer.** A previously enrolled user can recover through an independently operated route under the DIS recovery policy. Recovery preserves the same DIS identity and personhood registration, rotates the wallet key, and makes the old key unusable for new authorizations after finalization.
+3. **Independent sponsorship verification.** An external verifier authenticates finalized Qattice state using an independently operated node. It confirms that an agent has one active verified human sponsor and checks authorization scope and expiry. After a revocation finalizes, the verifier rejects the sponsorship using fresh finalized state. It does not require the issuer or a Qattice-operated API.
+
+Document who can authorize or remove enrollment providers and how that authority is distributed. Keep identity documents off-chain. Document issuers remain the trust source for their own document claims.
+
+
 **Authentication flow:**
 ```
 User opens Qattice app → QR challenge displayed
