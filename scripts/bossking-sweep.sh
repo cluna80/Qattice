@@ -6,6 +6,9 @@
 #   bash scripts/bossking-sweep.sh            # all tests
 #   bash scripts/bossking-sweep.sh mn8_reward_exclusion_live   # just some
 set -uo pipefail
+# Ensure Cargo is on PATH (Git Bash doesn't source the Rust env automatically)
+[ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
+export PATH="$HOME/.cargo/bin:$PATH"
 cd "$(dirname "$0")/.."
 export CARGO_INCREMENTAL=0
 
@@ -55,9 +58,10 @@ for t in "${TESTS[@]}"; do
   feats=$(features_for "$t")
   echo "=== $t (features: $feats)"
   start=$(date +%s)
-  cargo test -p chain-forge-node --test "$t" --features "$feats" -- --nocapture --test-threads=1 \
+  timeout 1800 cargo test -p chain-forge-node --test "$t" --features "$feats" -- --nocapture --test-threads=1 \
     > "$OUT/$t.log" 2>&1
   rc=$?
+  [ $rc -eq 124 ] && echo "TIMEOUT after 1800s" >> "$OUT/$t.log"
   secs=$(( $(date +%s) - start ))
   line=$(grep -E '^test result' "$OUT/$t.log" | tail -1 | sed 's/test result: //; s/; finished.*//')
   [ -z "$line" ] && line="did not run (see log)"

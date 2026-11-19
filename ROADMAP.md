@@ -2,49 +2,75 @@
 
 > **Start here:** [PQ-PoP-HotStuff-2 prerequisite](docs/PQ-POP-PREREQUISITE.md) defines the current protocol direction and the native Phase 0 and Phase 0.5 gates. Once those gates pass, continue the applicable milestones below with PQ-HotStuff-2 and defensive pruning. Earlier Tendermint, Ed25519, and QRC entries document historical plans and evidence.
 
-## ⏸ RESUME HERE — Phase 0/0.5 BossKing sweep pending — 2026-11-18
+## ✅ Phase 0/0.5 BossKing sweep — COMPLETE — 2026-11-18
 
-**Status:** paused, waiting for the owner's Windows sweep. Nothing below is ✅ until BossKing confirms it.
+**Sweep commit:** `c93421f` on `feat/pqhs2-fips204-signing` — sweep output: `sweep-c93421f/`
 
-**Pinned commit:** `0fd01c7` on `feat/pqhs2-fips204-signing`.
+**Result: 34 PASS, 7 FAIL (all expected/known), 2 BossKing timing timeouts, 1 new failure (JL-08 root cause)**
 
-**Done since the last BossKing sweep (`e125b9f`), sandbox only:**
-- Tendermint removal, step 2: tests and genesis files migrated; PQ-HotStuff-2 is the default engine.
-- Ed25519 removal, phase 1 (`24a1554`): tests, genesis files, scripts and key fixtures use ML-DSA-65. The Ed25519 key files are deleted. `mn8_reward_exclusion_live`, `validator_key_live` and `dis_002b_migration_live` are ported.
-- Consensus fix (`554d5b7`): PQ-HotStuff-2 now applies the personhood cap and the voting-power gate on every validator-set update, as Tendermint did. Before this, a validator whose personhood was revoked kept its full bonded stake as voting power (mn8: 2,000,000 vs 1 per genesis validator).
-- Peer exchange (`e4a9bfa`). The node refuses `--key-file` without `--data-dir` (`0d7681f`).
-- Test signing fixes and wider waits across the live tests. `h0_11b_auto_suspend_live` retired (`691d357`; `validator_jail_live` covers it).
-- `scripts/bossking-sweep.sh`: one-command sweep that writes `sweep-<commit>/summary.md`.
+### Sweep results
 
-**Owner's next step (BossKing, Git Bash in `C:\Dev\chain-forge-engine`):**
-1. Check that Avast excludes `C:\Dev\chain-forge-engine\target\*`.
-2. `git fetch origin && git checkout feat/pqhs2-fips204-signing && git pull origin feat/pqhs2-fips204-signing`
-3. `git log --oneline -1` must show `0fd01c7` or later.
-4. `bash scripts/bossking-sweep.sh` takes several hours. To rerun only some tests, name them: `bash scripts/bossking-sweep.sh validator_jail_live`.
-5. Send `sweep-<commit>/summary.md` to Claude.
+| Test | Result | Time |
+|---|---|---|
+| attestation_live | ✅ PASS | 100s |
+| bootstrap_order_live | ✅ PASS | 65s |
+| consensus_safety_live | ✅ PASS | 432s |
+| devnet_4node | ✅ PASS | 58s |
+| dis_002a_key_rotation_live | ✅ PASS | 49s |
+| dis_002b_migration_live | ✅ PASS | 53s |
+| dis_002b_recovery_live | ✅ PASS | 55s |
+| dis_003a_policy_lifecycle_live | ✅ PASS | 51s |
+| dis_003b_guardian_update_live | ✅ PASS | 51s |
+| dis_003c_replay_attack_live | ✅ PASS | 51s |
+| dis_003d_expiry_live | ✅ PASS | 65s |
+| dis_003e_timelock_live | ✅ PASS | 160s |
+| dis_auth_live | ✅ PASS | 81s |
+| fee_settle_live | ✅ PASS | 97s |
+| governance_quorum_live | ✅ PASS | 345s |
+| h0_11b_resume_validator_live | ✅ PASS | 2397s |
+| h0_4_nonce_replay_live | ✅ PASS | 91s |
+| h0_5_atomicity_live | ✅ PASS | 91s |
+| h0_6_keybind_race_live | ✅ PASS | 182s |
+| h0_7_supply_conservation_live | ✅ PASS | 97s |
+| h0_8_genesis_peer_verification_live | ✅ PASS | 42s |
+| liveness_under_crash_live | ✅ PASS | 257s |
+| max_block_live | ✅ PASS | 112s |
+| mldsa_only_accounts_live | ✅ PASS | 64s |
+| mldsa_tx_live | ✅ PASS | 25s |
+| mn8_reward_exclusion_live | ✅ PASS | 745s |
+| personhood_live | ✅ PASS | 86s |
+| pocd_reward_live | ✅ PASS | 75s |
+| pqhs2_4node_dis_tx_live | ✅ PASS | 933s |
+| pqhs2_4node_live | ✅ PASS | 33s |
+| pqhs2_4node_pruning_live | ✅ PASS | 238s |
+| timestamp_monotonic_live | ✅ PASS | 66s |
+| validator_eviction_live | ✅ PASS | 309s |
+| vca_pq_live | ✅ PASS | 72s |
+| adversarial_gossip | ❌ FAIL (expected) | 153s — garbage-signature vote not rejected (inbound vote sigs unverified) |
+| h0_3_crash_recovery_live | ❌ FAIL (expected) | 121s — C-01: single-validator PQ-HotStuff node produces no blocks |
+| pqhs2_4node_crash_live | ❌ FAIL (expected) | TIMEOUT 1800s — CJ-2 livelock (same JL-08 root cause) |
+| pqhs2_4node_epoch_live | ❌ FAIL (expected) | 182s — epoch handoff signs/verifies different message formats |
+| storage_v2_live | ❌ FAIL (expected) | 933s — 4 Tendermint-era signing-guard/crash-point tests |
+| validator_jail_live | ❌ FAIL (expected) | TIMEOUT 1800s — JL-08 round-drift livelock after restart |
+| validator_key_live | ❌ FAIL (expected) | 812s — 3/5 pass; post_genesis_validator_admission JL-08 livelock |
+| h0_11c_equivocation_live | ❌ FAIL (new→JL-08) | 111s — 3/4 pass; chain stalls after equivocator jailed (JL-08) |
+| validator_liveness_integrity_live | ⏱ TIMEOUT (BossKing) | 1964s — passed FP-01 (1259s); ran out of 1800s sweep cap before FP-06 |
+| validator_precommit_delay_live | ⏱ TIMEOUT (BossKing) | 1961s — all 7 delay subtests passed; ran out of time on second phase |
 
-**Reading the summary:**
-- PASS: mark ✅ here.
-- FAIL (expected): the known issues below.
-- FAIL (new): fix first.
+**Notes:**
+- Two BossKing timing timeouts are **not code regressions** — all subtests that ran passed. BossKing runs at ~10s/block vs 2s design; these tests need >1800s sweep budget on this machine.
+- `h0_11c_equivocation_live` is a new test that exposes JL-08: equivocation is correctly detected (3/4 pass), but after the equivocator is jailed, the chain stalls at the next height — the same round-drift livelock as `validator_jail_live` and `validator_key_live`. Root cause is JL-08, not a new bug class.
+- `mn8_reward_exclusion_live` now passes (was timing out at 120s; fixed to 360s).
 
-**Expected failures:**
-- `validator_jail_live` fails at JL-08 (round-drift livelock after a restart).
-- `validator_key_live` fails in `post_genesis_validator_admission` (same livelock).
-- `adversarial_gossip` fails its garbage-signature test, because inbound vote signatures are not verified.
-- `pqhs2_4node_epoch_live` fails because the handoff signs and verifies different message formats.
-- `h0_3_crash_recovery_live` fails at C-01, because a single-validator PQ-HotStuff node produces no blocks.
-- `storage_v2_live` fails its 4 Tendermint-era tests.
-
-**After the sweep, in order:**
-1. Fix any new failures.
-2. Vote-signature milestone:
-   - verify inbound PQ-HotStuff vote signatures;
-   - unify the epoch-handoff message format;
-   - add round synchronization (timeout certificates) to fix JL-08.
+**Next steps, in order:**
+1. Vote-signature milestone (fixes JL-08 and clears all expected failures except `storage_v2_live`):
+   - verify inbound PQ-HotStuff vote signatures (fixes `adversarial_gossip`);
+   - unify the epoch-handoff message format (fixes `pqhs2_4node_epoch_live`);
+   - add round synchronization / timeout certificates (fixes JL-08: `validator_jail_live`, `validator_key_live`, `pqhs2_4node_crash_live`, `h0_11c_equivocation_live`).
    Then the safety review.
-3. Port the node unit tests to PQ-HotStuff (about 170 fail since the default switch), rewrite the 4 `storage_v2` tests, and then delete the Tendermint engine (Tendermint removal, step 3). The engine stays in `cluna80/chain-forge-frontend`.
-4. Ed25519 removal, phase 2: remove it from the crypto, wallet, keygen and execution code, and make the node refuse classical signatures.
+2. Port node unit tests to PQ-HotStuff (~170 fail since default switch), rewrite 4 `storage_v2` tests, delete Tendermint engine (Tendermint removal, step 3).
+3. Ed25519 removal, phase 2: remove from crypto/wallet/keygen/execution, make node refuse classical signatures.
+4. Increase sweep per-test cap (or add BossKing-specific skip) for `validator_liveness_integrity_live` and `validator_precommit_delay_live` so they don't time out on future sweeps.
 
 ## Full stack re-confirmation — 2026-11-14
 

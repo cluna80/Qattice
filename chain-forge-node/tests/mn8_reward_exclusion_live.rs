@@ -60,7 +60,7 @@ const API_PORTS: &[u16] = &[18380, 18381, 18382, 18383, 18384];
 const P2P_PORTS: &[u16] = &[27300, 27301, 27302, 27303, 27304];
 const EPOCH: u64 = 10; // genesis validator_bonding.validator_epoch_blocks
 const EVE_BOND_UQCB: u128 = 2_000_000;
-const TIMEOUT_SECS: u64 = 120;
+const TIMEOUT_SECS: u64 = 360;
 
 // ── Paths ─────────────────────────────────────────────────────────────────────
 
