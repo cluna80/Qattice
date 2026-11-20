@@ -22,6 +22,19 @@ pub enum InstError {
 
     #[error("serialization error: {0}")]
     SerializationError(String),
+
+    #[error("invalid validator key: {key_type} public key must be {expected_bytes} bytes, got {actual_bytes}")]
+    InvalidValidatorKey {
+        key_type: String,
+        expected_bytes: usize,
+        actual_bytes: usize,
+    },
+
+    #[error("duplicate validator: {0}")]
+    DuplicateValidator(String),
+
+    #[error("I/O error: {0}")]
+    Io(String),
 }
 
 pub type InstResult<T> = Result<T, InstError>;

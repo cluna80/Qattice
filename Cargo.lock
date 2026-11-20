@@ -922,6 +922,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "chain-forge-institutional"
+version = "0.1.0"
+dependencies = [
+ "chain-forge-core",
+ "chrono",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "chain-forge-intelligence"
 version = "0.1.0"
 dependencies = [

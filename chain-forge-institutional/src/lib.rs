@@ -21,6 +21,9 @@ use sha2::{Digest, Sha256};
 pub mod error;
 pub mod templates;
 pub mod genesis;
+pub mod validator;
+pub mod domain;
+pub mod quorum;
 
 pub use error::{InstError, InstResult};
 pub use templates::{
@@ -28,7 +31,10 @@ pub use templates::{
     EducationConfig, EnterpriseConfig, EmergencyAccessPolicy,
     AuditPolicy, VcStandard,
 };
-pub use genesis::{GenesisBuilder, GenesisArtifact};
+pub use genesis::{GenesisBuilder, GenesisArtifact, GenesisCommitment, ValidatorCommitment};
+pub use validator::{ValidatorPublicKey, ValidatorKeyType, ML_DSA_65_PUBLIC_KEY_BYTES, ED25519_PUBLIC_KEY_BYTES};
+pub use domain::TransactionDomain;
+pub use quorum::{bft_quorum, BftParams};
 
 // ── Template identity ─────────────────────────────────────────────────────────
 
@@ -122,6 +128,24 @@ impl CryptoPolicy {
         match self {
             Self::MlDsa65 | Self::Hybrid => Some("ml-dsa"),
             Self::Ed25519 => None,
+        }
+    }
+
+    /// Expected public key size in bytes for placeholder generation.
+    pub fn placeholder_key_bytes(&self) -> usize {
+        match self {
+            Self::MlDsa65 => crate::validator::ML_DSA_65_PUBLIC_KEY_BYTES,
+            Self::Ed25519 => crate::validator::ED25519_PUBLIC_KEY_BYTES,
+            Self::Hybrid  => crate::validator::ML_DSA_65_PUBLIC_KEY_BYTES,
+        }
+    }
+
+    /// Key type string for the genesis validator commitment.
+    pub fn key_type_str(&self) -> &'static str {
+        match self {
+            Self::MlDsa65 => "ml-dsa-65",
+            Self::Ed25519 => "ed25519",
+            Self::Hybrid  => "hybrid",
         }
     }
 }
@@ -319,7 +343,7 @@ pub fn validate_chain_id(id: &str) -> InstResult<()> {
             "chain_id too long: {} chars (max 64)", id.len()
         )));
     }
-    if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    if !id.chars().all(|c| c.is_ascii_digit() || c.is_ascii_lowercase() || c == '-') {
         return Err(InstError::InvalidChainId(format!(
             "chain_id '{}' contains invalid characters (only a-z, 0-9, '-' allowed)", id
         )));
@@ -372,11 +396,12 @@ mod tests {
     fn test_genesis_determinism() {
         let spec = healthcare_spec("hospital-determinism-1", 4);
         spec.validate().expect("spec must be valid");
-        let artifact1 = GenesisBuilder::new(spec.clone()).build().expect("build 1");
-        let artifact2 = GenesisBuilder::new(spec).build().expect("build 2");
+        // Use explicit timestamp for determinism.
+        let artifact1 = GenesisBuilder::new(spec.clone()).with_explicit_timestamp(0).build().expect("build 1");
+        let artifact2 = GenesisBuilder::new(spec).with_explicit_timestamp(0).build().expect("build 2");
         assert_eq!(
             artifact1.genesis_hash, artifact2.genesis_hash,
-            "same spec must produce identical genesis hash"
+            "same spec+timestamp must produce identical genesis hash"
         );
     }
 
@@ -387,8 +412,8 @@ mod tests {
         spec_a.validate().expect("spec_a valid");
         spec_b.validate().expect("spec_b valid");
 
-        let artifact_a = GenesisBuilder::new(spec_a.clone()).build().expect("build a");
-        let artifact_b = GenesisBuilder::new(spec_b.clone()).build().expect("build b");
+        let artifact_a = GenesisBuilder::new(spec_a.clone()).with_explicit_timestamp(0).build().expect("build a");
+        let artifact_b = GenesisBuilder::new(spec_b.clone()).with_explicit_timestamp(0).build().expect("build b");
 
         assert_ne!(artifact_a.genesis_hash, artifact_b.genesis_hash,
             "different chain IDs must produce different genesis hashes");
@@ -485,5 +510,219 @@ mod tests {
                 spec.template.template_id_str()
             );
         }
+    }
+
+    // ── Phase 2 tests ─────────────────────────────────────────────────────────
+
+    /// P2-1: Identical spec+timestamp must produce identical genesis hash.
+    #[test]
+    fn test_p2_genesis_determinism() {
+        let spec = healthcare_spec("p2-determinism", 4);
+        let a1 = GenesisBuilder::new(spec.clone()).with_explicit_timestamp(1000).build().unwrap();
+        let a2 = GenesisBuilder::new(spec).with_explicit_timestamp(1000).build().unwrap();
+        assert_eq!(a1.genesis_hash, a2.genesis_hash, "identical inputs must hash identically");
+    }
+
+    /// P2-2: Changing any consensus-relevant field must change the genesis hash.
+    #[test]
+    fn test_p2_genesis_mutation_detection() {
+        let base = healthcare_spec("p2-mutation", 4);
+        let base_hash = GenesisBuilder::new(base.clone()).with_explicit_timestamp(0).build().unwrap().genesis_hash;
+
+        // Change chain_id.
+        let mut s = base.clone(); s.chain_id = "p2-mutation-alt".to_string();
+        let h = GenesisBuilder::new(s).with_explicit_timestamp(0).build().unwrap().genesis_hash;
+        assert_ne!(base_hash, h, "changing chain_id must change genesis hash");
+
+        // Change validator count (uses placeholder keys — count changes commitment).
+        let mut s = base.clone(); s.validator_count = 7;
+        let h = GenesisBuilder::new(s).with_explicit_timestamp(0).build().unwrap().genesis_hash;
+        assert_ne!(base_hash, h, "changing validator_count must change genesis hash");
+
+        // Change consensus profile.
+        let mut s = base.clone();
+        s.consensus = ConsensusProfile::PqHotStuff2;
+        s.crypto = CryptoPolicy::MlDsa65; // compatible
+        let h = GenesisBuilder::new(s).with_explicit_timestamp(0).build().unwrap().genesis_hash;
+        assert_ne!(base_hash, h, "changing consensus must change genesis hash");
+
+        // Change timestamp.
+        let h = GenesisBuilder::new(base).with_explicit_timestamp(999).build().unwrap().genesis_hash;
+        assert_ne!(base_hash, h, "changing timestamp must change genesis hash");
+    }
+
+    /// P2-3: Invalid chain IDs must be rejected.
+    #[test]
+    fn test_p2_invalid_chain_id_rejection() {
+        // Empty.
+        assert!(validate_chain_id("").is_err(), "empty chain_id must be rejected");
+        // Too long (65 chars).
+        let long: String = "a".repeat(65);
+        assert!(validate_chain_id(&long).is_err(), "65-char chain_id must be rejected");
+        // 64 chars: valid.
+        let ok64: String = "a".repeat(64);
+        assert!(validate_chain_id(&ok64).is_ok(), "64-char chain_id must be accepted");
+        // Invalid chars.
+        assert!(validate_chain_id("HospitalA").is_err(), "uppercase must be rejected");
+        assert!(validate_chain_id("hospital_a").is_err(), "underscore must be rejected");
+        assert!(validate_chain_id("hospital a").is_err(), "space must be rejected");
+        // Leading/trailing hyphen.
+        assert!(validate_chain_id("-hospital").is_err(), "leading hyphen must be rejected");
+        assert!(validate_chain_id("hospital-").is_err(), "trailing hyphen must be rejected");
+        // Valid.
+        assert!(validate_chain_id("hospital-network-1").is_ok());
+    }
+
+    /// P2-4: Duplicate validator IDs and duplicate key bytes must be rejected.
+    #[test]
+    fn test_p2_duplicate_validator_rejection() {
+        use crate::validator::ValidatorPublicKey;
+        let spec = healthcare_spec("p2-dup-val", 4);
+
+        // Duplicate ID.
+        let result = GenesisBuilder::new(spec.clone())
+            .with_explicit_timestamp(0)
+            .with_validator("v0".into(), ValidatorPublicKey::test_mldsa_key_a()).unwrap()
+            .with_validator("v0".into(), ValidatorPublicKey::test_mldsa_key_b()); // same ID
+        assert!(result.is_err(), "duplicate validator_id must be rejected");
+
+        // Duplicate key bytes.
+        let result = GenesisBuilder::new(spec)
+            .with_explicit_timestamp(0)
+            .with_validator("v0".into(), ValidatorPublicKey::test_mldsa_key_a()).unwrap()
+            .with_validator("v1".into(), ValidatorPublicKey::test_mldsa_key_a()); // same key
+        assert!(result.is_err(), "duplicate public key bytes must be rejected");
+    }
+
+    /// P2-5: ML-DSA-65 key byte-length validation.
+    #[test]
+    fn test_p2_ml_dsa_key_length_validation() {
+        use crate::validator::{ValidatorPublicKey, ValidatorKeyType, ML_DSA_65_PUBLIC_KEY_BYTES};
+
+        // Correct size: accepted.
+        let good = ValidatorPublicKey::new(ValidatorKeyType::MlDsa65, vec![0x01; ML_DSA_65_PUBLIC_KEY_BYTES]);
+        assert!(good.validate().is_ok(), "1952-byte ML-DSA-65 key must be accepted");
+
+        // One byte short: rejected.
+        let short = ValidatorPublicKey::new(ValidatorKeyType::MlDsa65, vec![0x01; ML_DSA_65_PUBLIC_KEY_BYTES - 1]);
+        assert!(short.validate().is_err(), "1951-byte ML-DSA-65 key must be rejected");
+
+        // One byte over: rejected.
+        let long = ValidatorPublicKey::new(ValidatorKeyType::MlDsa65, vec![0x01; ML_DSA_65_PUBLIC_KEY_BYTES + 1]);
+        assert!(long.validate().is_err(), "1953-byte ML-DSA-65 key must be rejected");
+    }
+
+    /// P2-6: Cross-chain replay rejection via TransactionDomain.
+    #[test]
+    fn test_p2_cross_chain_replay_rejection() {
+        use crate::domain::TransactionDomain;
+
+        let domain_a = TransactionDomain {
+            chain_id: "hospital-a".into(),
+            genesis_hash: [0xAAu8; 32],
+            protocol_version: 1,
+            domain_label: "institutional-tx-v1".into(),
+        };
+        let domain_b = TransactionDomain {
+            chain_id: "hospital-b".into(),
+            genesis_hash: [0xBBu8; 32],
+            protocol_version: 1,
+            domain_label: "institutional-tx-v1".into(),
+        };
+        let domain_a_diff_genesis = TransactionDomain {
+            chain_id: "hospital-a".into(),
+            genesis_hash: [0xCCu8; 32],
+            protocol_version: 1,
+            domain_label: "institutional-tx-v1".into(),
+        };
+
+        // Same domain: accepted.
+        assert!(domain_a.accepts(&domain_a.clone()));
+        // Different chain_id: rejected.
+        assert!(!domain_a.accepts(&domain_b), "different chain_id must be rejected");
+        // Same chain_id but different genesis_hash: rejected.
+        assert!(!domain_a.accepts(&domain_a_diff_genesis), "different genesis_hash must be rejected");
+    }
+
+    /// P2-7: BFT quorum table verification.
+    #[test]
+    fn test_p2_bft_quorum_table() {
+        use crate::quorum::bft_quorum;
+        let cases = [(4u32, 1u32, 3u32), (7, 2, 5), (10, 3, 7)];
+        for (n, expected_f, expected_quorum) in cases {
+            let p = bft_quorum(n).unwrap_or_else(|e| panic!("bft_quorum({n}) failed: {e}"));
+            assert_eq!(p.f, expected_f, "n={n}: f");
+            assert_eq!(p.quorum, expected_quorum, "n={n}: quorum");
+        }
+        for n in [1u32, 2, 3] {
+            assert!(bft_quorum(n).is_err(), "n={n} should be rejected");
+        }
+    }
+
+    /// P2-8: All four templates produce distinct genesis hashes for the same chain_id.
+    #[test]
+    fn test_p2_all_four_templates_genesis() {
+        let chain_id = "shared-chain-id-p2";
+        let make = |template: InstitutionalTemplate| {
+            let spec = ChainSpec {
+                template,
+                chain_id: chain_id.to_string(),
+                chain_name: "Test".into(),
+                validator_count: 4,
+                consensus: ConsensusProfile::TendermintBft,
+                crypto: CryptoPolicy::MlDsa65,
+                governance: GovernanceConfig::default(),
+                network: NetworkConfig::default(),
+                block_time_ms: 3000,
+            };
+            GenesisBuilder::new(spec).with_explicit_timestamp(0).build().unwrap().genesis_hash
+        };
+
+        let hashes = [
+            make(InstitutionalTemplate::Healthcare(HealthcareConfig::default())),
+            make(InstitutionalTemplate::Corrections(CorrectionsConfig::default())),
+            make(InstitutionalTemplate::Education(EducationConfig::default())),
+            make(InstitutionalTemplate::Enterprise(EnterpriseConfig::default())),
+        ];
+
+        for i in 0..hashes.len() {
+            for j in (i+1)..hashes.len() {
+                assert_ne!(hashes[i], hashes[j],
+                    "templates {} and {} must produce different genesis hashes", i, j);
+            }
+        }
+    }
+
+    /// P2-9: ChainSpec::validate() rejects invalid configurations.
+    #[test]
+    fn test_p2_cli_validation_errors() {
+        // Too few validators.
+        let bad = healthcare_spec("p2-cli-val", 2);
+        assert!(bad.validate().is_err());
+
+        // PQ-HotStuff with Ed25519: incompatible.
+        let incompatible = ChainSpec {
+            consensus: ConsensusProfile::PqHotStuff2,
+            crypto: CryptoPolicy::Ed25519,
+            ..healthcare_spec("p2-cli-incompat", 4)
+        };
+        assert!(incompatible.validate().is_err());
+
+        // Zero block time.
+        let bad_time = ChainSpec { block_time_ms: 0, ..healthcare_spec("p2-cli-time", 4) };
+        assert!(bad_time.validate().is_err());
+    }
+
+    /// P2-10: Genesis JSON must not contain private key material.
+    #[test]
+    fn test_p2_genesis_no_private_keys() {
+        let spec = healthcare_spec("p2-no-privkey", 4);
+        let artifact = GenesisBuilder::new(spec).with_explicit_timestamp(0).build().unwrap();
+        let json_str = artifact.to_json_string().unwrap();
+        let lower = json_str.to_lowercase();
+        assert!(!lower.contains("private"), "genesis JSON must not contain 'private'");
+        assert!(!lower.contains("\"secret\""), "genesis JSON must not contain 'secret'");
+        assert!(!lower.contains("sk_"), "genesis JSON must not contain 'sk_'");
+        assert!(!lower.contains("\"private_key\""), "genesis JSON must not contain 'private_key'");
     }
 }
