@@ -317,6 +317,16 @@ async fn create_qattice_devnet(body: &str, cfg: &Config, chains: &Chains) -> (u1
 
     // Write files: <data>/<chain_id>/genesis.json + keys/<validator>.key.json
     let dir = cfg.data_dir.join(&chain_id);
+    // Each launch generates fresh keys → new genesis hash, so any existing
+    // node data dirs are always incompatible. Wipe them before writing.
+    for (label, _) in PQHS2_VALIDATORS.iter() {
+        let data_dir = dir.join(format!("data-{label}"));
+        if data_dir.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&data_dir) {
+                return (500, json!({ "error": format!("could not clear stale data dir {}: {e}", data_dir.display()) }));
+            }
+        }
+    }
     let write_result = (|| -> std::io::Result<PathBuf> {
         std::fs::create_dir_all(dir.join("keys"))?;
         std::fs::create_dir_all(dir.join("logs"))?;
