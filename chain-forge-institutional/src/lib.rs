@@ -25,6 +25,11 @@ pub mod validator;
 pub mod domain;
 pub mod quorum;
 pub mod identity;
+pub mod execution;
+pub mod healthcare;
+pub mod corrections;
+pub mod education;
+pub mod enterprise;
 
 pub use error::{InstError, InstResult};
 pub use templates::{
