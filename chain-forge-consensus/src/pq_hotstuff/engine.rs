@@ -27,14 +27,14 @@
 //! - Key rotation, revocation, ML-DSA-only admission gate (QAT-08)
 //! - Production key storage (blocked on PR #109 review)
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 use tracing::debug;
 
 use crate::{
     BlockHash, BlockHeight, BlockProposal, CommitCertificate,
-    ConsensusConfig, ConsensusEngine, ConsensusError, ConsensusResult, ConsensusVariant,
-    Round, ValidatorId, ValidatorSet, Vote, VoteType,
+    ConsensusAction, ConsensusConfig, ConsensusEngine, ConsensusError, ConsensusResult,
+    ConsensusVariant, Round, ValidatorId, ValidatorSet, Vote, VoteType,
 };
 use crate::pq_hotstuff::signing::EngineSigningContext;
 use crate::pq_hotstuff::wire::HASH_LEN;
@@ -168,6 +168,15 @@ pub struct PqHotStuffEngine {
     // are signed with write-before-broadcast guarantees. When None, the engine runs
     // in sign-later mode (suitable for unit tests and the CF-C1 skeleton).
     signing_ctx: Option<Box<dyn EngineSigningContext>>,
+
+    // Nil-vote (timeout) accumulator: counts distinct signers per round.
+    // When 2f+1 nil votes for the current round arrive from peers, the engine
+    // advances the round and queues a CastVote so the node broadcasts its own
+    // nil vote and pulls every remaining node forward — the TC mechanism.
+    nil_accumulator: BTreeMap<Round, BTreeSet<usize>>,
+
+    // Pending actions for the node to drain via next_action().
+    action_queue: VecDeque<ConsensusAction>,
 }
 
 impl PqHotStuffEngine {
@@ -195,6 +204,8 @@ impl PqHotStuffEngine {
             seal_round: None,
             pacemaker: Pacemaker::new(1000),
             signing_ctx: None,
+            nil_accumulator: BTreeMap::new(),
+            action_queue: VecDeque::new(),
         }
     }
 
@@ -267,9 +278,62 @@ impl PqHotStuffEngine {
         None
     }
 
+    /// Count a nil (timeout) vote toward the TC quorum for its round.
+    ///
+    /// When 2f+1 nil votes for the current round arrive, the engine advances
+    /// the round and queues a `CastVote` action carrying this node's own nil
+    /// vote for the old round — so the node broadcasts it to peers that may
+    /// still be lagging, pulling the whole set forward in lock-step.
+    async fn receive_nil_vote(&mut self, vote: Vote) -> ConsensusResult<Option<CommitCertificate>> {
+        // Only count nil votes for the current round; stale ones are dropped.
+        if vote.height != self.height || vote.round != self.round {
+            return Ok(None);
+        }
+        let idx = self.validator_set.validators
+            .iter().position(|v| v.id == vote.validator)
+            .ok_or_else(|| ConsensusError::UnknownValidator(vote.validator.clone()))?;
+
+        // Compute threshold before the mutable nil_accumulator borrow.
+        let threshold = self.quorum_threshold();
+        let signers = self.nil_accumulator.entry(vote.round).or_default();
+        signers.insert(idx);
+        let count = signers.len();
+
+        if count < threshold {
+            return Ok(None);
+        }
+
+        // TC quorum reached: advance the round.
+        let old_round = self.round;
+        let height    = self.height;
+        self.pacemaker.on_timeout();
+        self.advance_round(old_round + 1);
+
+        // Build this node's own nil vote for the old round (empty sig; the
+        // CastVote action has the node sign + broadcast it).
+        let validator = self.validator_set.validators
+            .first()
+            .map(|v| v.id.clone())
+            .unwrap_or_else(|| ValidatorId("unknown".into()));
+        let nil_vote = Vote {
+            vote_type:  VoteType::Nil,
+            height,
+            round:      old_round,
+            validator,
+            block_hash: None,
+            signature:  vec![],
+            scheme:     Vote::default_scheme(),
+            epoch:      self.epoch,
+        };
+        self.action_queue.push_back(ConsensusAction::CastVote(nil_vote));
+        debug!(height, old_round, new_round = self.round, "TC quorum: nil votes reached 2f+1, advancing round");
+        Ok(None)
+    }
+
     fn advance_round(&mut self, new_round: Round) {
         self.round = new_round;
         self.accumulator.clear();
+        self.nil_accumulator.retain(|&r, _| r >= new_round);
         self.pending_proposal = None;
     }
 
@@ -362,6 +426,8 @@ impl ConsensusEngine for PqHotStuffEngine {
         self.high_qc = Qc::genesis();
         self.seal_round = None;
         self.accumulator.clear();
+        self.nil_accumulator.clear();
+        self.action_queue.clear();
         self.pending_proposal = None;
         Ok(())
     }
@@ -438,10 +504,12 @@ impl ConsensusEngine for PqHotStuffEngine {
             return Err(ConsensusError::StaleMessage(vote.height, self.height));
         }
 
-        // PQ-HotStuff is single-phase: only Precommit votes count toward quorum.
-        // Prevotes are broadcast for pacemaker liveness evidence but must not be
-        // accumulated here — mixing them with precommits causes CommitCertificate
-        // precommits to contain non-precommit votes, which verify_commit rejects.
+        // PQ-HotStuff is single-phase: only Precommit votes count toward block quorum.
+        // Nil votes (timeouts) are counted separately for timeout-certificate (TC) quorum.
+        // Prevotes are broadcast for pacemaker liveness evidence but are not counted here.
+        if vote.vote_type == VoteType::Nil {
+            return self.receive_nil_vote(vote).await;
+        }
         if vote.vote_type != VoteType::Precommit {
             return Ok(None);
         }
@@ -661,8 +729,14 @@ impl ConsensusEngine for PqHotStuffEngine {
         self.round = 1;
         self.validator_set = validator_set;
         self.accumulator.clear();
+        self.nil_accumulator.clear();
+        self.action_queue.clear();
         self.pending_proposal = None;
         Ok(())
+    }
+
+    fn next_action(&mut self) -> Option<ConsensusAction> {
+        self.action_queue.pop_front()
     }
 }
 
@@ -966,5 +1040,122 @@ mod tests {
         assert_eq!(e.locked_qc().round, lock_before,
             "timeout must not modify locked_qc");
         assert_eq!(e.current_round(), 3);
+    }
+
+    // ── TC (timeout-certificate) nil-vote quorum ──────────────────────────────
+
+    fn nil_vote_for(height: u64, round: u32, validator: &str) -> Vote {
+        Vote {
+            vote_type: crate::VoteType::Nil,
+            height,
+            round,
+            block_hash: None,
+            validator: ValidatorId(validator.into()),
+            signature: vec![],
+            scheme: Vote::default_scheme(),
+            epoch: 0,
+        }
+    }
+
+    // TC-1: 2f+1 nil votes for the current round advance the round and queue
+    // a CastVote action so the node broadcasts its own nil vote.
+    // With 4 validators, f=1 and threshold = 3.
+    #[tokio::test]
+    async fn nil_quorum_advances_round_and_queues_cast_vote() {
+        let mut e = engine().await;
+        assert_eq!(e.current_round(), 1);
+
+        // First two nil votes: below threshold — round must not change.
+        e.receive_vote(nil_vote_for(1, 1, "v0")).await.unwrap();
+        assert_eq!(e.current_round(), 1, "below threshold: round must not advance");
+        assert!(e.next_action().is_none(), "below threshold: no action queued");
+
+        e.receive_vote(nil_vote_for(1, 1, "v1")).await.unwrap();
+        assert_eq!(e.current_round(), 1);
+        assert!(e.next_action().is_none());
+
+        // Third nil vote reaches 2f+1 = 3: TC quorum fires.
+        e.receive_vote(nil_vote_for(1, 1, "v2")).await.unwrap();
+        assert_eq!(e.current_round(), 2, "TC quorum must advance round to 2");
+
+        // A CastVote(Nil) action must be queued for the node to broadcast.
+        let action = e.next_action().expect("TC quorum must queue a CastVote action");
+        match action {
+            ConsensusAction::CastVote(v) => {
+                assert_eq!(v.vote_type, crate::VoteType::Nil, "queued vote must be Nil");
+                assert_eq!(v.round, 1, "queued vote must carry the old (triggering) round");
+                assert_eq!(v.height, 1);
+            }
+            other => panic!("expected CastVote, got {other:?}"),
+        }
+        // No further actions.
+        assert!(e.next_action().is_none());
+    }
+
+    // TC-2: a fourth nil vote after TC quorum is already reached (round advanced)
+    // is treated as stale (wrong round) and must NOT fire another advance or action.
+    #[tokio::test]
+    async fn nil_vote_after_tc_quorum_is_stale() {
+        let mut e = engine().await;
+
+        for vid in ["v0", "v1", "v2"] {
+            e.receive_vote(nil_vote_for(1, 1, vid)).await.unwrap();
+        }
+        assert_eq!(e.current_round(), 2);
+        let _ = e.next_action(); // drain CastVote
+
+        // Late nil vote for the old round: engine is now at round 2.
+        e.receive_vote(nil_vote_for(1, 1, "v3")).await.unwrap();
+        assert_eq!(e.current_round(), 2, "late nil vote must not advance round again");
+        assert!(e.next_action().is_none(), "late nil vote must not queue another action");
+    }
+
+    // TC-3: nil votes for a different height are rejected (StaleMessage) or
+    // silently dropped — either way the round must not advance and no action
+    // is queued.
+    #[tokio::test]
+    async fn nil_votes_wrong_height_are_dropped() {
+        let mut e = engine().await;
+
+        for vid in ["v0", "v1", "v2"] {
+            // Wrong-height votes may return Err(StaleMessage); that is acceptable.
+            let _ = e.receive_vote(nil_vote_for(99, 1, vid)).await;
+        }
+        // Height mismatch: round must stay at 1, no action queued.
+        assert_eq!(e.current_round(), 1);
+        assert!(e.next_action().is_none());
+    }
+
+    // TC-4: nil votes for a future round are dropped (only current round counts).
+    #[tokio::test]
+    async fn nil_votes_future_round_are_dropped() {
+        let mut e = engine().await;
+
+        for vid in ["v0", "v1", "v2"] {
+            // Future-round nil votes return Ok(None) — stale check in receive_nil_vote.
+            let _ = e.receive_vote(nil_vote_for(1, 5, vid)).await;
+        }
+        assert_eq!(e.current_round(), 1);
+        assert!(e.next_action().is_none());
+    }
+
+    // TC-5: mixed nil+precommit votes — precommit quorum and nil quorum are
+    // independent accumulators; a precommit QC does not leak into TC.
+    #[tokio::test]
+    async fn nil_accumulator_independent_from_precommit_accumulator() {
+        let mut e = engine().await;
+
+        // Send 2 precommits (below threshold) — should not affect nil accumulator.
+        e.receive_vote(vote_for(1, 1, "block-x", "v0")).await.unwrap();
+        e.receive_vote(vote_for(1, 1, "block-x", "v1")).await.unwrap();
+        assert_eq!(e.current_round(), 1);
+
+        // Now send 3 nil votes — TC quorum fires even though precommits exist.
+        for vid in ["v0", "v1", "v2"] {
+            e.receive_vote(nil_vote_for(1, 1, vid)).await.unwrap();
+        }
+        assert_eq!(e.current_round(), 2, "TC quorum must still fire alongside partial precommit accumulator");
+        let action = e.next_action().expect("CastVote action expected");
+        assert!(matches!(action, ConsensusAction::CastVote(_)));
     }
 }
