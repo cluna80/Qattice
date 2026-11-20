@@ -304,6 +304,17 @@ async fn create_qattice_devnet(body: &str, cfg: &Config, chains: &Chains) -> (u1
         }
     }
 
+    // Allocate all ports up front so we can embed bootstrap addresses in genesis.
+    let ports: Vec<(u16, u16)> = PQHS2_VALIDATORS.iter()
+        .map(|_| (free_port(), free_port()))  // (api_port, p2p_port)
+        .collect();
+
+    // Patch genesis: bootstrap_nodes lists every validator's P2P address.
+    let bootstrap_nodes: Vec<String> = ports.iter()
+        .map(|(_, p2p)| format!("/ip4/127.0.0.1/tcp/{p2p}"))
+        .collect();
+    genesis["network"]["bootstrap_nodes"] = json!(bootstrap_nodes);
+
     // Write files: <data>/<chain_id>/genesis.json + keys/<validator>.key.json
     let dir = cfg.data_dir.join(&chain_id);
     let write_result = (|| -> std::io::Result<PathBuf> {
@@ -328,13 +339,18 @@ async fn create_qattice_devnet(body: &str, cfg: &Config, chains: &Chains) -> (u1
         Err(e) => return (500, json!({ "error": format!("could not write devnet files: {e}") })),
     };
 
-    // Spawn 4 node processes with fresh keys.
+    // Spawn 4 node processes.
     let mut nodes = Vec::new();
-    for ((label, address), _kp) in PQHS2_VALIDATORS.iter().zip(keypairs.iter()) {
-        let api_port = free_port();
-        let p2p_port = free_port();
+    for (((label, address), _kp), (api_port, p2p_port)) in
+        PQHS2_VALIDATORS.iter().zip(keypairs.iter()).zip(ports.iter())
+    {
         let key_path = dir.join("keys").join(format!("{label}.key.json"));
         let log_path = dir.join("logs").join(format!("{label}.log"));
+        // Each node gets --bootstrap for every peer except itself.
+        let peer_args: Vec<String> = ports.iter()
+            .filter(|(_, pp)| pp != p2p_port)
+            .flat_map(|(_, pp)| ["--bootstrap".to_string(), format!("/ip4/127.0.0.1/tcp/{pp}")])
+            .collect();
         let spawned = std::fs::File::create(&log_path).and_then(|log| {
             let err = log.try_clone()?;
             Command::new(&cfg.node_bin)
@@ -344,6 +360,7 @@ async fn create_qattice_devnet(body: &str, cfg: &Config, chains: &Chains) -> (u1
                 .arg("--p2p-port").arg(p2p_port.to_string())
                 .arg("--key-file").arg(&key_path)
                 .arg("--data-dir").arg(dir.join(format!("data-{label}")))
+                .args(&peer_args)
                 .env("RUST_LOG", "info")
                 .env("NO_COLOR", "1")
                 .stdout(log).stderr(err)
@@ -351,7 +368,7 @@ async fn create_qattice_devnet(body: &str, cfg: &Config, chains: &Chains) -> (u1
                 .spawn()
         });
         match spawned {
-            Ok(child) => nodes.push(Node { validator: address.to_string(), api_port, p2p_port, log_path, child }),
+            Ok(child) => nodes.push(Node { validator: address.to_string(), api_port: *api_port, p2p_port: *p2p_port, log_path, child }),
             Err(e) => {
                 drop(nodes);
                 return (500, json!({ "error": format!("could not start {label}: {e}") }));
