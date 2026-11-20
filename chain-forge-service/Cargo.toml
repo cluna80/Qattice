@@ -11,7 +11,7 @@ license.workspace = true
 
 [dependencies]
 chain-forge-core          = { path = "../chain-forge-core" }
-chain-forge-crypto        = { path = "../chain-forge-crypto", features = ["real-crypto"] }
+chain-forge-crypto        = { path = "../chain-forge-crypto", features = ["real-crypto", "real-pqc"] }
 chain-forge-institutional = { path = "../chain-forge-institutional" }
 chrono                    = { workspace = true }
 tokio              = { workspace = true }
