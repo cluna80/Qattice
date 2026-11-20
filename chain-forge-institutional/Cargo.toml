@@ -1,0 +1,29 @@
+[package]
+name    = "chain-forge-institutional"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+# Institutional Blockchain Creation Framework for Chain Forge.
+#
+# Provides versioned templates for permissioned institutional Layer-1
+# blockchains: Healthcare, Corrections, Education, and Enterprise.
+# Each template produces a deterministic GenesisArtifact that is
+# compatible with the existing chain-forge-core GenesisConfig schema.
+#
+# This crate is a build-time tool and CLI library.
+# It does not depend on any runtime crates (node, p2p, execution).
+
+[dependencies]
+chain-forge-core = { path = "../chain-forge-core" }
+serde             = { workspace = true }
+serde_json        = { workspace = true }
+sha2              = "0.10"
+hex               = { workspace = true }
+thiserror         = { workspace = true }
+chrono            = { workspace = true }
+
+[[bin]]
+name = "chain-forge-institutional-cli"
+path = "src/bin/cli.rs"

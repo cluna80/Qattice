@@ -35,6 +35,7 @@ members = [
     "dis-core",
     "dis-sdk",
     "chain-forge-analyzer",
+    "chain-forge-institutional",
 ]
 
 [workspace.package]
