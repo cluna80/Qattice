@@ -15,6 +15,7 @@
 //! starts processes. Private keys are written under the data directory
 //! and never returned over HTTP.
 
+use chain_forge_institutional::{ChainSpec, GenesisBuilder};
 use chain_forge_service::*;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -227,7 +228,158 @@ async fn route(method: &str, path: &str, body: &str, cfg: &Config, chains: &Chai
                 None => (404, json!({ "error": "no such chain or validator" })),
             }
         }
+        // ── Institutional Builder API ─────────────────────────────────────
+        ("GET", ["api", "institutional", "templates"]) => institutional_templates(),
+        ("POST", ["api", "institutional", "validate"]) => institutional_validate(body),
+        ("POST", ["api", "institutional", "generate"]) => institutional_generate(body, cfg).await,
+        ("GET", ["api", "institutional", "artifacts", chain_id, filename]) =>
+            institutional_artifact(chain_id, filename, cfg),
+
         _ => (404, json!({ "error": format!("no route for {method} {path}") })),
+    }
+}
+
+fn institutional_templates() -> (u16, Value) {
+    (200, json!([
+        {
+            "id": "healthcare-l1",
+            "name": "Healthcare L1",
+            "description": "HIPAA-ready permissioned chain. Stores FHIR commitment anchors only. No patient data on-chain.",
+            "default_validator_count": 4,
+            "default_crypto": "ml_dsa_65",
+            "default_consensus": "tendermint_bft",
+            "modules": ["bank", "identity", "governance"],
+        },
+        {
+            "id": "corrections-l1",
+            "name": "Corrections L1",
+            "description": "Custody chain for correctional facilities. Evidence immutability, custody event commitments only. No inmate identifiers on-chain.",
+            "default_validator_count": 4,
+            "default_crypto": "ml_dsa_65",
+            "default_consensus": "tendermint_bft",
+            "modules": ["bank", "identity", "governance"],
+        },
+        {
+            "id": "education-l1",
+            "name": "Education L1",
+            "description": "Verifiable credentials for academic institutions. W3C VC anchoring. No student PII on-chain.",
+            "default_validator_count": 4,
+            "default_crypto": "ml_dsa_65",
+            "default_consensus": "tendermint_bft",
+            "modules": ["bank", "identity", "governance"],
+        },
+        {
+            "id": "enterprise-l1",
+            "name": "Enterprise L1",
+            "description": "Permissioned enterprise chain with AI agent capability grants and role-based governance. No confidential contracts on-chain.",
+            "default_validator_count": 4,
+            "default_crypto": "ml_dsa_65",
+            "default_consensus": "tendermint_bft",
+            "modules": ["bank", "identity", "governance"],
+        },
+    ]))
+}
+
+fn institutional_validate(body: &str) -> (u16, Value) {
+    let spec: ChainSpec = match serde_json::from_str(body) {
+        Ok(s) => s,
+        Err(e) => return (400, json!({ "valid": false, "error": format!("invalid JSON: {e}") })),
+    };
+    match spec.validate() {
+        Ok(()) => (200, json!({
+            "valid": true,
+            "chain_id": spec.chain_id,
+            "template": spec.template.template_id_str(),
+            "validator_count": spec.validator_count,
+            "domain_separator": spec.domain_separator_hex(),
+        })),
+        Err(e) => (200, json!({ "valid": false, "error": e.to_string() })),
+    }
+}
+
+async fn institutional_generate(body: &str, cfg: &Config) -> (u16, Value) {
+    let spec: ChainSpec = match serde_json::from_str(body) {
+        Ok(s) => s,
+        Err(e) => return (400, json!({ "error": format!("invalid JSON: {e}") })),
+    };
+    if let Err(e) = spec.validate() {
+        return (400, json!({ "error": e.to_string() }));
+    }
+    if let Err(e) = chain_forge_service::validate_chain_id(&spec.chain_id) {
+        return (400, json!({ "error": e }));
+    }
+
+    let artifact = match GenesisBuilder::new(spec.clone()).build() {
+        Ok(a) => a,
+        Err(e) => return (500, json!({ "error": format!("genesis build failed: {e}") })),
+    };
+
+    // Write artifacts to <data_dir>/<chain_id>/institutional/
+    let dir = cfg.data_dir.join(&spec.chain_id).join("institutional");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return (500, json!({ "error": format!("could not create artifact dir: {e}") }));
+    }
+
+    let genesis_json = match artifact.to_deployment_json() {
+        Ok(s) => s,
+        Err(e) => return (500, json!({ "error": format!("genesis serialization failed: {e}") })),
+    };
+    let genesis_path = dir.join("genesis.json");
+    if let Err(e) = std::fs::write(&genesis_path, &genesis_json) {
+        return (500, json!({ "error": format!("could not write genesis.json: {e}") }));
+    }
+
+    // Deployment manifest (chain metadata, no private keys)
+    let manifest = json!({
+        "chain_id": spec.chain_id,
+        "chain_name": spec.chain_name,
+        "template": spec.template.template_id_str(),
+        "validator_count": spec.validator_count,
+        "domain_separator": spec.domain_separator_hex(),
+        "genesis_hash": artifact.commitment.hash().unwrap_or_default(),
+        "artifacts": {
+            "genesis": "genesis.json",
+            "manifest": "manifest.json",
+        },
+        "generated_at": chrono::Utc::now().to_rfc3339(),
+        "note": "No private keys are included. Validators must supply their own ML-DSA-65 public keys before deployment.",
+    });
+    let manifest_path = dir.join("manifest.json");
+    if let Err(e) = std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest).unwrap_or_default()) {
+        return (500, json!({ "error": format!("could not write manifest.json: {e}") }));
+    }
+
+    tracing::info!(chain_id = %spec.chain_id, template = %spec.template.template_id_str(),
+        dir = %dir.display(), "institutional genesis generated");
+
+    (200, json!({
+        "chain_id": spec.chain_id,
+        "template": spec.template.template_id_str(),
+        "domain_separator": spec.domain_separator_hex(),
+        "genesis_hash": artifact.commitment.hash().unwrap_or_default(),
+        "artifacts_dir": dir.display().to_string(),
+        "artifacts": ["genesis.json", "manifest.json"],
+    }))
+}
+
+fn institutional_artifact(chain_id: &str, filename: &str, cfg: &Config) -> (u16, Value) {
+    // Validate chain_id to prevent path traversal
+    if let Err(e) = chain_forge_service::validate_chain_id(chain_id) {
+        return (400, json!({ "error": e }));
+    }
+    // Only allow safe filenames
+    let allowed = ["genesis.json", "manifest.json"];
+    if !allowed.contains(&filename) {
+        return (404, json!({ "error": format!("artifact \"{filename}\" not found; available: genesis.json, manifest.json") }));
+    }
+
+    let path = cfg.data_dir.join(chain_id).join("institutional").join(filename);
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => match serde_json::from_str::<Value>(&contents) {
+            Ok(v) => (200, v),
+            Err(_) => (500, json!({ "error": "artifact is not valid JSON" })),
+        },
+        Err(_) => (404, json!({ "error": format!("artifact not found for chain \"{chain_id}\"") })),
     }
 }
 
