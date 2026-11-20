@@ -143,8 +143,10 @@ pub fn verify_handoff_proof(
     }
 
     // ── 3–5. Signature verification and quorum ────────────────────────────────
-    // Compute incoming set hash once; every vote signs over it.
-    let incoming_hash = canonical_set_hash(incoming_set);
+    // Precommits for the epoch-change block were signed while the outgoing set
+    // was still active, so node.rs::sign_vote used canonical_set_hash(outgoing_set).
+    // Verify against that same hash to match what was actually signed.
+    let outgoing_hash = canonical_set_hash(outgoing_set);
 
     #[cfg(not(feature = "real-crypto"))]
     let verifier = Fips204Verifier;
@@ -169,10 +171,11 @@ pub fn verify_handoff_proof(
             return Err(HandoffError::DuplicateSigner { id: vid });
         }
 
-        // Reconstruct the v2 signed message (epoch + set_hash bound).
+        // Reconstruct the v2 signed message using the outgoing set hash (what
+        // node.rs::sign_vote computed at the time these precommits were cast).
         let msg = vote_signing_bytes_v2(
             chain_id, &VoteType::Precommit, vote.height, vote.round,
-            vote.epoch, &incoming_hash, vote.block_hash.as_ref(),
+            vote.epoch, &outgoing_hash, vote.block_hash.as_ref(),
         );
 
         // Verify using the same scheme as node.rs::sign_vote / verify_vote_signature.
