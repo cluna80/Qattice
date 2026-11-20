@@ -2,6 +2,35 @@
 
 > **Start here:** [PQ-PoP-HotStuff-2 prerequisite](docs/PQ-POP-PREREQUISITE.md) defines the current protocol direction and the native Phase 0 and Phase 0.5 gates. Once those gates pass, continue the applicable milestones below with PQ-HotStuff-2 and defensive pruning. Earlier Tendermint, Ed25519, and QRC entries document historical plans and evidence.
 
+## JL-08 TC nil-vote quorum confirmed — 2026-11-20
+
+✅ **Windows-confirmed** (owner-run, 2026-11-20 at `1d22d83`)
+
+**Fix:** Nil (timeout) votes were silently discarded in `receive_vote` with an early return, preventing any TC (timeout-certificate) quorum from forming when a validator exits mid-consensus (round-drift livelock).
+
+**Change:** New `receive_nil_vote` method accumulates nil votes per round in `nil_accumulator`; on 2f+1 threshold it advances the round and queues `CastVote(Nil)` so the node broadcasts its own nil vote and pulls every remaining peer forward.
+
+**Branch:** `feature/institutional-chain-forge`
+
+| Suite | Features | Result | Time |
+|---|---|---|---|
+| `chain-forge-consensus lib -- nil` (8 tests) | `pq-hotstuff` | 8/8 ✅ | 0.00s |
+
+**Run command:**
+```
+cargo test -p chain-forge-consensus --features pq-hotstuff --lib -- nil --nocapture
+```
+
+**Windows confirmation (owner-run, 2026-11-20):** `feature/institutional-chain-forge` at `1d22d83` — BossKing. All 8 nil tests passed.
+
+- `nil_quorum_advances_round_and_queues_cast_vote` PASS — TC quorum fires on 3rd nil vote, round advances 1→2, `CastVote(Nil)` queued
+- `nil_vote_after_tc_quorum_is_stale` PASS — 4th nil vote after TC is dropped, no second advance
+- `nil_votes_wrong_height_are_dropped` PASS — wrong-height nil votes rejected, round stays at 1
+- `nil_votes_future_round_are_dropped` PASS — future-round nil votes dropped
+- `nil_accumulator_independent_from_precommit_accumulator` PASS — TC fires even with partial precommit accumulator present
+
+---
+
 ## epoch-handoff hash fix re-confirmed — 2026-11-20
 
 ✅ **Windows-confirmed** (owner-run, 2026-11-20 at `5282ee6`)
