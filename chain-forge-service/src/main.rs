@@ -620,7 +620,18 @@ async fn describe(id: &str, chains: &Chains) -> Option<Value> {
         let status = match exited {
             Some(code) => json!({ "running": false, "exit_code": code }),
             None => node_status(api_port).await
-                .map(|s| { let mut s = s; s["running"] = json!(true); s })
+                .map(|s| {
+                    let mut s = s;
+                    s["running"] = json!(true);
+                    // Alias chain_store_watermark → pruned_watermark for the UI.
+                    // Only set when non-zero (pruning hasn't fired yet at height < 20).
+                    if let Some(w) = s.get("chain_store_watermark").and_then(|v| v.as_u64()) {
+                        if w > 0 {
+                            s["pruned_watermark"] = json!(w);
+                        }
+                    }
+                    s
+                })
                 .unwrap_or(json!({ "running": true, "api": "starting" })),
         };
         nodes.push(json!({
