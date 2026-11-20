@@ -2,6 +2,30 @@
 
 > **Start here:** [PQ-PoP-HotStuff-2 prerequisite](docs/PQ-POP-PREREQUISITE.md) defines the current protocol direction and the native Phase 0 and Phase 0.5 gates. Once those gates pass, continue the applicable milestones below with PQ-HotStuff-2 and defensive pruning. Earlier Tendermint, Ed25519, and QRC entries document historical plans and evidence.
 
+## epoch-handoff hash fix re-confirmed — 2026-11-20
+
+✅ **Windows-confirmed** (owner-run, 2026-11-20 at `5282ee6`)
+
+**Fix:** `verify_handoff_proof` was verifying precommit signatures against `canonical_set_hash(incoming_set)` but `sign_vote` signs them against `canonical_set_hash(outgoing_set)` (the outgoing set is still active when validators cast those precommits). Single-variable rename in `epoch_handoff.rs` to use `outgoing_hash`.
+
+**Branch:** `feature/institutional-chain-forge`
+
+| Suite | Features | Result | Time |
+|---|---|---|---|
+| `pqhs2_4node_epoch_live` (2 tests) | `pq-hotstuff` | 2/2 ✅ | 122.05s |
+
+**Run command:**
+```
+cargo test -p chain-forge-node --features pq-hotstuff --test pqhs2_4node_epoch_live -- --nocapture --test-threads=1
+```
+
+**Windows confirmation (owner-run, 2026-11-20):** `feature/institutional-chain-forge` at `5282ee6` — BossKing MINGW64. Both tests passed in 122.05s.
+
+- `pqhs2_4node_epoch_change_reaches_new_epoch` PASS (48.3s) — all 4 nodes reached height 5; epoch=0 at h2, epoch=1 at h3–h5; block hashes match across all nodes.
+- `pqhs2_4node_qc_cert_epoch_boundary` PASS (72.0s) — cert epoch bindings verified: h2 cert.epoch=0 vote_epochs=[0,0,0]; h3 cert.epoch=1 vote_epochs=[1,1,1]; h4 cert.epoch=1 vote_epochs=[1,1,1].
+
+---
+
 ## Full stack re-confirmation — 2026-11-14
 
 ✅ **All five suites Windows-confirmed on integration candidate** (owner-run, BossKing MINGW64, `feat/vote-format-v2` at `a7c2f5a`)
