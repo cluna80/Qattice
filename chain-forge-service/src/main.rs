@@ -15,6 +15,7 @@
 //! starts processes. Private keys are written under the data directory
 //! and never returned over HTTP.
 
+use chain_forge_crypto::MlDsaScheme;
 use chain_forge_institutional::{ChainSpec, GenesisBuilder};
 use chain_forge_service::*;
 use serde_json::{json, Value};
@@ -228,6 +229,9 @@ async fn route(method: &str, path: &str, body: &str, cfg: &Config, chains: &Chai
                 None => (404, json!({ "error": "no such chain or validator" })),
             }
         }
+        // ── Qattice PQ-HotStuff-2 devnet ─────────────────────────────────
+        ("POST", ["api", "qattice-devnets"]) => create_qattice_devnet(body, cfg, chains).await,
+
         // ── Institutional Builder API ─────────────────────────────────────
         ("GET", ["api", "institutional", "templates"]) => institutional_templates(),
         ("POST", ["api", "institutional", "validate"]) => institutional_validate(body),
@@ -237,6 +241,119 @@ async fn route(method: &str, path: &str, body: &str, cfg: &Config, chains: &Chai
 
         _ => (404, json!({ "error": format!("no route for {method} {path}") })),
     }
+}
+
+// ── Qattice PQ-HotStuff-2 devnet launcher ────────────────────────────────────
+
+const PQHS2_VALIDATORS: &[&str] = &["pqdev-alice", "pqdev-bob", "pqdev-carol", "pqdev-dave"];
+const PQHS2_GENESIS_TEMPLATE: &str = include_str!("../../tests/devnet/genesis-4node-pqhs2.json");
+
+async fn create_qattice_devnet(body: &str, cfg: &Config, chains: &Chains) -> (u16, Value) {
+    // Parse the chain_id from the request body.
+    let chain_id: String = match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(v) => match v.get("chain_id").and_then(|v| v.as_str()).map(str::to_owned) {
+            Some(id) => id,
+            None => return (400, json!({ "error": "missing chain_id" })),
+        },
+        Err(e) => return (400, json!({ "error": e.to_string() })),
+    };
+    if let Err(e) = validate_chain_id(&chain_id) {
+        return (400, json!({ "error": e }));
+    }
+    if chains.lock().unwrap().contains_key(&chain_id) {
+        return (409, json!({ "error": format!("chain \"{chain_id}\" is already running") }));
+    }
+    if !cfg.node_bin.exists() {
+        return (500, json!({ "error": format!(
+            "chain-forge-node not found at {}; build with: cargo build -p chain-forge-node --features pq-hotstuff",
+            cfg.node_bin.display()
+        )}));
+    }
+
+    // Generate 4 fresh ML-DSA-65 keypairs.
+    let scheme = MlDsaScheme;
+    let mut keypairs = Vec::new();
+    for _ in PQHS2_VALIDATORS {
+        match scheme.generate_random() {
+            Ok(kp) => keypairs.push(kp),
+            Err(e) => return (500, json!({ "error": format!("key generation failed: {e}") })),
+        }
+    }
+
+    // Parse the genesis template and patch chain_id + validator public keys.
+    let mut genesis: serde_json::Value = match serde_json::from_str(PQHS2_GENESIS_TEMPLATE) {
+        Ok(v) => v,
+        Err(e) => return (500, json!({ "error": format!("genesis template parse error: {e}") })),
+    };
+    genesis["chain_id"] = json!(chain_id);
+    if let Some(accounts) = genesis["genesis_accounts"].as_array_mut() {
+        for (account, kp) in accounts.iter_mut().zip(keypairs.iter()) {
+            account["public_key"] = json!(kp.public_key_hex());
+        }
+    }
+
+    // Write files: <data>/<chain_id>/genesis.json + keys/<validator>.key.json
+    let dir = cfg.data_dir.join(&chain_id);
+    let write_result = (|| -> std::io::Result<PathBuf> {
+        std::fs::create_dir_all(dir.join("keys"))?;
+        std::fs::create_dir_all(dir.join("logs"))?;
+        for (validator, kp) in PQHS2_VALIDATORS.iter().zip(keypairs.iter()) {
+            let sk_hex: String = kp.private_key.iter().map(|b| format!("{b:02x}")).collect();
+            let key_json = serde_json::to_string_pretty(&json!({
+                "label":       validator,
+                "scheme":      "mldsa65",
+                "public_key":  kp.public_key_hex(),
+                "private_key": sk_hex,
+            })).unwrap();
+            std::fs::write(dir.join("keys").join(format!("{validator}.key.json")), key_json)?;
+        }
+        let genesis_path = dir.join("genesis.json");
+        std::fs::write(&genesis_path, serde_json::to_string_pretty(&genesis).unwrap() + "\n")?;
+        Ok(genesis_path)
+    })();
+    let genesis_path = match write_result {
+        Ok(p) => p,
+        Err(e) => return (500, json!({ "error": format!("could not write devnet files: {e}") })),
+    };
+
+    // Spawn 4 node processes with fresh keys.
+    let mut nodes = Vec::new();
+    for (validator, kp) in PQHS2_VALIDATORS.iter().zip(keypairs.iter()) {
+        let api_port = free_port();
+        let p2p_port = free_port();
+        let key_path = dir.join("keys").join(format!("{validator}.key.json"));
+        let log_path = dir.join("logs").join(format!("{validator}.log"));
+        let validator_addr = format!("qcb1{}", kp.public_key[..10].iter().map(|b| format!("{b:02x}")).collect::<String>());
+        let spawned = std::fs::File::create(&log_path).and_then(|log| {
+            let err = log.try_clone()?;
+            Command::new(&cfg.node_bin)
+                .arg("--genesis").arg(&genesis_path)
+                .arg("--validator").arg(&validator_addr)
+                .arg("--api-port").arg(api_port.to_string())
+                .arg("--p2p-port").arg(p2p_port.to_string())
+                .arg("--key-file").arg(&key_path)
+                .arg("--data-dir").arg(dir.join(format!("data-{validator}")))
+                .arg("--expect-peers")
+                .env("RUST_LOG", "info")
+                .env("NO_COLOR", "1")
+                .stdout(log).stderr(err)
+                .kill_on_drop(true)
+                .spawn()
+        });
+        match spawned {
+            Ok(child) => nodes.push(Node { validator: validator.to_string(), api_port, p2p_port, log_path, child }),
+            Err(e) => {
+                drop(nodes);
+                return (500, json!({ "error": format!("could not start {validator}: {e}") }));
+            }
+        }
+    }
+    tracing::info!(chain_id = %chain_id, nodes = nodes.len(), dir = %dir.display(), "Qattice PQ-HotStuff-2 devnet started");
+    chains.lock().unwrap().insert(chain_id.clone(), Chain { dir, nodes });
+
+    let mut v = describe(&chain_id, chains).await.unwrap_or(json!({}));
+    v["genesis"] = genesis;
+    (200, v)
 }
 
 fn institutional_templates() -> (u16, Value) {
