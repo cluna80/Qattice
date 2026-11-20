@@ -245,7 +245,13 @@ async fn route(method: &str, path: &str, body: &str, cfg: &Config, chains: &Chai
 
 // ── Qattice PQ-HotStuff-2 devnet launcher ────────────────────────────────────
 
-const PQHS2_VALIDATORS: &[&str] = &["pqdev-alice", "pqdev-bob", "pqdev-carol", "pqdev-dave"];
+// Addresses must match genesis_accounts[0..3].address in the template.
+const PQHS2_VALIDATORS: &[(&str, &str)] = &[
+    ("pqdev-alice", "qcb1alice"),
+    ("pqdev-bob",   "qcb1bob"),
+    ("pqdev-carol", "qcb1carol"),
+    ("pqdev-dave",  "qcb1dave"),
+];
 const PQHS2_GENESIS_TEMPLATE: &str = include_str!("../../tests/devnet/genesis-4node-pqhs2.json");
 
 async fn create_qattice_devnet(body: &str, cfg: &Config, chains: &Chains) -> (u16, Value) {
@@ -273,7 +279,7 @@ async fn create_qattice_devnet(body: &str, cfg: &Config, chains: &Chains) -> (u1
     // Generate 4 fresh ML-DSA-65 keypairs.
     let scheme = MlDsaScheme;
     let mut keypairs = Vec::new();
-    for _ in PQHS2_VALIDATORS {
+    for _ in PQHS2_VALIDATORS.iter() {
         match scheme.generate_random() {
             Ok(kp) => keypairs.push(kp),
             Err(e) => return (500, json!({ "error": format!("key generation failed: {e}") })),
@@ -286,9 +292,15 @@ async fn create_qattice_devnet(body: &str, cfg: &Config, chains: &Chains) -> (u1
         Err(e) => return (500, json!({ "error": format!("genesis template parse error: {e}") })),
     };
     genesis["chain_id"] = json!(chain_id);
+    // Patch only the validator accounts (first 4 rows with role=validator).
     if let Some(accounts) = genesis["genesis_accounts"].as_array_mut() {
-        for (account, kp) in accounts.iter_mut().zip(keypairs.iter()) {
-            account["public_key"] = json!(kp.public_key_hex());
+        let mut kp_iter = keypairs.iter();
+        for account in accounts.iter_mut() {
+            if account["role"].as_str() == Some("validator") {
+                if let Some(kp) = kp_iter.next() {
+                    account["public_key"] = json!(kp.public_key_hex());
+                }
+            }
         }
     }
 
@@ -297,15 +309,15 @@ async fn create_qattice_devnet(body: &str, cfg: &Config, chains: &Chains) -> (u1
     let write_result = (|| -> std::io::Result<PathBuf> {
         std::fs::create_dir_all(dir.join("keys"))?;
         std::fs::create_dir_all(dir.join("logs"))?;
-        for (validator, kp) in PQHS2_VALIDATORS.iter().zip(keypairs.iter()) {
+        for ((label, address), kp) in PQHS2_VALIDATORS.iter().zip(keypairs.iter()) {
             let sk_hex: String = kp.private_key.iter().map(|b| format!("{b:02x}")).collect();
             let key_json = serde_json::to_string_pretty(&json!({
-                "label":       validator,
-                "scheme":      "mldsa65",
+                "address":     address,
+                "scheme":      "ml-dsa-65",
                 "public_key":  kp.public_key_hex(),
                 "private_key": sk_hex,
             })).unwrap();
-            std::fs::write(dir.join("keys").join(format!("{validator}.key.json")), key_json)?;
+            std::fs::write(dir.join("keys").join(format!("{label}.key.json")), key_json)?;
         }
         let genesis_path = dir.join("genesis.json");
         std::fs::write(&genesis_path, serde_json::to_string_pretty(&genesis).unwrap() + "\n")?;
@@ -318,22 +330,20 @@ async fn create_qattice_devnet(body: &str, cfg: &Config, chains: &Chains) -> (u1
 
     // Spawn 4 node processes with fresh keys.
     let mut nodes = Vec::new();
-    for (validator, kp) in PQHS2_VALIDATORS.iter().zip(keypairs.iter()) {
+    for ((label, address), _kp) in PQHS2_VALIDATORS.iter().zip(keypairs.iter()) {
         let api_port = free_port();
         let p2p_port = free_port();
-        let key_path = dir.join("keys").join(format!("{validator}.key.json"));
-        let log_path = dir.join("logs").join(format!("{validator}.log"));
-        let validator_addr = format!("qcb1{}", kp.public_key[..10].iter().map(|b| format!("{b:02x}")).collect::<String>());
+        let key_path = dir.join("keys").join(format!("{label}.key.json"));
+        let log_path = dir.join("logs").join(format!("{label}.log"));
         let spawned = std::fs::File::create(&log_path).and_then(|log| {
             let err = log.try_clone()?;
             Command::new(&cfg.node_bin)
                 .arg("--genesis").arg(&genesis_path)
-                .arg("--validator").arg(&validator_addr)
+                .arg("--validator").arg(address)
                 .arg("--api-port").arg(api_port.to_string())
                 .arg("--p2p-port").arg(p2p_port.to_string())
                 .arg("--key-file").arg(&key_path)
-                .arg("--data-dir").arg(dir.join(format!("data-{validator}")))
-                .arg("--expect-peers")
+                .arg("--data-dir").arg(dir.join(format!("data-{label}")))
                 .env("RUST_LOG", "info")
                 .env("NO_COLOR", "1")
                 .stdout(log).stderr(err)
@@ -341,10 +351,10 @@ async fn create_qattice_devnet(body: &str, cfg: &Config, chains: &Chains) -> (u1
                 .spawn()
         });
         match spawned {
-            Ok(child) => nodes.push(Node { validator: validator.to_string(), api_port, p2p_port, log_path, child }),
+            Ok(child) => nodes.push(Node { validator: address.to_string(), api_port, p2p_port, log_path, child }),
             Err(e) => {
                 drop(nodes);
-                return (500, json!({ "error": format!("could not start {validator}: {e}") }));
+                return (500, json!({ "error": format!("could not start {label}: {e}") }));
             }
         }
     }
