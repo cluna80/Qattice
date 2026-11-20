@@ -1,0 +1,89 @@
+name: Institutional CI
+
+# Additive CI for chain-forge-institutional.
+# Does NOT modify the existing "DIS Core CI" workflow.
+
+on:
+  push:
+    branches: [main, dev, "feature/institutional-*", "claude/*"]
+    paths:
+      - "chain-forge-institutional/**"
+      - ".github/workflows/institutional-ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "chain-forge-institutional/**"
+      - ".github/workflows/institutional-ci.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  build-and-test:
+    name: Build & Test (chain-forge-institutional)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-institutional-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Check formatting
+        run: cargo fmt --package chain-forge-institutional -- --check
+
+      - name: Clippy
+        run: cargo clippy --package chain-forge-institutional --all-targets -- -D warnings
+
+      - name: Compile-check (no-run)
+        run: cargo test --package chain-forge-institutional --no-run
+
+      - name: Run unit tests
+        run: cargo test --package chain-forge-institutional -- --nocapture
+
+      - name: Build CLI binary
+        run: cargo build --package chain-forge-institutional --bin chain-forge-institutional-cli
+
+      - name: Smoke-test CLI (healthcare, 4 validators)
+        run: |
+          ./target/debug/chain-forge-institutional-cli create \
+            --template healthcare \
+            --name test-chain \
+            --validators 4 \
+            --timestamp 0 \
+            --out-dir /tmp/ci-smoke-test
+          test -f /tmp/ci-smoke-test/genesis.json
+          test -f /tmp/ci-smoke-test/validator-enrollment.json
+          test -f /tmp/ci-smoke-test/deployment-manifest.json
+          test -f /tmp/ci-smoke-test/validation-report.json
+
+      - name: Verify genesis hash is deterministic
+        run: |
+          ./target/debug/chain-forge-institutional-cli create \
+            --template enterprise \
+            --name hash-check \
+            --validators 7 \
+            --timestamp 1000000 \
+            --out-dir /tmp/ci-hash-a
+          ./target/debug/chain-forge-institutional-cli create \
+            --template enterprise \
+            --name hash-check \
+            --validators 7 \
+            --timestamp 1000000 \
+            --out-dir /tmp/ci-hash-b
+          HASH_A=$(cat /tmp/ci-hash-a/deployment-manifest.json | python3 -c "import sys,json; print(json.load(sys.stdin)['genesis_hash'])")
+          HASH_B=$(cat /tmp/ci-hash-b/deployment-manifest.json | python3 -c "import sys,json; print(json.load(sys.stdin)['genesis_hash'])")
+          echo "Hash A: $HASH_A"
+          echo "Hash B: $HASH_B"
+          test "$HASH_A" = "$HASH_B" || (echo "FAIL: genesis hash is not deterministic" && exit 1)

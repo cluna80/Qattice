@@ -24,6 +24,7 @@ pub mod genesis;
 pub mod validator;
 pub mod domain;
 pub mod quorum;
+pub mod identity;
 
 pub use error::{InstError, InstResult};
 pub use templates::{
@@ -35,6 +36,12 @@ pub use genesis::{GenesisBuilder, GenesisArtifact, GenesisCommitment, ValidatorC
 pub use validator::{ValidatorPublicKey, ValidatorKeyType, ML_DSA_65_PUBLIC_KEY_BYTES, ED25519_PUBLIC_KEY_BYTES};
 pub use domain::TransactionDomain;
 pub use quorum::{bft_quorum, BftParams};
+pub use identity::{
+    OrganizationId, HumanId, DeviceId, AgentId,
+    RoleCredential, CredentialVerifier,
+    KeyRegistry, KeyAuditEntry, KeyOperation,
+    IdentityRegistry, OrgEntry, OrgStatus,
+};
 
 // ── Template identity ─────────────────────────────────────────────────────────
 
