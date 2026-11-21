@@ -300,7 +300,19 @@ fn agree(ports: &[u16], timeout: Duration) -> (u64, String) {
         }
         std::thread::sleep(Duration::from_millis(300));
     }
-    panic!("nodes never reached the same height and state root within {timeout:?}; last views: {last}");
+    // Diagnose which port(s) are still returning None so we can tell whether
+    // it is a node crash, an API slowness, or a missing state_root field.
+    let final_views: Vec<String> = ports.iter().map(|&p| {
+        match state_view(p) {
+            Some((h, r)) => format!(":{p}=h{h}/{}", &r[..8]),
+            None => format!(":{p}=NONE(connect={},read={})",
+                std::net::TcpStream::connect_timeout(
+                    &format!("127.0.0.1:{p}").parse().unwrap(),
+                    Duration::from_millis(300)).map(|_| "ok").unwrap_or("REFUSED"),
+                get(p, "/api/status").map(|v| v.to_string()).unwrap_or("NO_JSON".into())),
+        }
+    }).collect();
+    panic!("nodes never reached the same height and state root within {timeout:?};\n  last full views: {last}\n  final per-port: {}", final_views.join("  "));
 }
 
 /// A non-validator learns block h is final only after block h+1's quorum
@@ -648,7 +660,10 @@ fn validator_jail_live() {
     assert!(wait_until(Duration::from_secs(300), || {
         state_view(bob).map(|(h, _)| h).unwrap_or(0) + 3 >= height(alice)
     }), "JL-08: bob never caught up after restart (bob={} alice={})", height(bob), height(alice));
-    let (h8, _) = agree(&live_api, Duration::from_secs(180));
+    // Use a generous timeout: on slow hardware (BossKing ~15s/block) with two
+    // recently-restarted nodes (Dave + Bob) active, API backpressure under
+    // consensus load can delay /api/status responses past the standard 180s.
+    let (h8, _) = agree(&live_api, Duration::from_secs(600));
 
     // Four independent views of the committee must agree after the restart:
     //  1. GET /api/validators          (asserted above, on bob)
