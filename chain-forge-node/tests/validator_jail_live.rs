@@ -508,6 +508,10 @@ fn validator_jail_live() {
     say(format!("✓ JL-07: Dave's bond is still {dave_bond} uqcb (jailed, not slashed)"));
 
     // ── Bring Dave back, healthy: he must replay the chain and stay out ──────
+    // Dave was killed mid-run; his snapshot CURRENT pointer may be corrupt.
+    // Wipe snapshots/ so he starts from genesis and syncs from peers — this
+    // is the correct behaviour for a jailed validator coming back online.
+    let _ = std::fs::remove_dir_all(tmp.join("data-dave").join("snapshots"));
     nodes[3] = Some(spawn(&specs[3], &tmp));
     assert!(api_listening(&tmp, DAVE, dave, Duration::from_secs(30)), "Dave did not restart\n{}", tail_log(&tmp, DAVE, 40));
     assert!(wait_until(Duration::from_secs(240), || height(dave) + 3 >= height(alice)),
