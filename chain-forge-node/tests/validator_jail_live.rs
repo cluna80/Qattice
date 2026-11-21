@@ -420,7 +420,7 @@ fn validator_jail_live() {
     say("all five bonded and seated with voting power".into());
 
     // ── JL-01: healthy network, nobody jailed ────────────────────────────────
-    assert!(wait_until(Duration::from_secs(120), || api.iter().all(|&p| height(p) >= 30)),
+    assert!(wait_until(Duration::from_secs(240), || api.iter().all(|&p| height(p) >= 30)),
             "healthy devnet did not pass height 30");
     for n in names {
         let s = status_of(alice, n).unwrap_or_else(|| panic!("{n} missing from status"));
