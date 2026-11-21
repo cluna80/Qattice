@@ -28,7 +28,7 @@
             "grace_window_blocks": 25
         },
         "bft_variant": "pq-hotstuff",
-        "chain_store_keep_blocks": 200
+        "chain_store_keep_blocks": 60
     },
     "execution": {
         "state_model": "account",
@@ -50,13 +50,13 @@
         "rpc_port": 27001,
         "bootstrap_nodes": [],
         "peer_discovery": "bootstrap",
-        "max_peers": 10
+        "max_peers": 5
     },
     "limits": {
         "max_block_bytes": 1048576,
         "max_tx_bytes": 262144,
         "block_gas_limit": 10000000,
-        "mempool_size": 200,
+        "mempool_size": 50,
         "mempool_ttl_seconds": 120
     },
     "modules": [
