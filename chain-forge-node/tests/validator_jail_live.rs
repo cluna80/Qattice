@@ -507,24 +507,26 @@ fn validator_jail_live() {
     }
     say(format!("✓ JL-07: Dave's bond is still {dave_bond} uqcb (jailed, not slashed)"));
 
-    // ── Bring Dave back, healthy: he must replay the chain and stay out ──────
-    // Dave was killed mid-run; his snapshot CURRENT pointer may be corrupt.
-    // Wipe snapshots/ so he starts from genesis and syncs from peers — this
-    // is the correct behaviour for a jailed validator coming back online.
-    // Neutralise any corrupt snapshot state without discarding Dave's chain
-    // store.  remove_dir_all(snapshots/) is unreliable on Windows — it can
-    // remove gen-* dirs while leaving CURRENT behind, triggering the
-    // fail-closed "CURRENT points to missing dir" guard.  A directory rename
-    // is atomic and succeeds even when individual files are briefly locked.
-    // Without a snapshots/ dir the node replays from its chain store
-    // (blocks 0..~29) then syncs the remaining gap from live peers.
+    // ── Bring Dave back: he must replay the chain and stay jailed ────────────
+    // The fail-closed snapshot guard (H0-3) has two trip conditions:
+    //   A) CURRENT absent but gen-* dirs exist → refuses to start
+    //   B) CURRENT present but the gen-* dir it names is gone → refuses to start
+    // Dave's CURRENT lives at data-dave/CURRENT (top level); gen dirs live at
+    // data-dave/snapshots/gen-*/  An abrupt kill can leave CURRENT pointing to
+    // a gen dir that was deleted during snapshot rotation, hitting condition B.
+    // Fix: delete CURRENT first (reliably removes the top-level file), then
+    // rename snapshots/ so no gen dirs are visible either.  With neither
+    // present the node replays from its chain store (blocks 0..~29) and syncs
+    // the remaining gap from live peers.
     {
-        let dave_snap = tmp.join("data-dave").join("snapshots");
+        let dave_data = tmp.join("data-dave");
+        // Step 1: remove the top-level CURRENT pointer.
+        let _ = std::fs::remove_file(dave_data.join("CURRENT"));
+        // Step 2: hide gen dirs by renaming snapshots/ atomically.
+        let dave_snap = dave_data.join("snapshots");
         if dave_snap.exists() {
-            let dead = tmp.join("data-dave").join("snapshots.dead");
+            let dead = dave_data.join("snapshots.dead");
             if std::fs::rename(&dave_snap, &dead).is_err() {
-                // Rename failed; fall back to file-by-file removal.
-                let _ = std::fs::remove_file(dave_snap.join("CURRENT"));
                 if let Ok(rd) = std::fs::read_dir(&dave_snap) {
                     for e in rd.flatten() { let _ = std::fs::remove_dir_all(e.path()); }
                 }
