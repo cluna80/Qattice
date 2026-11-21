@@ -16026,7 +16026,7 @@ mod tests {
             reg.register(RegistrationRequest {
                 id:               ValidatorId(id.into()),
                 moniker:          id.into(),
-                keys:             KeyBundle::new_ed25519(&format!("pk_{id}"), addr),
+                keys:             KeyBundle::new_mldsa(&format!("pk_{id}"), addr),
                 commission:       Commission::new(500, 2000).unwrap(),
                 bonded_uqcb:      ENTRY_STAKE_UQCB,
                 website:          None,
@@ -16049,7 +16049,7 @@ mod tests {
             reg2.register(RegistrationRequest {
                 id:               ValidatorId(id.into()),
                 moniker:          id.into(),
-                keys:             KeyBundle::new_ed25519(&format!("pk_{id}"), addr),
+                keys:             KeyBundle::new_mldsa(&format!("pk_{id}"), addr),
                 commission:       Commission::new(500, 2000).unwrap(),
                 bonded_uqcb:      ENTRY_STAKE_UQCB,
                 website:          None,
@@ -16287,7 +16287,7 @@ mod tests {
                 reg.register(RegistrationRequest {
                     id:               ValidatorId(id.into()),
                     moniker:          id.into(),
-                    keys:             KeyBundle::new_ed25519(&format!("pk_{id}"), addr),
+                    keys:             KeyBundle::new_mldsa(&format!("pk_{id}"), addr),
                     commission:       Commission::new(500, 2000).unwrap(),
                     bonded_uqcb:      ENTRY_STAKE_UQCB,
                     website:          None,

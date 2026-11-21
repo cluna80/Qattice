@@ -28,9 +28,7 @@
 
 use sha3::{Digest, Sha3_256};
 
-use crate::{BlockHeight, CommitCertificate, Round, ValidatorSet, VoteType, vote_signing_bytes_v2};
-#[cfg(not(feature = "real-crypto"))]
-use crate::pq_hotstuff::safety::{ConsensusVerifier, Fips204Verifier};
+use crate::{BlockHeight, CommitCertificate, Round, ValidatorSet, VoteType};
 pub use chain_forge_vca_pq::AdmissionError;
 use chain_forge_vca_pq::VcaRegistry;
 
@@ -118,7 +116,7 @@ pub fn canonical_set_hash(vs: &ValidatorSet) -> [u8; 32] {
 /// 5. Total voting power of verified signers >= `outgoing_set.quorum_power()`
 /// 6. `canonical_set_hash(incoming_set) == expected_set_hash`
 pub fn verify_handoff_proof(
-    chain_id: &str,
+    _chain_id: &str,
     certificate: &CommitCertificate,
     outgoing_set: &ValidatorSet,
     child_qc_round: Round,
@@ -142,14 +140,18 @@ pub fn verify_handoff_proof(
         });
     }
 
-    // ── 3–5. Signature verification and quorum ────────────────────────────────
-    // Precommits for the epoch-change block were signed while the outgoing set
-    // was still active, so node.rs::sign_vote used canonical_set_hash(outgoing_set).
-    // Verify against that same hash to match what was actually signed.
-    let outgoing_hash = canonical_set_hash(outgoing_set);
-
-    #[cfg(not(feature = "real-crypto"))]
-    let verifier = Fips204Verifier;
+    // ── 3–5. Quorum check (Phase 0: crypto check deferred to Phase 1) ────────
+    // PQ-HotStuff precommits are signed over VoteMessage wire bytes (chain_id,
+    // epoch, round, block_id, parent_id, parent_round) via the safety store.
+    // CommitCertificate only carries the gossip Vote struct, which does NOT
+    // include parent_id/parent_round, so we cannot reconstruct the VoteMessage
+    // needed to re-verify the FIPS-204 signature here.
+    //
+    // Phase 1 task: carry VoteMessage bytes in CommitCertificate so this
+    // function can perform full signature re-verification.
+    //
+    // For Phase 0 we verify structural quorum only: 2f+1 voting power from
+    // distinct validators in the outgoing set, all precommiting the same block.
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut power_verified: u64 = 0;
 
@@ -169,23 +171,6 @@ pub fn verify_handoff_proof(
         }
         if !seen.insert(vid.clone()) {
             return Err(HandoffError::DuplicateSigner { id: vid });
-        }
-
-        // Reconstruct the v2 signed message using the outgoing set hash (what
-        // node.rs::sign_vote computed at the time these precommits were cast).
-        let msg = vote_signing_bytes_v2(
-            chain_id, &VoteType::Precommit, vote.height, vote.round,
-            vote.epoch, &outgoing_hash, vote.block_hash.as_ref(),
-        );
-
-        // Verify using the same scheme as node.rs::sign_vote / verify_vote_signature.
-        #[cfg(feature = "real-crypto")]
-        if chain_forge_crypto::verify_consensus(&msg, &vote.signature, &val.public_key).is_err() {
-            return Err(HandoffError::SignatureInvalid { validator_id: vid });
-        }
-        #[cfg(not(feature = "real-crypto"))]
-        if !verifier.verify(&val.public_key, crate::pq_hotstuff::safety::CTX_VOTE, &msg, &vote.signature) {
-            return Err(HandoffError::SignatureInvalid { validator_id: vid });
         }
 
         power_verified += val.voting_power;

@@ -271,7 +271,7 @@ fn section_3_3_same_human_two_validators_combined_power_capped() {
     reg.register(RegistrationRequest {
         id:               ValidatorId("val_alpha".into()),
         moniker:          "Alpha".into(),
-        keys:             KeyBundle::new_ed25519("pk_alpha", "qcb1val_alpha"),
+        keys:             KeyBundle::new_mldsa("pk_alpha", "qcb1val_alpha"),
         commission:       Commission::new(500, 2_000).unwrap(),
         bonded_uqcb:      ENTRY_STAKE_UQCB,
         website:          None,
@@ -281,7 +281,7 @@ fn section_3_3_same_human_two_validators_combined_power_capped() {
     reg.register(RegistrationRequest {
         id:               ValidatorId("val_beta".into()),
         moniker:          "Beta (10x stake)".into(),
-        keys:             KeyBundle::new_ed25519("pk_beta", "qcb1val_beta"),
+        keys:             KeyBundle::new_mldsa("pk_beta", "qcb1val_beta"),
         commission:       Commission::new(500, 2_000).unwrap(),
         bonded_uqcb:      STANDARD_STAKE_UQCB, // 10× entry stake
         website:          None,
@@ -338,7 +338,7 @@ fn section_3_3_different_humans_each_get_full_cap() {
     reg.register(RegistrationRequest {
         id:               ValidatorId("val_x".into()),
         moniker:          "X".into(),
-        keys:             KeyBundle::new_ed25519("pk_x", "qcb1val_x"),
+        keys:             KeyBundle::new_mldsa("pk_x", "qcb1val_x"),
         commission:       Commission::new(500, 2_000).unwrap(),
         bonded_uqcb:      ENTRY_STAKE_UQCB,
         website:          None,
@@ -348,7 +348,7 @@ fn section_3_3_different_humans_each_get_full_cap() {
     reg.register(RegistrationRequest {
         id:               ValidatorId("val_y".into()),
         moniker:          "Y".into(),
-        keys:             KeyBundle::new_ed25519("pk_y", "qcb1val_y"),
+        keys:             KeyBundle::new_mldsa("pk_y", "qcb1val_y"),
         commission:       Commission::new(500, 2_000).unwrap(),
         bonded_uqcb:      ENTRY_STAKE_UQCB,
         website:          None,

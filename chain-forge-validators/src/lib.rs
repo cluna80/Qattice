@@ -204,6 +204,15 @@ impl KeyBundle {
         }
     }
 
+    pub fn new_mldsa(mldsa_pubkey: &str, account_address: &str) -> Self {
+        Self {
+            consensus_pubkey: mldsa_pubkey.to_string(),
+            account_address:  account_address.to_string(),
+            pqc_pubkey:       Some(mldsa_pubkey.to_string()),
+            scheme:           "MlDsa65".to_string(),
+        }
+    }
+
     pub fn new_hybrid(
         consensus_pubkey: &str,
         account_address:  &str,
