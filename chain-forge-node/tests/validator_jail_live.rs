@@ -45,7 +45,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chain_forge_crypto::{ClassicalScheme, SignatureScheme};
+use chain_forge_crypto::{MlDsaScheme, SchemeId, SignatureScheme, mldsa_tx_prehash};
 use chain_forge_execution::{Transaction, TxBody};
 
 const CHAIN_ID:      &str = "qcb-devnet-val-jail";
@@ -329,22 +329,46 @@ fn api_listening(log_dir: &PathBuf, name: &str, port: u16, timeout: Duration) ->
 
 // ── Tx builders ───────────────────────────────────────────────────────────────
 
+fn load_mldsa_keypair(label: &str) -> chain_forge_crypto::KeyPair {
+    let path = key_file(label);
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read key file {path:?}: {e}"));
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let from_hex = |field: &str| -> Vec<u8> {
+        let hex = v[field].as_str().unwrap_or_else(|| panic!("{field} missing in {path:?}"));
+        (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i+2], 16).unwrap()).collect()
+    };
+    chain_forge_crypto::KeyPair {
+        scheme:      SchemeId::MlDsa,
+        public_key:  from_hex("public_key"),
+        private_key: from_hex("private_key"),
+    }
+}
+
+fn sign_mldsa(tx: &mut Transaction, label: &str) {
+    let kp = load_mldsa_keypair(label);
+    let body_json = serde_json::to_string(&tx.body).unwrap();
+    let sig = MlDsaScheme.sign(&mldsa_tx_prehash(CHAIN_ID, body_json.as_bytes()), &kp).unwrap();
+    let sig_hex: String = sig.bytes.iter().map(|b| format!("{b:02x}")).collect();
+    tx.pq_signatures = vec![format!("mldsa65:{sig_hex}")];
+    tx.sig_scheme    = Some(SchemeId::MlDsa);
+    tx.pq_public_key = kp.public_key.clone();
+}
+
 fn bond_tx(sender: &str, nonce_val: u64, amount: u64) -> Transaction {
-    let kp = ClassicalScheme.generate_keypair(sender).unwrap();
     let mut tx = Transaction::bond_validator(
         &format!("bond-{sender}-{nonce_val}"), sender, amount as u128, nonce_val);
     if let TxBody::BondValidator { ref mut owner_identity_id, .. } = tx.body {
         *owner_identity_id = Some(sender.to_string());
     }
-    tx.sign(&kp, CHAIN_ID).unwrap();
+    sign_mldsa(&mut tx, sender.trim_start_matches("qcb1"));
     tx
 }
 
 fn transfer_tx(sender: &str, to: &str, nonce_val: u64) -> Transaction {
-    let kp = ClassicalScheme.generate_keypair(sender).unwrap();
     let mut tx = Transaction::transfer(
         &format!("xfer-{sender}-{nonce_val}"), sender, to, "uqcb", 1_000, nonce_val);
-    tx.sign(&kp, CHAIN_ID).unwrap();
+    sign_mldsa(&mut tx, sender.trim_start_matches("qcb1"));
     tx
 }
 

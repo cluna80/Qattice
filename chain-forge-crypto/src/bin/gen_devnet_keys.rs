@@ -22,6 +22,7 @@ fn main() {
         ("qcb1bob",   "bob"),
         ("qcb1carol", "carol"),
         ("qcb1dave",  "dave"),
+        ("qcb1eve",   "eve"),
     ];
 
     // Output directory relative to the repo root
