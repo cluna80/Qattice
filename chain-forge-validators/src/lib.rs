@@ -27,6 +27,22 @@ use serde::{Deserialize, Serialize};
 use chain_forge_consensus::{ValidatorId, ValidatorInfo, ValidatorSet, PersonhoodConfig};
 use chain_forge_identity::VerificationTier;
 
+/// Minimum committee size that preserves f ≥ 1 Byzantine fault tolerance.
+///
+/// BFT safety requires n ≥ 3f+1. With f_min = 1, n_min = 4.
+/// A committee of 3 would leave f = 0 (no fault tolerance at all).
+/// Pass 4 jail enforcement must not remove validators if doing so would
+/// leave fewer than this many seats in the active set.
+pub const MIN_BFT_COMMITTEE_SIZE: usize = 4;
+
+/// Returns `true` if removing `jailed_count` validators from a committee of
+/// `current_committee_size` still leaves a BFT-safe set (n ≥ MIN_BFT_COMMITTEE_SIZE).
+///
+/// Returns `false` (enforcement must be deferred) when it would not.
+pub fn quorum_protection_allows_jail(current_committee_size: usize, jailed_count: usize) -> bool {
+    current_committee_size.saturating_sub(jailed_count) >= MIN_BFT_COMMITTEE_SIZE
+}
+
 // -- Error --------------------------------------------------------------------
 
 #[derive(Debug, thiserror::Error)]
@@ -1376,6 +1392,44 @@ mod tests {
 
     fn registry() -> ValidatorRegistry {
         ValidatorRegistry::qcb_devnet()
+    }
+
+    // ── QP-1 through QP-5: quorum_protection_allows_jail ─────────────────────
+
+    #[test]
+    fn qp1_four_node_one_jailed_allowed() {
+        // 4 seats, 1 jailed → 3 remaining = MIN_BFT_COMMITTEE_SIZE - 1 ... wait:
+        // 4 - 1 = 3 < 4, so this should be DENIED.
+        assert!(!quorum_protection_allows_jail(4, 1),
+            "QP-1: removing 1 from 4 drops to 3 < MIN (4), must defer");
+    }
+
+    #[test]
+    fn qp2_five_node_one_jailed_allowed() {
+        // 5 seats, 1 jailed → 4 remaining = MIN_BFT_COMMITTEE_SIZE, allowed.
+        assert!(quorum_protection_allows_jail(5, 1),
+            "QP-2: removing 1 from 5 leaves 4 = MIN (4), allowed");
+    }
+
+    #[test]
+    fn qp3_seven_node_three_jailed_allowed() {
+        // 7 seats, 3 jailed → 4 remaining, allowed.
+        assert!(quorum_protection_allows_jail(7, 3),
+            "QP-3: removing 3 from 7 leaves 4 = MIN, allowed");
+    }
+
+    #[test]
+    fn qp4_seven_node_four_jailed_denied() {
+        // 7 seats, 4 jailed → 3 remaining < MIN, denied.
+        assert!(!quorum_protection_allows_jail(7, 4),
+            "QP-4: removing 4 from 7 drops to 3 < MIN, must defer");
+    }
+
+    #[test]
+    fn qp5_all_jailed_denied() {
+        // All jailed → 0 remaining, denied.
+        assert!(!quorum_protection_allows_jail(4, 4),
+            "QP-5: removing all from 4 leaves 0 < MIN, must defer");
     }
 
     fn req(id: &str, addr: &str, stake: u128) -> RegistrationRequest {

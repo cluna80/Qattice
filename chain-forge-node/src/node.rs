@@ -5205,9 +5205,16 @@ impl Node {
                     .map(|v| v.id.0.clone())
                     .collect();
                 if !jailed.is_empty() {
-                    if jailed.len() == updated_vs.validators.len() {
-                        warn!(jailed = jailed.len(),
-                              "epoch boundary: jail enforcement deferred -- it would empty the validator set");
+                    let current_size = updated_vs.validators.len();
+                    if !chain_forge_validators::quorum_protection_allows_jail(current_size, jailed.len()) {
+                        warn!(
+                            jailed       = jailed.len(),
+                            current_size = current_size,
+                            min_safe     = chain_forge_validators::MIN_BFT_COMMITTEE_SIZE,
+                            "epoch boundary: jail enforcement deferred -- \
+                             removing jailed validators would drop committee below \
+                             MIN_BFT_COMMITTEE_SIZE ({} seats)", chain_forge_validators::MIN_BFT_COMMITTEE_SIZE
+                        );
                     } else {
                         for addr in &jailed {
                             info!(validator = %addr,

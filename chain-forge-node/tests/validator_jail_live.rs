@@ -24,9 +24,10 @@
 //! its threshold is right. Automatic suspension stays off for production
 //! genesis files until that is resolved.
 //!
-//! Removing Dave leaves a 3-validator committee (f = 0): it needs all three.
-//! JL-08 restarts one of them, which halts the chain until it returns; the test
-//! records that and does not assert on it.
+//! Removing Dave leaves a 4-validator committee (f = 1): Eve is a 5th genesis
+//! validator so the quorum-protection rule (MIN_BFT_COMMITTEE_SIZE = 4) allows
+//! the eviction. JL-08 restarts one live node; the remaining 3 of 4 (2f+1=3)
+//! can still finalize blocks.
 //!
 //! Runtime: roughly 8-10 minutes (the genesis minimum liveness window is 100
 //! blocks at 2 s/block, then a 10-epoch jail at 5 blocks/epoch).
@@ -52,7 +53,8 @@ const DAVE:          &str = "qcb1dave";
 const EPOCH_BLOCKS:  u64  = 5;
 const JAIL_EPOCHS:   u64  = 10;
 const GENESIS_BOND:  u64  = 490_000_000;
-const LIVE_NODES:    [&str; 3] = ["qcb1alice", "qcb1bob", "qcb1carol"];
+/// The four validators that remain after Dave is jailed (quorum-protection keeps f=1).
+const LIVE_NODES:    [&str; 4] = ["qcb1alice", "qcb1bob", "qcb1carol", "qcb1eve"];
 
 // ── Paths and processes ───────────────────────────────────────────────────────
 
@@ -86,7 +88,7 @@ fn genesis_path() -> PathBuf {
 }
 
 fn key_file(label: &str) -> PathBuf {
-    repo_root().join("tests").join("devnet").join("keys").join(format!("{label}.key.json"))
+    repo_root().join("tests").join("devnet").join("keys").join("mldsa").join(format!("{label}.key.json"))
 }
 
 struct NodeHandle { proc: Child }
@@ -358,15 +360,15 @@ fn validator_jail_live() {
     let t0 = Instant::now();
     let say = |m: String| println!("[{:>4}s] {m}", t0.elapsed().as_secs());
 
-    let ports: Vec<(u16, u16)> = (0..4).map(|_| (free_port(), free_port())).collect();
-    let names = ["qcb1alice", "qcb1bob", "qcb1carol", "qcb1dave"];
-    let specs: Vec<Spec> = (0..4).map(|i| Spec {
+    let ports: Vec<(u16, u16)> = (0..5).map(|_| (free_port(), free_port())).collect();
+    let names = ["qcb1alice", "qcb1bob", "qcb1carol", "qcb1dave", "qcb1eve"];
+    let specs: Vec<Spec> = (0..5).map(|i| Spec {
         name: names[i], api: ports[i].0, p2p: ports[i].1,
-        peers: (0..4).filter(|&j| j != i).map(|j| ports[j].1).collect(),
+        peers: (0..5).filter(|&j| j != i).map(|j| ports[j].1).collect(),
     }).collect();
     let api: Vec<u16> = specs.iter().map(|s| s.api).collect();
-    let (alice, bob, carol, dave) = (api[0], api[1], api[2], api[3]);
-    let live_api = [alice, bob, carol];
+    let (alice, bob, carol, dave, eve) = (api[0], api[1], api[2], api[3], api[4]);
+    let live_api = [alice, bob, carol, eve];
 
     let tmp = std::env::temp_dir().join(format!("qcb-val-jail-{alice}"));
     std::fs::create_dir_all(&tmp).unwrap();
@@ -383,7 +385,7 @@ fn validator_jail_live() {
             "devnet did not reach height 3");
     say(format!("devnet up at height {}", height(alice)));
 
-    // ── Bond all four so jailing has a real bond to leave untouched ──────────
+    // ── Bond all five so jailing has a real bond to leave untouched ──────────
     for (i, n) in names.iter().enumerate() {
         let r = submit_and_wait(api[i], &bond_tx(n, nonce(api[i], n), GENESIS_BOND), Duration::from_secs(30));
         assert!(r["success"].as_bool().unwrap_or(false), "bond for {n} failed: {r}");
@@ -391,7 +393,7 @@ fn validator_jail_live() {
     let h = height(alice);
     assert!(wait_until(Duration::from_secs(60), || height(alice) >= h + EPOCH_BLOCKS + 1), "no epoch after bonds");
     for n in names { assert!(voting_power(alice, n) > 0, "{n} has no voting power after bond"); }
-    say("all four bonded and seated with voting power".into());
+    say("all five bonded and seated with voting power".into());
 
     // ── JL-01: healthy network, nobody jailed ────────────────────────────────
     assert!(wait_until(Duration::from_secs(120), || api.iter().all(|&p| height(p) >= 30)),
@@ -400,9 +402,9 @@ fn validator_jail_live() {
         let s = status_of(alice, n).unwrap_or_else(|| panic!("{n} missing from status"));
         assert_eq!(s["status"].as_str(), Some("Active"), "JL-01: {n} not Active: {s}");
     }
-    assert_eq!(committee(alice).len(), 4, "JL-01: committee must have four seats");
+    assert_eq!(committee(alice).len(), 5, "JL-01: committee must have five seats");
     let (h_ok, root_ok) = agree(&api, Duration::from_secs(30));
-    say(format!("✓ JL-01: four validators finalizing, none jailed (height {h_ok}, root {})", &root_ok[..12]));
+    say(format!("✓ JL-01: five validators finalizing, none jailed (height {h_ok}, root {})", &root_ok[..12]));
 
     // ── Kill Dave ────────────────────────────────────────────────────────────
     let dave_bond = status_of(alice, DAVE).unwrap()["bonded_uqcb"].as_u64().unwrap();
@@ -477,21 +479,21 @@ fn validator_jail_live() {
     }
     say(format!("✓ JL-04: Dave kept his seat until the boundary at height {boundary}"));
     for p in live_api {
-        assert!(wait_until(Duration::from_secs(30), || committee(p) == ["qcb1alice", "qcb1bob", "qcb1carol"]),
+        assert!(wait_until(Duration::from_secs(30), || committee(p) == ["qcb1alice", "qcb1bob", "qcb1carol", "qcb1eve"]),
                 "JL-05: a live node still seats Dave: {:?}", committee(p));
     }
-    say("✓ JL-05: Dave removed from the committee on alice, bob and carol".into());
+    say("✓ JL-05: Dave removed from the committee on alice, bob, carol and eve (4-seat, f=1)".into());
 
     // ── JL-06: the remaining three still FINALIZE after the transition ───────
     let h_after_transition = height(alice);
     assert!(wait_until(Duration::from_secs(90), || live_api.iter().all(|&p| height(p) >= h_after_transition + 10)),
-            "JL-06: the three-validator committee stopped finalizing blocks");
+            "JL-06: the four-validator committee stopped finalizing blocks");
     let xfer = transfer_tx("qcb1carol", "qcb1eve", nonce(carol, "qcb1carol"));
     let r = submit_and_wait(carol, &xfer, Duration::from_secs(60));
     assert!(r["success"].as_bool().unwrap_or(false), "JL-06: a tx must finalize under the new committee: {r}");
     let (h6, root6) = agree(&live_api, Duration::from_secs(60));
     assert!(h6 > boundary + 5, "JL-06: agreement must be on a post-transition block (h={h6}, boundary={boundary})");
-    say(format!("✓ JL-06: three-validator committee finalizing (height {h6} > boundary {boundary}); tx landed; root {}", &root6[..12]));
+    say(format!("✓ JL-06: four-validator committee finalizing (height {h6} > boundary {boundary}); tx landed; root {}", &root6[..12]));
 
     // ── JL-07: bond untouched ────────────────────────────────────────────────
     for p in live_api {
@@ -516,8 +518,8 @@ fn validator_jail_live() {
     let h_down = height(alice);
     std::thread::sleep(Duration::from_secs(8));
     let advanced_without_bob = height(alice) > h_down + 1;
-    say(format!("  bob down: chain {} (3-validator committee needs all three)",
-        if advanced_without_bob { "STILL ADVANCED" } else { "halted, as expected for f=0" }));
+    say(format!("  bob down: chain {} (4-validator committee, f=1; 3 survivors = 2f+1 → quorum holds)",
+        if advanced_without_bob { "STILL ADVANCED (expected)" } else { "halted (unexpected for f=1)" }));
     nodes[1] = Some(spawn(&specs[1], &tmp));
     assert!(api_listening(&tmp, "qcb1bob", bob, Duration::from_secs(30)), "bob did not restart\n{}", tail_log(&tmp, "qcb1bob", 40));
     assert!(wait_until(Duration::from_secs(60), || is_jailed(bob, DAVE)),
@@ -526,7 +528,7 @@ fn validator_jail_live() {
     for k in ["jailed_epoch", "unjail_after", "jail_count", "bonded_uqcb"] {
         assert_eq!(before[k], after[k], "JL-08: {k} changed across restart");
     }
-    assert_eq!(committee(bob), ["qcb1alice", "qcb1bob", "qcb1carol"], "JL-08: committee changed across restart");
+    assert_eq!(committee(bob), ["qcb1alice", "qcb1bob", "qcb1carol", "qcb1eve"], "JL-08: committee changed across restart");
     assert!(wait_until(Duration::from_secs(120), || height(alice) >= h_down + 6),
             "JL-08: chain did not resume after bob returned");
     let (h8, _) = agree(&api, Duration::from_secs(90));
@@ -536,17 +538,17 @@ fn validator_jail_live() {
     //  2. the file bob persisted        (below)
     //  3. GET /api/validators/status    (Dave Jailed, asserted above)
     //  4. the consensus ENGINE itself: who it lets propose which (height, round).
-    let three = ["qcb1alice", "qcb1bob", "qcb1carol"];
+    let four = ["qcb1alice", "qcb1bob", "qcb1carol", "qcb1eve"];
     assert!(wait_until(Duration::from_secs(120), || height(alice) >= h8 + 9), "JL-08: chain stalled after resuming");
-    assert_eq!(persisted_committee(&tmp, "qcb1bob"), three, "JL-08: bob's persisted committee");
-    for &p in &api { assert_eq!(committee(p), three, "JL-08: API committee on port {p}"); }
+    assert_eq!(persisted_committee(&tmp, "qcb1bob"), four, "JL-08: bob's persisted committee");
+    for &p in &api { assert_eq!(committee(p), four, "JL-08: API committee on port {p}"); }
     let mut engine_checked = std::collections::BTreeSet::new();
     for n in LIVE_NODES {
         for (h, r) in proposals_logged(&tmp, n) {
             if h <= h_down + 1 { continue; }
-            let expected = three[((h + r as u64) % 3) as usize];
+            let expected = four[((h + r as u64) % 4) as usize];
             assert_eq!(n, expected,
-                "JL-08: {n} proposed height {h} round {r}, but a 3-seat engine assigns that to {expected} \
+                "JL-08: {n} proposed height {h} round {r}, but a 4-seat engine assigns that to {expected} \
                  (the engine still holds a different committee)");
             engine_checked.insert(h);
         }
@@ -555,7 +557,7 @@ fn validator_jail_live() {
         "JL-08: only {} post-restart proposals in the logs; cannot infer the engine's committee",
         engine_checked.len());
     say(format!("✓ JL-08: bob restarted; engine rotation ({} proposals), persisted file, /api/validators and \
-        /api/validators/status all agree on the 3-seat committee with Dave Jailed; chain resumed (height {h8})",
+        /api/validators/status all agree on the 4-seat committee with Dave Jailed; chain resumed (height {h8})",
         engine_checked.len()));
 
     // ── JL-09: expiry is not reinstatement ───────────────────────────────────
