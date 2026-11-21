@@ -493,7 +493,7 @@ impl RefusedTxLog {
 
 pub const MAX_GC_RECEIPTS: usize = 500;
 
-pub const MAX_RECENT_BLOCKS: usize = 100;
+pub const MAX_RECENT_BLOCKS: usize = 20;
 
 /// Number of committed block payloads to retain in `chain_store` after each
 /// commit.  Entries older than `committed_height - CHAIN_STORE_KEEP` are
