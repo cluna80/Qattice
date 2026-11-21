@@ -49,7 +49,7 @@
 | adversarial_gossip | ❌ FAIL (expected) | 153s — garbage-signature vote not rejected (inbound vote sigs unverified) |
 | h0_3_crash_recovery_live | ❌ FAIL (expected) | 121s — C-01: single-validator PQ-HotStuff node produces no blocks |
 | pqhs2_4node_crash_live | ❌ FAIL (expected) | TIMEOUT 1800s — CJ-2 livelock (same JL-08 root cause) |
-| pqhs2_4node_epoch_live | ❌ FAIL (expected) | 182s — epoch handoff signs/verifies different message formats |
+| pqhs2_4node_epoch_live | ✅ PASS | 50.34s — BossKing confirmed 2026-11-21 (fix/pqhs2-jl08-round-sync `5777a3f`) |
 | storage_v2_live | ❌ FAIL (expected) | 933s — 4 Tendermint-era signing-guard/crash-point tests |
 | validator_jail_live | ❌ FAIL (expected) | TIMEOUT 1800s — JL-08 round-drift livelock after restart |
 | validator_key_live | ❌ FAIL (expected) | 812s — 3/5 pass; post_genesis_validator_admission JL-08 livelock |
@@ -65,7 +65,7 @@
 **Next steps, in order:**
 1. Vote-signature milestone (fixes JL-08 and clears all expected failures except `storage_v2_live`):
    - verify inbound PQ-HotStuff vote signatures (fixes `adversarial_gossip`);
-   - unify the epoch-handoff message format (fixes `pqhs2_4node_epoch_live`);
+   - unify the epoch-handoff message format (fixes `pqhs2_4node_epoch_live`) — ✅ Phase 0 done (structural quorum, Phase 1 crypto re-verification deferred);
    - add round synchronization / timeout certificates (fixes JL-08: `validator_jail_live`, `validator_key_live`, `pqhs2_4node_crash_live`, `h0_11c_equivocation_live`).
    Then the safety review.
 2. Port node unit tests to PQ-HotStuff (~170 fail since default switch), rewrite 4 `storage_v2` tests, delete Tendermint engine (Tendermint removal, step 3).
