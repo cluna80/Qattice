@@ -4599,6 +4599,13 @@ impl Node {
         // see `historical_validator_sets`'s doc comment and
         // `verify_certificate_against_history`.
         self.historical_validator_sets.insert(cert.height, self.consensus.validator_set().clone());
+        // Prune to the same window as chain_store so this map does not grow
+        // unboundedly.  Equivocation evidence older than CHAIN_STORE_KEEP
+        // blocks cannot be verified once pruned, which is acceptable.
+        if cert.height >= CHAIN_STORE_KEEP {
+            let wm = cert.height - CHAIN_STORE_KEEP + 1;
+            self.historical_validator_sets.retain(|&h, _| h >= wm);
+        }
 
         // Deterministic, block-height-driven validator epoch -- replaces
         // the old `self.identity.advance_epoch(now_ms)` wall-clock call for
@@ -6617,6 +6624,10 @@ impl Node {
         // multi-node commit_block path (see `historical_validator_sets`'s
         // doc comment).
         self.historical_validator_sets.insert(height, self.consensus.validator_set().clone());
+        if height >= CHAIN_STORE_KEEP {
+            let wm = height - CHAIN_STORE_KEEP + 1;
+            self.historical_validator_sets.retain(|&h, _| h >= wm);
+        }
 
         // Deterministic, block-height-driven validator epoch -- same reason
         // as the multi-node commit_block path: this is the devnet
