@@ -2,7 +2,7 @@
 //!
 //! Starts four `chain-forge-node` processes against `genesis-4node-pqhs2.json`
 //! (block_time_ms=2000; no epoch change so the validator set stays fixed).
-//! Runs until all four nodes have committed at least `CHAIN_STORE_KEEP + 1`
+//! Runs until all four nodes have committed at least `chain_store_keep + 1`
 //! blocks (height >= 65), then:
 //!
 //!   1. Verifies that `/api/status` reports `chain_store_watermark >= 1` on
@@ -38,8 +38,8 @@ const P2P_PORTS: &[u16] = &[28018, 28019, 28020, 28021];
 const GENESIS_FILE: &str = "genesis-4node-pqhs2.json";
 const KEY_DIR:      &str = "keys/mldsa";
 
-/// Must match CHAIN_STORE_KEEP in node.rs; we pass height > this to trigger pruning.
-/// Set to 20 so the test completes within 240 s on the Windows devnet (~9 s/block).
+/// Must match `chain_store_keep` in genesis-4node-pqhs2.json (set to 20 so the test
+/// completes within 240 s on the Windows devnet at ~9 s/block).
 const PRUNE_THRESHOLD: u64 = 20;
 
 fn repo_root() -> PathBuf {

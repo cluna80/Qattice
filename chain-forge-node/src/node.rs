@@ -66,7 +66,7 @@ pub struct NodeStatus {
     pub local_peer_id: Option<String>,
     /// The pruning watermark: all `chain_store` entries below this height have
     /// been removed.  Zero until the first prune fires.  Exposed for tests and
-    /// observability; the actual pruning window is `CHAIN_STORE_KEEP` entries.
+    /// observability; the actual pruning window is `genesis.consensus.chain_store_keep` entries.
     pub chain_store_watermark: u64,
 }
 
@@ -495,19 +495,10 @@ pub const MAX_GC_RECEIPTS: usize = 500;
 
 pub const MAX_RECENT_BLOCKS: usize = 100;
 
-/// Number of committed block payloads to retain in `chain_store` after each
-/// commit.  Entries older than `committed_height - CHAIN_STORE_KEEP` are
-/// removed from the in-memory map (and therefore from `chain_store.json` on
-/// the next persist).  Peers that need older history must catch up from
-/// another node that still holds it, or via a future snapshot-sync mechanism.
-///
-/// 20 is enough to cover a node that is a full gossip-round behind and needs
-/// to request the most recent N blocks.  The explorer already caps at 100.
-/// (The standalone devnet used 64; 20 is used here because the two-chain
-/// PQ-HotStuff commit rule produces one block every ~9 s on the Windows
-/// devnet, so a larger window would make the pruning integration test take
-/// much longer to run.)
-pub const CHAIN_STORE_KEEP: u64 = 20;
+/// Default chain-store window when genesis does not specify `chain_store_keep`.
+/// 400 covers the validator-jail live test's ~300-block run.
+/// Test-only genesis files that exercise pruning may set a smaller value (e.g. 20).
+pub const CHAIN_STORE_KEEP_DEFAULT: u64 = 400;
 
 pub type SharedExplorer = Arc<Mutex<ExplorerState>>;
 
@@ -713,7 +704,7 @@ pub struct Node {
     round_watch_started: Option<std::time::Instant>,
     /// Recent committed blocks, kept so a peer that falls slightly behind can
     /// request and replay blocks it missed.  Bounded to the last
-    /// `CHAIN_STORE_KEEP` entries: older entries are pruned on each commit.
+    /// `genesis.consensus.chain_store_keep` entries (default 400) are pruned on each commit.
     /// Peers that need deeper history must catch up from a node that still
     /// holds it, or via a future snapshot-sync mechanism.
     chain_store: std::collections::BTreeMap<u64, (chain_forge_consensus::CommitCertificate, BlockProposal)>,
@@ -5602,8 +5593,9 @@ impl Node {
         // Insert first, then prune: a peer requesting the block we just committed
         // will always find it here even if it falls exactly at the watermark.
         self.chain_store.insert(committed_height, (cert.clone(), proposal.clone()));
-        if committed_height >= CHAIN_STORE_KEEP {
-            let new_watermark = committed_height - CHAIN_STORE_KEEP + 1;
+        let chain_store_keep = self.genesis.consensus.chain_store_keep.unwrap_or(CHAIN_STORE_KEEP_DEFAULT);
+        if committed_height >= chain_store_keep {
+            let new_watermark = committed_height - chain_store_keep + 1;
             let prev = self.status.lock().map(|s| s.chain_store_watermark).unwrap_or(0);
             if new_watermark > prev {
                 self.chain_store.retain(|&h, _| h >= new_watermark);

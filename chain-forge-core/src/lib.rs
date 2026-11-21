@@ -571,6 +571,17 @@ pub struct GenesisConsensus {
     /// `GenesisConfig::reward_params`; no runtime override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rewards: Option<GenesisRewards>,
+    /// How many committed blocks each node keeps in its in-memory chain store
+    /// for gossip-based sync.  A restarted node syncs one block at a time by
+    /// requesting blocks from peers; peers that have pruned those blocks cannot
+    /// serve them.  Must cover the longest expected gap between a validator's
+    /// snapshot height and the current tip when it restarts.
+    ///
+    /// Defaults to 400 (enough for the jail test's ~300-block run).
+    /// Set to a smaller value (e.g. 20) in test-only genesis files where you
+    /// specifically want to exercise the pruning path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_store_keep: Option<u64>,
 }
 
 /// See `GenesisConsensus::rewards`.

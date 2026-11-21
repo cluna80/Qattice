@@ -20,7 +20,8 @@
     "validator_set_size": 4,
     "block_time_ms": 2000,
     "personhood_weighted": true,
-    "bft_variant": "pq-hotstuff"
+    "bft_variant": "pq-hotstuff",
+    "chain_store_keep": 20
   },
   "execution": {
     "state_model": "account",
