@@ -511,7 +511,11 @@ fn validator_jail_live() {
     // Dave was killed mid-run; his snapshot CURRENT pointer may be corrupt.
     // Wipe snapshots/ so he starts from genesis and syncs from peers — this
     // is the correct behaviour for a jailed validator coming back online.
-    let _ = std::fs::remove_dir_all(tmp.join("data-dave").join("snapshots"));
+    // Wipe Dave's entire data directory so he boots clean from genesis and
+    // syncs from peers.  Wiping only snapshots/ is unreliable on Windows:
+    // remove_dir_all can delete gen-* subdirs while leaving CURRENT behind,
+    // which triggers the fail-closed "CURRENT points to missing dir" guard.
+    let _ = std::fs::remove_dir_all(tmp.join("data-dave"));
     nodes[3] = Some(spawn(&specs[3], &tmp));
     assert!(api_listening(&tmp, DAVE, dave, Duration::from_secs(30)), "Dave did not restart\n{}", tail_log(&tmp, DAVE, 40));
     assert!(wait_until(Duration::from_secs(240), || height(dave) + 3 >= height(alice)),
