@@ -369,6 +369,12 @@ fn validator_jail_live() {
     let live_api = [alice, bob, carol];
 
     let tmp = std::env::temp_dir().join(format!("qcb-val-jail-{alice}"));
+    // Wipe any stale chain data from a previous run on the same port so the
+    // node never sees a genesis-hash mismatch on startup.
+    for name in &["alice", "bob", "carol", "dave", "eve"] {
+        let stale = tmp.join(format!("data-{name}"));
+        if stale.exists() { let _ = std::fs::remove_dir_all(&stale); }
+    }
     std::fs::create_dir_all(&tmp).unwrap();
     println!("\n── Validator Jail (H0-11B phase 1) ─────────────────────────────────");
     println!("   chain_id={CHAIN_ID} logs={tmp:?}");
