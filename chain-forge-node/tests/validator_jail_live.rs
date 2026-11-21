@@ -641,11 +641,13 @@ fn validator_jail_live() {
     assert_eq!(committee(bob), ["qcb1alice", "qcb1bob", "qcb1carol", "qcb1eve"], "JL-08: committee changed across restart");
     assert!(wait_until(Duration::from_secs(450), || height(alice) >= h_down + 6),
             "JL-08: chain did not resume after bob returned");
-    // Wait for Bob to sync up before requiring all-node agreement.
-    // On slow hardware (BossKing ~15s/block) Bob can still be catching up
-    // when alice is already 6 blocks ahead, causing agree() to time out.
-    assert!(wait_until(Duration::from_secs(300), || height(bob) + 3 >= height(alice)),
-            "JL-08: bob never caught up after restart (bob={} alice={})", height(bob), height(alice));
+    // Wait for Bob to report a full /api/status (height + state_root) within 3
+    // blocks of alice before requiring all-node agreement. height() uses
+    // unwrap_or(0) and passes even when state_root is missing; state_view()
+    // returns None on a partial response, which is what agree() checks.
+    assert!(wait_until(Duration::from_secs(300), || {
+        state_view(bob).map(|(h, _)| h).unwrap_or(0) + 3 >= height(alice)
+    }), "JL-08: bob never caught up after restart (bob={} alice={})", height(bob), height(alice));
     let (h8, _) = agree(&live_api, Duration::from_secs(180));
 
     // Four independent views of the committee must agree after the restart:
