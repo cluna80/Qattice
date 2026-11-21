@@ -512,9 +512,12 @@ fn validator_jail_live() {
     }
     say("✓ JL-05: Dave removed from the committee on alice, bob, carol and eve (4-seat, f=1)".into());
 
-    // ── JL-06: the remaining three still FINALIZE after the transition ───────
+    // ── JL-06: the remaining four still FINALIZE after the transition ────────
+    // The epoch boundary at height 125 triggers a validator-set change (5→4).
+    // With ML-DSA-65, the first round(s) after the transition can be slow while
+    // validators reload the new committee; allow up to 180s (≈22 blocks of margin).
     let h_after_transition = height(alice);
-    assert!(wait_until(Duration::from_secs(90), || live_api.iter().all(|&p| height(p) >= h_after_transition + 10)),
+    assert!(wait_until(Duration::from_secs(180), || live_api.iter().all(|&p| height(p) >= h_after_transition + 10)),
             "JL-06: the four-validator committee stopped finalizing blocks");
     let xfer = transfer_tx("qcb1carol", "qcb1eve", nonce(carol, "qcb1carol"));
     let r = submit_and_wait(carol, &xfer, Duration::from_secs(60));
