@@ -442,7 +442,9 @@ fn validator_jail_live() {
     let mut last_print = Instant::now();
     // Window fills after 100 blocks (~800s at 8s/block on 5-node ML-DSA devnet).
     // Dave is killed at height ~30 and jailed once the window is full (height ~120).
-    let jailed_ok = wait_until(Duration::from_secs(900), || {
+    // On BossKing hardware: window fills at t≈1136s from test start, JL-03 starts
+    // at t≈185s → budget must exceed 1136-185 = 951s.  Use 1050s for margin.
+    let jailed_ok = wait_until(Duration::from_secs(1050), || {
         if let Some(s) = status_of(alice, DAVE) {
             max_missed = max_missed.max(s["liveness_missed_pct"].as_u64().unwrap_or(0) as u32);
             if last_print.elapsed() > Duration::from_secs(15) {
