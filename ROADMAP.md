@@ -4,7 +4,7 @@
 
 ## JL-08 TC nil-vote quorum confirmed — 2026-11-20
 
-✅ **Windows-confirmed** (owner-run, 2026-11-20 at `1d22d83`)
+✅ **Windows-confirmed** (owner-run, 2026-11-20 at `1d22d83` / `1fbb3e5`)
 
 **Fix:** Nil (timeout) votes were silently discarded in `receive_vote` with an early return, preventing any TC (timeout-certificate) quorum from forming when a validator exits mid-consensus (round-drift livelock).
 
@@ -15,10 +15,12 @@
 | Suite | Features | Result | Time |
 |---|---|---|---|
 | `chain-forge-consensus lib -- nil` (8 tests) | `pq-hotstuff` | 8/8 ✅ | 0.00s |
+| `pqhs2_4node_crash_live` (1 test) | `pq-hotstuff` | 1/1 ✅ | 69.0s |
 
-**Run command:**
+**Run commands:**
 ```
 cargo test -p chain-forge-consensus --features pq-hotstuff --lib -- nil --nocapture
+cargo test -p chain-forge-node --features pq-hotstuff --test pqhs2_4node_crash_live -- --nocapture
 ```
 
 **Windows confirmation (owner-run, 2026-11-20):** `feature/institutional-chain-forge` at `1d22d83` — BossKing. All 8 nil tests passed.
@@ -28,6 +30,10 @@ cargo test -p chain-forge-consensus --features pq-hotstuff --lib -- nil --nocapt
 - `nil_votes_wrong_height_are_dropped` PASS — wrong-height nil votes rejected, round stays at 1
 - `nil_votes_future_round_are_dropped` PASS — future-round nil votes dropped
 - `nil_accumulator_independent_from_precommit_accumulator` PASS — TC fires even with partial precommit accumulator present
+
+**Windows confirmation (owner-run, 2026-11-20):** `feature/institutional-chain-forge` at `1fbb3e5` — BossKing MINGW64. Crash/TC-quorum integration test passed in 69.0s.
+
+- `pqhs2_4node_crash_survivor_quorum` PASS (69.0s) — all 4 nodes reached height 3 (21.1s); Dave killed; 3 survivors reached height 6 via TC quorum (45.7s); Alice/Bob/Carol agree on `block_hash=c69ccef2...`
 
 ---
 

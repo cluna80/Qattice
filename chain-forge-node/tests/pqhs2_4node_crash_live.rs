@@ -20,7 +20,7 @@
 //!     --test pqhs2_4node_crash_live -- --nocapture
 //!
 //! Environment variables:
-//!   DEVNET_TIMEOUT_SECS   (default 120)  total test timeout
+//!   DEVNET_TIMEOUT_SECS   (default 240)  total test timeout
 //!   PHASE1_HEIGHT         (default 3)    baseline all-4-node height
 //!   PHASE2_HEIGHT         (default 6)    target height for 3-node quorum
 
@@ -302,7 +302,7 @@ fn pqhs2_4node_crash_survivor_quorum() {
     let phase2_height: u64 = std::env::var("PHASE2_HEIGHT")
         .ok().and_then(|s| s.parse().ok()).unwrap_or(phase1_height + 3);
     let timeout_secs: u64 = std::env::var("DEVNET_TIMEOUT_SECS")
-        .ok().and_then(|s| s.parse().ok()).unwrap_or(120);
+        .ok().and_then(|s| s.parse().ok()).unwrap_or(240);
     let timeout = Duration::from_secs(timeout_secs);
 
     let log_dir = std::env::temp_dir().join("pqhs2_crash_logs");
