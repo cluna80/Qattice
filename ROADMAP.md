@@ -48,7 +48,7 @@
 | vca_pq_live | ✅ PASS | 72s |
 | adversarial_gossip | ❌ FAIL (expected) | 153s — garbage-signature vote not rejected (inbound vote sigs unverified) |
 | h0_3_crash_recovery_live | ❌ FAIL (expected) | 121s — C-01: single-validator PQ-HotStuff node produces no blocks |
-| pqhs2_4node_crash_live | ❌ FAIL (expected) | TIMEOUT 1800s — CJ-2 livelock (same JL-08 root cause) |
+| pqhs2_4node_crash_live | ✅ PASS | 1101.47s — BossKing confirmed 2026-11-21 (fix/pqhs2-jl08-round-sync `3577aae`) |
 | pqhs2_4node_epoch_live | ✅ PASS | 50.34s — BossKing confirmed 2026-11-21 (fix/pqhs2-jl08-round-sync `5777a3f`) |
 | storage_v2_live | ❌ FAIL (expected) | 933s — 4 Tendermint-era signing-guard/crash-point tests |
 | validator_jail_live | ❌ FAIL (expected) | TIMEOUT 1800s — JL-08 round-drift livelock after restart |
