@@ -24,7 +24,8 @@
       "window_blocks": 100,
       "max_missed_pct": 20,
       "start_height": 20
-    }
+    },
+    "chain_store_keep_blocks": 200
   },
   "execution": {
     "state_model": "account",

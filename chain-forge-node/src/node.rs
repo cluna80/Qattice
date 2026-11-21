@@ -509,6 +509,9 @@ pub const MAX_RECENT_BLOCKS: usize = 100;
 /// much longer to run.)
 pub const CHAIN_STORE_KEEP: u64 = 20;
 
+/// Committed blocks a peer sends in answer to one sync request.
+pub const SYNC_BATCH_BLOCKS: u64 = 16;
+
 pub type SharedExplorer = Arc<Mutex<ExplorerState>>;
 
 // -- QRC metrics (shared with the API, Section 9.1 / 5.4) -------------------
@@ -3639,13 +3642,20 @@ impl Node {
                         // height -- most nodes won't, and that's fine, since
                         // this is broadcast gossip rather than point-to-point:
                         // whichever peers DO have it will each answer.
-                        if let Some((cert, proposal)) = self.chain_store.get(&req.from_height) {
-                            debug!(height = req.from_height, "answering sync request");
-                            let resp = SyncResponseMsg {
-                                height:   req.from_height,
+                        // Send a run of consecutive blocks, so a node far behind
+                        // advances many heights per round trip, not one.
+                        let batch: Vec<SyncResponseMsg> = self.chain_store
+                            .range(req.from_height..req.from_height.saturating_add(SYNC_BATCH_BLOCKS))
+                            .map(|(h, (cert, proposal))| SyncResponseMsg {
+                                height:   *h,
                                 cert:     cert.clone(),
                                 proposal: proposal.clone(),
-                            };
+                            })
+                            .collect();
+                        if !batch.is_empty() {
+                            debug!(height = req.from_height, blocks = batch.len(), "answering sync request");
+                        }
+                        for resp in batch {
                             let _ = self.network.publish(OutboundMessage {
                                 topic:   GossipTopic::SyncResponse,
                                 payload: serde_json::to_vec(&resp).unwrap_or_default(),
@@ -3695,8 +3705,10 @@ impl Node {
                         // here. Immediately ask for the next height too, so a
                         // node that's many blocks behind catches up one gossip
                         // round-trip at a time rather than waiting for the next
-                        // organic proposal/vote to reveal the next gap.
-                        self.request_sync().await;
+                        // organic proposal/vote to reveal the next gap. Rate-limited:
+                        // each request is answered with a batch, so asking after
+                        // every replayed block would multiply the traffic.
+                        self.request_sync_limited().await;
                     }
 
                     // ── Change Set R: ingest gossiped DiscoveryReceipts ───────
@@ -5609,8 +5621,9 @@ impl Node {
         // Insert first, then prune: a peer requesting the block we just committed
         // will always find it here even if it falls exactly at the watermark.
         self.chain_store.insert(committed_height, (cert.clone(), proposal.clone()));
-        if committed_height >= CHAIN_STORE_KEEP {
-            let new_watermark = committed_height - CHAIN_STORE_KEEP + 1;
+        let keep = self.genesis.consensus.chain_store_keep_blocks.unwrap_or(CHAIN_STORE_KEEP);
+        if committed_height >= keep {
+            let new_watermark = committed_height - keep + 1;
             let prev = self.status.lock().map(|s| s.chain_store_watermark).unwrap_or(0);
             if new_watermark > prev {
                 self.chain_store.retain(|&h, _| h >= new_watermark);

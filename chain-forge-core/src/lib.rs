@@ -566,6 +566,13 @@ pub struct GenesisConsensus {
     /// every node derives the same values and there is no runtime override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liveness: Option<GenesisLiveness>,
+    /// Number of committed blocks each node retains in its `chain_store` for
+    /// peer catch-up sync.  When a restarting node is behind by more than this
+    /// many blocks no peer can serve the missing history and sync stalls.
+    /// Omitted means the node default (20).  Set higher on devnets where
+    /// validators may fall significantly behind (e.g. jailing tests).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_store_keep_blocks: Option<u64>,
     /// Epoch-reward eligibility policy, measured separately from liveness.
     /// Omitted means the engine defaults. Resolved and validated by
     /// `GenesisConfig::reward_params`; no runtime override.
